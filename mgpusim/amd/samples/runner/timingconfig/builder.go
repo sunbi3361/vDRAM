@@ -34,6 +34,129 @@ type Builder struct {
 	platform          *sim.Domain
 	globalStorage     *mem.Storage
 	rdmaAddressMapper *mem.BankedAddressPortMapper
+	cpuPageTable      vm.PageTable   // sbin_codex: authoritative CPU-side page table.
+	gpuPageTables     []vm.PageTable // sbin_codex: one isolated page table per GPU GMMU.
+}
+
+// splitPageTable is the driver-facing page-table view. The v4 driver accepts
+// one page table, so this view mirrors allocator mutations into the separate
+// CPU and GPU tables without changing code outside runner. // sbin_codex
+type splitPageTable struct {
+	cpu  vm.PageTable
+	gpus []vm.PageTable
+}
+
+// Insert adds a page to the CPU table and every GPU table that can access it.
+// Unified pages are visible to every GPU; private pages are visible only to
+// their owning GPU. // sbin_codex
+func (pt *splitPageTable) Insert(page vm.Page) {
+	pt.cpu.Insert(page)
+	for gpuIndex, gpuPageTable := range pt.gpus {
+		if pt.pageBelongsToGPU(page, gpuIndex) {
+			gpuPageTable.Insert(page)
+		}
+	}
+}
+
+// Remove removes a page from the CPU table and from the GPU tables that held
+// the previous mapping. // sbin_codex
+func (pt *splitPageTable) Remove(pid vm.PID, vAddr uint64) {
+	page, found := pt.cpu.Find(pid, vAddr)
+	if !found {
+		pt.cpu.Remove(pid, vAddr)
+		return
+	}
+
+	pt.cpu.Remove(pid, vAddr)
+	for gpuIndex, gpuPageTable := range pt.gpus {
+		if pt.pageBelongsToGPU(page, gpuIndex) {
+			gpuPageTable.Remove(pid, page.VAddr)
+		}
+	}
+}
+
+// Find reads the authoritative CPU-side mapping. // sbin_codex
+func (pt *splitPageTable) Find(pid vm.PID, addr uint64) (vm.Page, bool) {
+	return pt.cpu.Find(pid, addr)
+}
+
+// Update keeps membership correct when migration changes a page's owner.
+// Existing memberships are updated, departed memberships are removed, and
+// newly reachable GPU tables receive an insert. // sbin_codex
+func (pt *splitPageTable) Update(page vm.Page) {
+	oldPage, found := pt.cpu.Find(page.PID, page.VAddr)
+	if !found {
+		pt.cpu.Update(page)
+		return
+	}
+
+	pt.cpu.Update(page)
+	for gpuIndex, gpuPageTable := range pt.gpus {
+		hadPage := pt.pageBelongsToGPU(oldPage, gpuIndex)
+		hasPage := pt.pageBelongsToGPU(page, gpuIndex)
+		switch {
+		case hadPage && hasPage:
+			gpuPageTable.Update(page)
+		case hadPage:
+			gpuPageTable.Remove(oldPage.PID, oldPage.VAddr)
+		case hasPage:
+			gpuPageTable.Insert(page)
+		}
+	}
+}
+
+// ReverseLookup reads the authoritative CPU-side mapping. // sbin_codex
+func (pt *splitPageTable) ReverseLookup(pAddr uint64) (vm.Page, bool) {
+	return pt.cpu.ReverseLookup(pAddr)
+}
+
+// pageBelongsToGPU applies the v2 membership rule: unified pages are shared,
+// while a private GPU page appears only in its 1-based DeviceID table.
+// CPU-private pages do not appear in a GPU table. // sbin_codex
+func (pt *splitPageTable) pageBelongsToGPU(page vm.Page, gpuIndex int) bool {
+	return page.Unified || page.DeviceID == uint64(gpuIndex+1)
+}
+
+// gpuPageTableView preserves a GPU's isolated page table while providing the
+// CPU-table fallback that the v2 GMMU performs through its Bottom port. The v4
+// GMMU resolves PageTable.Find directly, so the fallback belongs at this
+// runner-only compatibility boundary. // sbin_codex
+type gpuPageTableView struct {
+	local vm.PageTable
+	cpu   vm.PageTable
+}
+
+// Insert mutates only the GPU-local table. // sbin_codex
+func (pt *gpuPageTableView) Insert(page vm.Page) {
+	pt.local.Insert(page)
+}
+
+// Remove mutates only the GPU-local table. // sbin_codex
+func (pt *gpuPageTableView) Remove(pid vm.PID, vAddr uint64) {
+	pt.local.Remove(pid, vAddr)
+}
+
+// Find resolves local mappings first and falls back to the authoritative CPU
+// table for remote GPU/CPU pages. // sbin_codex
+func (pt *gpuPageTableView) Find(pid vm.PID, addr uint64) (vm.Page, bool) {
+	if page, found := pt.local.Find(pid, addr); found {
+		return page, true
+	}
+	return pt.cpu.Find(pid, addr)
+}
+
+// Update mutates only the GPU-local table. // sbin_codex
+func (pt *gpuPageTableView) Update(page vm.Page) {
+	pt.local.Update(page)
+}
+
+// ReverseLookup resolves local mappings first and then remote CPU mappings.
+// sbin_codex
+func (pt *gpuPageTableView) ReverseLookup(pAddr uint64) (vm.Page, bool) {
+	if page, found := pt.local.ReverseLookup(pAddr); found {
+		return page, true
+	}
+	return pt.cpu.ReverseLookup(pAddr)
 }
 
 // MakeBuilder creates a new Builder with default parameters.
@@ -87,8 +210,13 @@ func (b Builder) Build() *sim.Domain {
 	b.globalStorage = mem.NewStorage(
 		uint64(b.numGPUs)*b.gpuMemSize + b.cpuMemSize)
 
-	mmuComp, pageTable := b.createMMU()
-	gpuDriver := b.buildGPUDriver(pageTable)
+	b.createPageTables()                   // sbin_codex: construct distinct CPU/GPU page-table instances.
+	mmuComp := b.createMMU(b.cpuPageTable) // sbin_codex: CPU MMU uses only the CPU table.
+	driverPageTable := &splitPageTable{    // sbin_codex: mirror driver mutations across the split tables.
+		cpu:  b.cpuPageTable,
+		gpus: b.gpuPageTables,
+	}
+	gpuDriver := b.buildGPUDriver(driverPageTable) // sbin_codex
 
 	gpuBuilder := b.createGPUBuilder(mmuComp)
 	pcieConnector, rootComplexID :=
@@ -122,8 +250,17 @@ func (b *Builder) adjustConfigForGPUType() {
 	}
 }
 
-func (b *Builder) createMMU() (*mmu.Comp, vm.PageTable) {
-	pageTable := vm.NewPageTable(b.log2PageSize)
+// createPageTables allocates one CPU page table and one page table per GPU.
+// No CPU MMU or GPU GMMU shares the same table instance. // sbin_codex
+func (b *Builder) createPageTables() {
+	b.cpuPageTable = vm.NewPageTable(b.log2PageSize)
+	b.gpuPageTables = make([]vm.PageTable, b.numGPUs)
+	for i := range b.gpuPageTables {
+		b.gpuPageTables[i] = vm.NewPageTable(b.log2PageSize)
+	}
+}
+
+func (b *Builder) createMMU(pageTable vm.PageTable) *mmu.Comp { // sbin_codex: accept the CPU table explicitly.
 	mmuBuilder := mmu.MakeBuilder().
 		WithEngine(b.simulation.GetEngine()).
 		WithFreq(1 * sim.GHz).
@@ -135,7 +272,7 @@ func (b *Builder) createMMU() (*mmu.Comp, vm.PageTable) {
 
 	b.simulation.RegisterComponent(mmuComponent)
 
-	return mmuComponent, pageTable
+	return mmuComponent
 }
 
 func (b *Builder) buildGPUDriver(
@@ -253,6 +390,10 @@ func (b *Builder) createGPU(
 		WithGPUID(uint64(index)).
 		WithMemAddrOffset(memAddrOffset).
 		WithRDMAAddressMapper(b.rdmaAddressMapper).
+		WithPageTable(&gpuPageTableView{ // sbin_codex: bind GPU N locally with CPU fallback for remote pages.
+			local: b.gpuPageTables[index-1],
+			cpu:   b.cpuPageTable,
+		}).
 		Build(name)
 
 	gpuDriver.RegisterGPU(

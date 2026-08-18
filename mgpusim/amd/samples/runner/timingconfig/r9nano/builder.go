@@ -9,6 +9,8 @@ import (
 	"github.com/sarchlab/akita/v4/mem/dram"
 	"github.com/sarchlab/akita/v4/mem/idealmemcontroller"
 	"github.com/sarchlab/akita/v4/mem/mem"
+	"github.com/sarchlab/akita/v4/mem/vm"      // sbin_codex: per-GPU page-table ownership.
+	"github.com/sarchlab/akita/v4/mem/vm/gmmu" // sbin_codex: GPU-side page-table walker.
 	"github.com/sarchlab/akita/v4/mem/vm/mmu"
 	"github.com/sarchlab/akita/v4/mem/vm/tlb"
 	"github.com/sarchlab/akita/v4/sim"
@@ -39,6 +41,8 @@ type Builder struct {
 	dramSize                       uint64
 	globalStorage                  *mem.Storage
 	mmu                            *mmu.Comp
+	gmmu                           *gmmu.Comp   // sbin_codex: GPU-side translation endpoint.
+	pageTable                      vm.PageTable // sbin_codex: this GPU's private page table.
 	rdmaAddressMapper              mem.AddressToPortMapper
 
 	gpu                *sim.Domain
@@ -152,6 +156,12 @@ func (b Builder) WithMMU(mmu *mmu.Comp) Builder {
 	return b
 }
 
+// WithPageTable binds the GPU builder to its per-GPU page table. // sbin_codex
+func (b Builder) WithPageTable(pageTable vm.PageTable) gpubuilder.GPUBuilder {
+	b.pageTable = pageTable
+	return b
+}
+
 // WithGlobalStorage sets the global storage that can provide the ultimate address translation.
 func (b Builder) WithGlobalStorage(
 	globalStorage *mem.Storage,
@@ -186,12 +196,14 @@ func (b Builder) Build(name string) *sim.Domain {
 	b.buildDRAMControllers()
 	b.buildL2Caches()
 	b.buildCP()
+	b.buildGMMU() // sbin_codex: the L2 TLB must target the GPU-side walker.
 	b.buildL2TLB()
 
 	b.connectCP()
 	b.connectL2AndDRAM()
 	b.connectL1ToL2()
 	b.connectL1TLBToL2TLB()
+	b.connectL2TLBToGMMU() // sbin_codex: complete the GPU translation path.
 
 	b.populateExternalPorts()
 
@@ -206,10 +218,9 @@ func (b *Builder) populateExternalPorts() {
 	b.gpu.AddPort("PageMigrationController",
 		b.pmc.GetPortByName("Remote"))
 
-	for i, l2TLB := range b.l2TLBs {
-		name := fmt.Sprintf("Translation_%02d", i)
-		b.gpu.AddPort(name, l2TLB.GetPortByName("Bottom"))
-	}
+	// The GMMU bottom port replaces the L2 TLB bottom port as the GPU's
+	// external translation endpoint. // sbin_codex
+	b.gpu.AddPort("Translation", b.gmmu.GetPortByName("Bottom"))
 }
 
 func (b *Builder) connectCP() {
@@ -628,20 +639,54 @@ func (b *Builder) buildCP() {
 	b.buildPageMigrationController()
 }
 
+// buildGMMU creates the GPU-side page-table walker. It resolves L2 TLB misses
+// against this GPU's page table and keeps the CPU MMU as the downstream
+// external translation endpoint for the v4 platform topology. // sbin_codex
+func (b *Builder) buildGMMU() {
+	b.gmmu = gmmu.MakeBuilder().
+		WithEngine(b.simulation.GetEngine()).
+		WithFreq(b.freq).
+		WithLog2PageSize(b.log2PageSize).
+		WithPageWalkingLatency(100).
+		WithPageTable(b.pageTable).
+		WithDeviceID(b.gpuID).
+		WithMemAddrOffset(b.memAddrOffset).
+		WithMemoryPerChiplet(b.dramSize).
+		Build(b.name + ".GMMU")
+
+	b.simulation.RegisterComponent(b.gmmu)
+}
+
+// connectL2TLBToGMMU connects every L2 TLB bottom port to the GMMU top port.
+// Translation requests therefore walk the GPU page table before returning to
+// the TLB hierarchy. // sbin_codex
+func (b *Builder) connectL2TLBToGMMU() {
+	conn := directconnection.MakeBuilder().
+		WithEngine(b.simulation.GetEngine()).
+		WithFreq(b.freq).
+		Build(b.name + ".L2TLBToGMMU")
+	b.simulation.RegisterComponent(conn)
+
+	conn.PlugIn(b.gmmu.GetPortByName("Top"))
+	for _, l2TLB := range b.l2TLBs {
+		conn.PlugIn(l2TLB.GetPortByName("Bottom"))
+	}
+}
+
 func (b *Builder) buildL2TLB() {
-    numWays := 64
-    builder := tlb.MakeBuilder().
-        WithEngine(b.simulation.GetEngine()).
-        WithFreq(b.freq).
-        WithNumWays(numWays).
-        WithNumSets(int(b.dramSize / (1 << b.log2PageSize) / uint64(numWays))).
-        WithNumMSHREntry(64).
-        WithNumReqPerCycle(1024).
-        WithPageSize(1 << b.log2PageSize).
-        WithLowModule(b.mmu.GetPortByName("Top").AsRemote()).
-        WithTranslationProviderMapper(&mem.SinglePortMapper{
-            Port: b.mmu.GetPortByName("Top").AsRemote(),
-        })
+	numWays := 64
+	builder := tlb.MakeBuilder().
+		WithEngine(b.simulation.GetEngine()).
+		WithFreq(b.freq).
+		WithNumWays(numWays).
+		WithNumSets(int(b.dramSize / (1 << b.log2PageSize) / uint64(numWays))).
+		WithNumMSHREntry(64).
+		WithNumReqPerCycle(1024).
+		WithPageSize(1 << b.log2PageSize).
+		WithLowModule(b.gmmu.GetPortByName("Top").AsRemote()). // sbin_codex: route L2 misses through GMMU.
+		WithTranslationProviderMapper(&mem.SinglePortMapper{
+			Port: b.gmmu.GetPortByName("Top").AsRemote(), // sbin_codex
+		})
 
 	l2TLB := builder.Build(fmt.Sprintf("%s.L2TLB", b.name))
 
