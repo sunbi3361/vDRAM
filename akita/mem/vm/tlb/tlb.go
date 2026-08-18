@@ -8,10 +8,10 @@ import (
 )
 
 const (
-	tlbStateEnable = "enable"
-	tlbStatePause  = "pause"
-	tlbStateDrain  = "drain"
-	tlbStateFlush  = "flush"
+	tlbStateEnable = 0
+	tlbStatePause  = 1
+	tlbStateDrain  = 2
+	tlbStateFlush  = 3
 )
 
 // Comp is a Translation Lookaside Buffer (TLB) that stores part of the page
@@ -30,7 +30,7 @@ type Comp struct {
 	numWays        int
 	pageSize       uint64
 	numReqPerCycle int
-	state          string
+	state          int
 
 	sets []internal.Set
 

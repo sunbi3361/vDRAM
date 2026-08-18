@@ -12,7 +12,6 @@ import (
 	"github.com/sarchlab/akita/v4/simulation"
 	"github.com/sarchlab/mgpusim/v4/amd/driver"
 	"github.com/sarchlab/mgpusim/v4/amd/samples/runner/timingconfig/gpubuilder"
-	"github.com/sarchlab/mgpusim/v4/amd/samples/runner/timingconfig/mi300a"
 	"github.com/sarchlab/mgpusim/v4/amd/samples/runner/timingconfig/r9nano"
 )
 
@@ -118,12 +117,6 @@ func (b *Builder) cpuGPUMemSizeMustEqual() {
 
 func (b *Builder) adjustConfigForGPUType() {
 	switch b.gpuType {
-	case "mi300a":
-		b.numCUPerSA = mi300a.NumCUPerShaderArray
-		b.numSAPerGPU = mi300a.NumShaderArray
-		b.switchLatency = 15 // MI300A uses on-die Infinity Fabric, not PCIe
-		b.d2hCycles = 150  // MI300A Infinity Fabric latency (~83ns)
-		b.h2dCycles = 250  // MI300A command processing (~139ns)
 	default:
 		// Keep defaults for r9nano
 	}
@@ -174,12 +167,6 @@ func (b *Builder) createGPUBuilder(
 	b.createRDMAAddressMapper()
 
 	switch b.gpuType {
-	case "mi300a":
-		return mi300a.MakeBuilder().
-			WithSimulation(b.simulation).
-			WithMMU(mmuComponent).
-			WithLog2PageSize(b.log2PageSize).
-			WithGlobalStorage(b.globalStorage)
 	default:
 		return r9nano.MakeBuilder().
 			WithSimulation(b.simulation).

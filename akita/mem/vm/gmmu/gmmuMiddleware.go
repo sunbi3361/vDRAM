@@ -1,0 +1,253 @@
+package gmmu
+
+import (
+	"log"
+	"reflect"
+	"strconv"
+
+	"github.com/sarchlab/akita/v4/mem/vm"
+	"github.com/sarchlab/akita/v4/mem/vm/pagewalkcache"
+	"github.com/sarchlab/akita/v4/tracing"
+)
+
+type middleware struct {
+	*Comp
+}
+
+// Tick defines how the gmmu update state each cycle
+func (m *middleware) Tick() bool {
+	// sbin_codex: paused and flushing GMMUs retain all in-flight state.
+	if m.state == gmmuStatePause || m.state == gmmuStateFlush {
+		return false
+	}
+
+	madeProgress := false
+
+	madeProgress = m.walkPageTable() || madeProgress
+	madeProgress = m.parseFromPageWalkCache() || madeProgress
+	if m.state == gmmuStateEnable { // sbin_codex: drain retires work without admitting more.
+		madeProgress = m.parseFromTop() || madeProgress
+	}
+
+	return madeProgress
+}
+
+// sbin_codex: advance independent cache lookups and latency countdowns.
+func (m *middleware) walkPageTable() bool {
+	numActiveTranslations := len(m.walkingTranslations)
+	madeProgress := false
+	tmp := m.walkingTranslations[:0]
+
+	for i := 0; i < numActiveTranslations; i++ {
+		trans := &m.walkingTranslations[i]
+		switch trans.state {
+		case newTransaction:
+			madeProgress = m.sendToPageWalkCache(i) || madeProgress
+		case pageWalkCacheDone:
+			madeProgress = m.advancePageWalk(i) || madeProgress
+		case fillingPageWalkCache:
+			madeProgress = m.fillPageWalkCache(i) || madeProgress
+		case pageWalkComplete:
+			madeProgress = m.finalizePageWalk(i) || madeProgress
+		}
+		if trans.state != transactionFinished {
+			tmp = append(tmp, *trans)
+		}
+	}
+
+	m.walkingTranslations = tmp
+	return madeProgress
+}
+
+// sbin_codex: pagewalkcache uses its own typed LookupRsp protocol.
+func (m *middleware) parseFromPageWalkCache() bool {
+	item := m.pageWalkCachePort.PeekIncoming()
+	if item == nil {
+		return false
+	}
+
+	rsp, ok := item.(*pagewalkcache.LookupRsp)
+	if !ok {
+		log.Panicf("GMMU cannot handle page-walk-cache message of type %T", item)
+	}
+
+	m.pageWalkCachePort.RetrieveIncoming()
+	return m.handlePageWalkCacheResponse(rsp)
+}
+
+// sbin_codex: look up page-table segments from the root level downward.
+func (m *middleware) sendToPageWalkCache(i int) bool {
+	trans := &m.walkingTranslations[i]
+	if trans.state != newTransaction {
+		panic("this state shouldn't be here!")
+	}
+	if !m.pageWalkCachePort.CanSend() {
+		return false
+	}
+
+	lookup := pagewalkcache.LookupReqBuilder{}.
+		WithSrc(m.pageWalkCachePort.AsRemote()).
+		WithDst(m.pageWalkCache.AsRemote()).
+		WithPID(trans.req.PID).
+		WithVAddr(trans.req.VAddr).
+		WithLevel(trans.level).
+		Build()
+	if err := m.pageWalkCachePort.Send(lookup); err != nil {
+		return false
+	}
+
+	trans.msgID = lookup.ID
+	trans.state = sentToPageWalkCache
+	return true
+}
+
+// sbin_codex: one cache miss represents every still-unresolved lower level.
+func (m *middleware) advancePageWalk(i int) bool {
+	trans := &m.walkingTranslations[i]
+	if trans.state != pageWalkCacheDone {
+		panic("this state shouldn't be here!")
+	}
+	if trans.cycleLeft > 0 {
+		trans.cycleLeft--
+		return true
+	}
+
+	trans.state = fillingPageWalkCache
+	return m.fillPageWalkCache(i)
+}
+
+// sbin_codex: install every level resolved by the modeled miss.
+func (m *middleware) fillPageWalkCache(i int) bool {
+	trans := &m.walkingTranslations[i]
+	madeProgress := false
+	for trans.fillLevel >= 0 {
+		if !m.pageWalkCachePort.CanSend() {
+			return madeProgress
+		}
+		fill := pagewalkcache.FillReqBuilder{}.
+			WithSrc(m.pageWalkCachePort.AsRemote()).
+			WithDst(m.pageWalkCache.AsRemote()).
+			WithPID(trans.req.PID).
+			WithVAddr(trans.req.VAddr).
+			WithLevel(trans.fillLevel).
+			Build()
+		if err := m.pageWalkCachePort.Send(fill); err != nil {
+			return madeProgress
+		}
+		trans.fillLevel--
+		madeProgress = true
+	}
+	trans.state = pageWalkComplete
+	return true
+}
+
+// sbin_codex: a hit skips one level; a miss charges all remaining levels.
+func (m *middleware) handlePageWalkCacheResponse(
+	rsp *pagewalkcache.LookupRsp,
+) bool {
+	for i := range m.walkingTranslations {
+		trans := &m.walkingTranslations[i]
+		if trans.msgID != rsp.RspTo || trans.state != sentToPageWalkCache {
+			continue
+		}
+
+		if rsp.Hit {
+			tracing.AddTaskStep(
+				tracing.MsgIDAtReceiver(trans.req, m.Comp),
+				m.Comp,
+				"pwc-hit-level"+strconv.Itoa(trans.level),
+			)
+
+			trans.level--
+			trans.state = newTransaction
+
+			return true
+		}
+
+		tracing.AddTaskStep(
+			tracing.MsgIDAtReceiver(trans.req, m.Comp),
+			m.Comp,
+			"pwc-miss-level"+strconv.Itoa(trans.level),
+		)
+		trans.cycleLeft = uint64(trans.level+1) * uint64(m.latency)
+		trans.fillLevel = trans.level
+		trans.state = pageWalkCacheDone
+		return true
+	}
+
+	return false
+}
+
+func (m *middleware) finalizePageWalk(
+	walkingIndex int,
+) bool {
+	req := m.walkingTranslations[walkingIndex].req
+	page, found := m.pageTable.Find(req.PID, req.VAddr)
+
+	if !found {
+		panic("page not found")
+	}
+
+	m.walkingTranslations[walkingIndex].page = page
+
+	return m.doPageWalkHit(walkingIndex)
+}
+
+func (m *middleware) doPageWalkHit(
+	walkingIndex int,
+) bool {
+	if !m.topPort.CanSend() {
+		return false
+	}
+
+	walking := m.walkingTranslations[walkingIndex]
+	rsp := vm.TranslationRspBuilder{}.
+		WithSrc(m.topPort.AsRemote()).
+		WithDst(walking.req.Src).
+		WithRspTo(walking.req.ID).
+		WithPage(walking.page).
+		Build()
+
+	if err := m.topPort.Send(rsp); err != nil {
+		return false
+	}
+	m.walkingTranslations[walkingIndex].state = transactionFinished // sbin_codex
+
+	tracing.TraceReqComplete(walking.req, m.Comp)
+
+	return true
+}
+func (m *middleware) parseFromTop() bool {
+	if len(m.walkingTranslations) >= m.maxRequestsInFlight {
+		return false
+	}
+
+	req := m.topPort.RetrieveIncoming()
+	if req == nil {
+		return false
+	}
+
+	tracing.TraceReqReceive(req, m.Comp)
+
+	switch req := req.(type) {
+	case *vm.TranslationReq:
+		m.startWalking(req)
+	default:
+		log.Panicf("GMMU cannot handle request of type %s", reflect.TypeOf(req))
+	}
+
+	return true
+}
+
+func (m *middleware) startWalking(req *vm.TranslationReq) {
+	// sbin_codex: initialize a root-level lookup; cache misses set latency.
+	trans := transaction{
+		req:       req,
+		level:     pageTableLevels - 1,
+		fillLevel: -1,
+		msgID:     "invalid",
+		state:     newTransaction,
+	}
+
+	m.walkingTranslations = append(m.walkingTranslations, trans)
+}

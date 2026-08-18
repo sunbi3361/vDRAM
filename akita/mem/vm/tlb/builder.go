@@ -16,7 +16,7 @@ type Builder struct {
 	log2PageSize      uint64
 	pageSize          uint64
 	numMSHREntry      int
-	state             string
+	state             int
 	latency           int
 	addressMapper     mem.AddressToPortMapper
 	addressMapperType string
