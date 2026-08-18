@@ -1,0 +1,480 @@
+package emu
+
+import (
+	"encoding/binary"
+	"log"
+	"math"
+	"reflect"
+
+	"github.com/sarchlab/akita/v4/mem/mem"
+	"github.com/sarchlab/akita/v4/mem/vm"
+	"github.com/sarchlab/akita/v4/sim"
+	"github.com/sarchlab/mgpusim/v4/amd/insts"
+	"github.com/sarchlab/mgpusim/v4/amd/kernels"
+	"github.com/sarchlab/mgpusim/v4/amd/protocol"
+)
+
+type emulationEvent struct {
+	*sim.EventBase
+}
+
+// A ComputeUnit in the emu package is a component that omit the pipeline design
+// but can still run the GCN3 instructions.
+//
+//	ToDispatcher <=> The port that connect the CU with the dispatcher
+type ComputeUnit struct {
+	*sim.TickingComponent
+
+	decoder         Decoder
+	alu             ALU
+	storageAccessor StorageAccessor
+
+	nextTick    sim.VTimeInSec
+	queueingWGs []*protocol.MapWGReq
+	wfs         map[*kernels.WorkGroup][]*Wavefront
+	LDSStorage  []byte
+
+	GlobalMemStorage *mem.Storage
+
+	ToDispatcher sim.Port
+
+	instCache         map[uint64]*insts.Inst
+	finishedMapWGReqs []string
+}
+
+// ControlPort returns the port that can receive controlling messages from the
+// Command Processor.
+func (cu *ComputeUnit) ControlPort() sim.RemotePort {
+	return cu.ToDispatcher.AsRemote()
+}
+
+// DispatchingPort returns the port that the dispatcher can use to dispatch
+// work-groups to the CU.
+func (cu *ComputeUnit) DispatchingPort() sim.RemotePort {
+	return cu.ToDispatcher.AsRemote()
+}
+
+// WfPoolSizes returns an array of the numbers of wavefronts that each SIMD unit
+// can execute.
+func (cu *ComputeUnit) WfPoolSizes() []int {
+	return []int{math.MaxInt32}
+}
+
+// VRegCounts returns an array of the numbers of vector regsiters in each SIMD
+// unit.
+func (cu *ComputeUnit) VRegCounts() []int {
+	return []int{-1}
+}
+
+// SRegCount returns the number of scalar register in the Compute Unit.
+func (cu *ComputeUnit) SRegCount() int {
+	return -1
+}
+
+// LDSBytes returns the number of bytes in the LDS of the CU.
+func (cu *ComputeUnit) LDSBytes() int {
+	return -1
+}
+
+// Handle defines the behavior on event scheduled on the ComputeUnit
+func (cu *ComputeUnit) Handle(evt sim.Event) error {
+	cu.Lock()
+
+	switch evt := evt.(type) {
+	case sim.TickEvent:
+		cu.TickingComponent.Handle(evt)
+	case *emulationEvent:
+		cu.runEmulation(evt)
+	case *WGCompleteEvent:
+		cu.handleWGCompleteEvent(evt)
+	default:
+		log.Panicf("cannot handle event %s", reflect.TypeOf(evt))
+	}
+
+	cu.Unlock()
+
+	return nil
+}
+
+// Tick ticks
+func (cu *ComputeUnit) Tick() bool {
+	cu.processMapWGReq()
+	return false
+}
+
+func (cu *ComputeUnit) processMapWGReq() {
+	msg := cu.ToDispatcher.RetrieveIncoming()
+	if msg == nil {
+		return
+	}
+
+	req := msg.(*protocol.MapWGReq)
+
+	now := cu.TickingComponent.TickScheduler.CurrentTime()
+	if cu.nextTick <= now {
+		cu.nextTick = sim.VTimeInSec(math.Ceil(float64(now)))
+		//cu.nextTick = cu.Freq.NextTick(req.RecvTime())
+		evt := &emulationEvent{
+			sim.NewEventBase(cu.nextTick, cu),
+		}
+		cu.Engine.Schedule(evt)
+	}
+
+	cu.queueingWGs = append(cu.queueingWGs, req)
+	cu.wfs[req.WorkGroup] = make([]*Wavefront, 0, 64)
+}
+
+func (cu *ComputeUnit) runEmulation(evt *emulationEvent) error {
+	for len(cu.queueingWGs) > 0 {
+		wg := cu.queueingWGs[0]
+		cu.queueingWGs = cu.queueingWGs[1:]
+		cu.runWG(wg)
+	}
+	return nil
+}
+
+func (cu *ComputeUnit) runWG(
+	req *protocol.MapWGReq,
+) error {
+	wg := req.WorkGroup
+	cu.initWfs(wg, req)
+
+	for !cu.isAllWfCompleted(wg) {
+		for _, wf := range cu.wfs[wg] {
+			cu.alu.SetLDS(wf.LDS)
+			cu.runWfUntilBarrier(wf)
+		}
+		cu.resolveBarrier(wg)
+	}
+
+	now := cu.TickingComponent.TickScheduler.CurrentTime()
+	evt := NewWGCompleteEvent(cu.Freq.NextTick(now), cu, req)
+	cu.Engine.Schedule(evt)
+
+	return nil
+}
+
+func (cu *ComputeUnit) initWfs(
+	wg *kernels.WorkGroup,
+	req *protocol.MapWGReq,
+) error {
+	lds := cu.initLDS(wg, req)
+
+	for _, wf := range wg.Wavefronts {
+		managedWf := NewWavefront(wf)
+		managedWf.LDS = lds
+		managedWf.pid = req.PID
+		cu.wfs[wg] = append(cu.wfs[wg], managedWf)
+	}
+
+	for _, managedWf := range cu.wfs[wg] {
+		cu.initWfRegs(managedWf)
+	}
+
+	return nil
+}
+
+func (cu *ComputeUnit) initLDS(wg *kernels.WorkGroup, req *protocol.MapWGReq) []byte {
+	ldsSize := req.WorkGroup.Packet.GroupSegmentSize
+	lds := make([]byte, ldsSize)
+	return lds
+}
+
+//nolint:funlen,gocyclo
+func (cu *ComputeUnit) initWfRegs(wf *Wavefront) {
+	co := wf.CodeObject
+	pkt := wf.Packet
+
+	wf.SetPC(pkt.KernelObject + co.KernelCodeEntryByteOffset)
+	wf.SetEXEC(wf.InitExecMask)
+
+	SGPRPtr := 0
+	if co.EnableSgprPrivateSegmentBuffer {
+		SGPRPtr += 16
+	}
+
+	if co.EnableSgprDispatchPtr {
+		binary.LittleEndian.PutUint64(wf.SRegFile[SGPRPtr:SGPRPtr+8], wf.PacketAddress)
+		SGPRPtr += 8
+	}
+
+	if co.EnableSgprQueuePtr {
+		// Note: QueuePtr is not currently supported. For V5+ kernels, the kernel
+		// descriptor flags may be incorrect. We do NOT reserve space, as the
+		// kernel may not actually use this register.
+	}
+
+	if co.EnableSgprKernargSegmentPtr {
+		binary.LittleEndian.PutUint64(wf.SRegFile[SGPRPtr:SGPRPtr+8], pkt.KernargAddress)
+		SGPRPtr += 8
+	}
+
+	if co.EnableSgprDispatchID {
+		log.Printf("EnableSgprDispatchID is not supported")
+		//fmt.Printf("s%d SGPRDispatchID\n", SGPRPtr/4)
+		SGPRPtr += 8
+	}
+
+	if co.EnableSgprFlatScratchInit {
+		log.Printf("EnableSgprFlatScratchInit is not supported")
+		//fmt.Printf("s%d SGPRFlatScratchInit\n", SGPRPtr/4)
+		SGPRPtr += 8
+	}
+
+	if co.EnableSgprPrivateSegmentSize {
+		// Note: PrivateSegmentSize is not currently supported. For V5+ kernels,
+		// the kernel descriptor flags may be incorrect. We do NOT reserve space.
+	}
+
+	if co.EnableSgprGridWorkgroupCountX {
+		binary.LittleEndian.PutUint32(wf.SRegFile[SGPRPtr:SGPRPtr+4],
+			(pkt.GridSizeX+uint32(pkt.WorkgroupSizeX)-1)/uint32(pkt.WorkgroupSizeX))
+		//fmt.Printf("s%d WorkGroupCountX\n", SGPRPtr/4)
+		SGPRPtr += 4
+	}
+
+	if co.EnableSgprGridWorkgroupCountY {
+		binary.LittleEndian.PutUint32(wf.SRegFile[SGPRPtr:SGPRPtr+4],
+			(pkt.GridSizeY+uint32(pkt.WorkgroupSizeY)-1)/uint32(pkt.WorkgroupSizeY))
+		//fmt.Printf("s%d WorkGroupCountY\n", SGPRPtr/4)
+		SGPRPtr += 4
+	}
+
+	if co.EnableSgprGridWorkgroupCountZ {
+		binary.LittleEndian.PutUint32(wf.SRegFile[SGPRPtr:SGPRPtr+4],
+			(pkt.GridSizeZ+uint32(pkt.WorkgroupSizeZ)-1)/uint32(pkt.WorkgroupSizeZ))
+		//fmt.Printf("s%d WorkGroupCountZ\n", SGPRPtr/4)
+		SGPRPtr += 4
+	}
+
+	if co.EnableSgprWorkGroupIDX() {
+		binary.LittleEndian.PutUint32(wf.SRegFile[SGPRPtr:SGPRPtr+4],
+			uint32(wf.WG.IDX))
+		//fmt.Printf("s%d WorkGroupIdX\n", SGPRPtr/4)
+		SGPRPtr += 4
+	}
+
+	if co.EnableSgprWorkGroupIDY() {
+		binary.LittleEndian.PutUint32(wf.SRegFile[SGPRPtr:SGPRPtr+4],
+			uint32(wf.WG.IDY))
+		//fmt.Printf("s%d WorkGroupIdY\n", SGPRPtr/4)
+		SGPRPtr += 4
+	}
+
+	if co.EnableSgprWorkGroupIDZ() {
+		binary.LittleEndian.PutUint32(wf.SRegFile[SGPRPtr:SGPRPtr+4],
+			uint32(wf.WG.IDZ))
+		//fmt.Printf("s%d WorkGroupIdZ\n", SGPRPtr/4)
+		// SGPRPtr += 4
+	}
+
+	if co.EnableSgprWorkGroupInfo() {
+		log.Printf("EnableSgprPrivateSegmentSize is not supported")
+		// SGPRPtr += 4
+	}
+
+	if co.EnableSgprPrivateSegmentWaveByteOffset() {
+		log.Printf("EnableSgprPrivateSegentWaveByteOffset is not supported")
+		// SGPRPtr += 4
+	}
+
+	var x, y, z int
+	for i := wf.FirstWiFlatID; i < wf.FirstWiFlatID+64; i++ {
+		z = i / (wf.WG.SizeX * wf.WG.SizeY)
+		y = i % (wf.WG.SizeX * wf.WG.SizeY) / wf.WG.SizeX
+		x = i % (wf.WG.SizeX * wf.WG.SizeY) % wf.WG.SizeX
+		laneID := i - wf.FirstWiFlatID
+
+		if co.Version == insts.CodeObjectV5 {
+			// For V5 code objects (gfx942/CDNA3), pack work-item IDs into v0
+			// as: v0 = (z << 20) | (y << 10) | x
+			packed := uint32(x) | (uint32(y) << 10) | (uint32(z) << 20)
+			wf.WriteReg(insts.VReg(0), 1, laneID, insts.Uint32ToBytes(packed))
+		} else {
+			// For V2/V3 code objects (GCN3), use separate registers
+			wf.WriteReg(insts.VReg(0), 1, laneID, insts.Uint32ToBytes(uint32(x)))
+
+			if co.EnableVgprWorkItemID() > 0 {
+				wf.WriteReg(insts.VReg(1), 1, laneID, insts.Uint32ToBytes(uint32(y)))
+			}
+
+			if co.EnableVgprWorkItemID() > 1 {
+				wf.WriteReg(insts.VReg(2), 1, laneID, insts.Uint32ToBytes(uint32(z)))
+			}
+		}
+	}
+}
+
+func (cu *ComputeUnit) isAllWfCompleted(wg *kernels.WorkGroup) bool {
+	for _, wf := range cu.wfs[wg] {
+		if !wf.Completed {
+			return false
+		}
+	}
+	return true
+}
+
+func (cu *ComputeUnit) runWfUntilBarrier(wf *Wavefront) error {
+	if wf.Completed {
+		return nil
+	}
+
+	for {
+		pc := wf.PC()
+		inst, ok := cu.instCache[pc]
+		if !ok {
+			instBuf := cu.storageAccessor.Read(wf.pid, pc, 8)
+			var err error
+			inst, err = cu.decoder.Decode(instBuf)
+			if err != nil {
+				log.Panicf("Failed to decode instruction at PC=0x%x: %v (bytes: %x)", pc, err, instBuf)
+			}
+			cu.instCache[pc] = inst
+		}
+		wf.inst = inst
+
+		wf.SetPC(wf.PC() + uint64(inst.ByteSize))
+
+		if inst.FormatType == insts.SOPP && inst.Opcode == 10 { // S_BARRIER
+			wf.AtBarrier = true
+			cu.logInst(wf, inst)
+			break
+		}
+
+		if inst.FormatType == insts.SOPP && inst.Opcode == 1 { // S_ENDPGM
+			wf.Completed = true
+			cu.logInst(wf, inst)
+			break
+		}
+
+		cu.executeInst(wf)
+		cu.logInst(wf, inst)
+	}
+
+	return nil
+}
+
+func (cu *ComputeUnit) logInst(wf *Wavefront, inst *insts.Inst) {
+	ctx := sim.HookCtx{
+		Domain: cu,
+		Item:   wf,
+		Detail: inst,
+	}
+	cu.InvokeHook(ctx)
+}
+
+func (cu *ComputeUnit) executeInst(wf *Wavefront) {
+	cu.alu.Run(wf)
+}
+
+func (cu *ComputeUnit) resolveBarrier(wg *kernels.WorkGroup) {
+	if cu.isAllWfCompleted(wg) {
+		return
+	}
+
+	for _, wf := range cu.wfs[wg] {
+		if !wf.AtBarrier {
+			log.Panic("not all wavefronts at barrier")
+		}
+		wf.AtBarrier = false
+	}
+}
+
+func (cu *ComputeUnit) handleWGCompleteEvent(evt *WGCompleteEvent) error {
+	delete(cu.wfs, evt.Req.WorkGroup)
+	found := false
+	for _, r := range cu.finishedMapWGReqs {
+		if r == evt.Req.ID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		cu.finishedMapWGReqs = append(cu.finishedMapWGReqs, evt.Req.ID)
+	}
+
+	if len(cu.wfs) != 0 {
+		return nil
+	}
+
+	req := protocol.WGCompletionMsgBuilder{}.
+		WithSrc(cu.ToDispatcher.AsRemote()).
+		WithDst(evt.Req.Src).
+		WithRspTo(cu.finishedMapWGReqs).
+		Build()
+
+	err := cu.ToDispatcher.Send(req)
+	if err == nil {
+		cu.finishedMapWGReqs = nil
+	} else {
+		newEvent := NewWGCompleteEvent(cu.Freq.NextTick(evt.Time()),
+			cu, evt.Req)
+		cu.Engine.Schedule(newEvent)
+	}
+
+	return nil
+}
+
+// NewComputeUnit creates a new ComputeUnit with the given name
+func NewComputeUnit(
+	name string,
+	engine sim.Engine,
+	decoder Decoder,
+	alu ALU,
+	sAccessor StorageAccessor,
+) *ComputeUnit {
+	cu := new(ComputeUnit)
+	cu.TickingComponent = sim.NewTickingComponent(name,
+		engine, 1*sim.GHz, cu)
+
+	cu.decoder = decoder
+	cu.alu = alu
+	cu.storageAccessor = sAccessor
+
+	cu.queueingWGs = make([]*protocol.MapWGReq, 0)
+	cu.wfs = make(map[*kernels.WorkGroup][]*Wavefront)
+	cu.instCache = make(map[uint64]*insts.Inst)
+
+	cu.ToDispatcher = sim.NewPort(cu, 1, 1, name+".ToDispatcher")
+
+	return cu
+}
+
+// ALUFactory is a function type that creates an ALU given a storage accessor.
+type ALUFactory func(StorageAccessor) ALU
+
+// BuildComputeUnit builds a compute unit with the default GCN3 ALU.
+func BuildComputeUnit(
+	name string,
+	engine sim.Engine,
+	decoder Decoder,
+	pageTable vm.PageTable,
+	log2PageSize uint64,
+	storage *mem.Storage,
+	addrConverter mem.AddressConverter,
+) *ComputeUnit {
+	return BuildComputeUnitWithALU(
+		name, engine, decoder, pageTable, log2PageSize,
+		storage, addrConverter, func(sa StorageAccessor) ALU {
+			return NewALU(sa)
+		}, false)
+}
+
+// BuildComputeUnitWithALU builds a compute unit with a custom ALU factory.
+func BuildComputeUnitWithALU(
+	name string,
+	engine sim.Engine,
+	decoder Decoder,
+	pageTable vm.PageTable,
+	log2PageSize uint64,
+	storage *mem.Storage,
+	addrConverter mem.AddressConverter,
+	aluFactory ALUFactory,
+	isCDNA3 bool,
+) *ComputeUnit {
+	sAccessor := NewStorageAccessor(
+		storage, pageTable, log2PageSize, addrConverter)
+	alu := aluFactory(sAccessor)
+	cu := NewComputeUnit(name, engine, decoder, alu, sAccessor)
+	return cu
+}

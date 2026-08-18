@@ -1,0 +1,308 @@
+package cu
+
+import (
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+	"github.com/sarchlab/akita/v4/mem/mem"
+	"github.com/sarchlab/akita/v4/sim"
+	"github.com/sarchlab/mgpusim/v4/amd/emu"
+	"github.com/sarchlab/mgpusim/v4/amd/insts"
+	"github.com/sarchlab/mgpusim/v4/amd/timing/wavefront"
+	"go.uber.org/mock/gomock"
+)
+
+type mockALU struct {
+	wfExecuted emu.InstEmuState
+}
+
+func (alu *mockALU) SetLDS(lds []byte) {
+}
+
+func (alu *mockALU) LDS() []byte {
+	return nil
+}
+
+func (alu *mockALU) Run(wf emu.InstEmuState) {
+	alu.wfExecuted = wf
+}
+
+func (alu *mockALU) ArchName() string {
+	return "Mock"
+}
+
+// mockRegFileAccessor implements wavefront.RegFileAccessor for tests
+type mockRegFileAccessor struct {
+	storage map[string][]byte
+}
+
+func newMockRegFileAccessor() *mockRegFileAccessor {
+	return &mockRegFileAccessor{
+		storage: make(map[string][]byte),
+	}
+}
+
+func regKey(reg *insts.Reg, regCount int, laneID int, waveOffset int) string {
+	return reg.Name + ":" + string(rune(regCount)) + ":" + string(rune(laneID)) + ":" + string(rune(waveOffset))
+}
+
+func (m *mockRegFileAccessor) ReadReg(
+	reg *insts.Reg, regCount int, laneID int, waveOffset int,
+) []byte {
+	key := regKey(reg, regCount, laneID, waveOffset)
+	if data, ok := m.storage[key]; ok {
+		result := make([]byte, len(data))
+		copy(result, data)
+		return result
+	}
+	return make([]byte, reg.ByteSize*regCount)
+}
+
+func (m *mockRegFileAccessor) WriteReg(
+	reg *insts.Reg, regCount int, laneID int, waveOffset int, data []byte,
+) {
+	key := regKey(reg, regCount, laneID, waveOffset)
+	stored := make([]byte, len(data))
+	copy(stored, data)
+	m.storage[key] = stored
+}
+
+func (m *mockRegFileAccessor) setRegValue(
+	reg *insts.Reg, regCount int, laneID int, waveOffset int, data []byte,
+) {
+	key := regKey(reg, regCount, laneID, waveOffset)
+	stored := make([]byte, len(data))
+	copy(stored, data)
+	m.storage[key] = stored
+}
+
+var _ = Describe("Scalar Unit", func() {
+
+	var (
+		mockCtrl    *gomock.Controller
+		cu          *ComputeUnit
+		bu          *ScalarUnit
+		alu         *mockALU
+		scalarMem   *MockPort
+		toScalarMem *MockPort
+	)
+
+	BeforeEach(func() {
+		mockCtrl = gomock.NewController(GinkgoT())
+		cu = NewComputeUnit("CU", nil)
+		alu = new(mockALU)
+		bu = NewScalarUnit(cu, alu)
+		bu.log2CachelineSize = 6
+
+		scalarMem = NewMockPort(mockCtrl)
+		cu.ScalarMem = scalarMem
+
+		toScalarMem = NewMockPort(mockCtrl)
+		cu.ToScalarMem = toScalarMem
+
+		scalarMem.EXPECT().AsRemote().AnyTimes()
+		toScalarMem.EXPECT().AsRemote().AnyTimes()
+	})
+
+	AfterEach(func() {
+		mockCtrl.Finish()
+	})
+
+	It("should allow accepting wavefront", func() {
+		// wave := new(Wavefront)
+		bu.toRead = nil
+		Expect(bu.CanAcceptWave()).To(BeTrue())
+	})
+
+	It("should not allow accepting wavefront is the read stage buffer is occupied", func() {
+		bu.toRead = new(wavefront.Wavefront)
+		Expect(bu.CanAcceptWave()).To(BeFalse())
+	})
+
+	It("should accept wave", func() {
+		wave := new(wavefront.Wavefront)
+		bu.AcceptWave(wave)
+		Expect(bu.toRead).To(BeIdenticalTo(wave))
+	})
+
+	It("should run", func() {
+		wave1 := new(wavefront.Wavefront)
+		wave2 := new(wavefront.Wavefront)
+		inst := wavefront.NewInst(insts.NewInst())
+		inst.FormatType = insts.SOP2
+		wave2.SetDynamicInst(inst)
+		wave3 := new(wavefront.Wavefront)
+		wave3.SetDynamicInst(inst)
+		wave3.State = wavefront.WfRunning
+
+		bu.toRead = wave1
+		bu.toExec = wave2
+		bu.toWrite = wave3
+
+		bu.Run()
+
+		Expect(wave3.State).To(Equal(wavefront.WfReady))
+		Expect(bu.toWrite).To(BeIdenticalTo(wave2))
+		Expect(bu.toExec).To(BeIdenticalTo(wave1))
+		Expect(bu.toRead).To(BeNil())
+
+		Expect(alu.wfExecuted).To(BeIdenticalTo(wave2))
+	})
+
+	It("should run s_load_dword", func() {
+		wave := wavefront.NewWavefront(nil)
+
+		regAccessor := newMockRegFileAccessor()
+		wave.RegAccessor = regAccessor
+
+		inst := wavefront.NewInst(insts.NewInst())
+		inst.FormatType = insts.SMEM
+		inst.Opcode = 0
+		inst.Data = insts.NewSRegOperand(0, 0, 1)
+		inst.Base = insts.NewSRegOperand(2, 2, 2)
+		inst.Offset = insts.NewIntOperand(0, 0x24)
+		wave.SetDynamicInst(inst)
+
+		// Set base register value = 0x1000
+		baseReg := insts.SReg(2)
+		regAccessor.setRegValue(baseReg, 2, 0, wave.SRegOffset,
+			insts.Uint64ToBytes(0x1000)[:8])
+
+		bu.toExec = wave
+
+		bu.Run()
+
+		Expect(wave.State).To(Equal(wavefront.WfReady))
+		Expect(wave.OutstandingScalarMemAccess).To(Equal(1))
+		Expect(len(cu.InFlightScalarMemAccess)).To(Equal(1))
+		Expect(bu.readBuf).To(HaveLen(1))
+	})
+
+	It("should run s_load_dwordx2", func() {
+		wave := wavefront.NewWavefront(nil)
+
+		regAccessor := newMockRegFileAccessor()
+		wave.RegAccessor = regAccessor
+
+		inst := wavefront.NewInst(insts.NewInst())
+		inst.FormatType = insts.SMEM
+		inst.Opcode = 1
+		inst.Data = insts.NewSRegOperand(0, 0, 1)
+		inst.Base = insts.NewSRegOperand(2, 2, 2)
+		inst.Offset = insts.NewIntOperand(0, 0x24)
+		wave.SetDynamicInst(inst)
+
+		// Set base register value = 0x1000
+		baseReg := insts.SReg(2)
+		regAccessor.setRegValue(baseReg, 2, 0, wave.SRegOffset,
+			insts.Uint64ToBytes(0x1000)[:8])
+
+		bu.toExec = wave
+
+		bu.Run()
+
+		Expect(wave.State).To(Equal(wavefront.WfReady))
+		Expect(wave.OutstandingScalarMemAccess).To(Equal(1))
+		Expect(bu.readBuf).To(HaveLen(1))
+	})
+
+	It("should run s_load_dwordx4, access cross cacheline", func() {
+		wave := wavefront.NewWavefront(nil)
+
+		regAccessor := newMockRegFileAccessor()
+		wave.RegAccessor = regAccessor
+
+		inst := wavefront.NewInst(insts.NewInst())
+		inst.FormatType = insts.SMEM
+		inst.Opcode = 2
+		inst.Data = insts.NewSRegOperand(0, 0, 1)
+		inst.Base = insts.NewSRegOperand(2, 2, 2)
+		inst.Offset = insts.NewIntOperand(0, 56)
+		wave.SetDynamicInst(inst)
+
+		// Set base register value = 0x1000
+		baseReg := insts.SReg(2)
+		regAccessor.setRegValue(baseReg, 2, 0, wave.SRegOffset,
+			insts.Uint64ToBytes(0x1000)[:8])
+
+		bu.toExec = wave
+
+		start := uint64(0x1000 + 56)
+		bu.Run()
+		Expect(bu.numCacheline(start, uint64(16))).To(Equal(2))
+		Expect(wave.State).To(Equal(wavefront.WfReady))
+		Expect(wave.OutstandingScalarMemAccess).To(Equal(1))
+		Expect(bu.readBuf).To(HaveLen(2))
+		Expect(bu.readBuf[0].CanWaitForCoalesce).To(BeTrue())
+		Expect(bu.readBuf[0].Address).To(Equal(uint64(0x1038)))
+		Expect(bu.readBuf[0].AccessByteSize).To(Equal(uint64(8)))
+		Expect(bu.readBuf[1].CanWaitForCoalesce).To(BeFalse())
+		Expect(bu.readBuf[1].Address).To(Equal(uint64(0x1040)))
+		Expect(bu.readBuf[1].AccessByteSize).To(Equal(uint64(8)))
+	})
+
+	It("should send request out", func() {
+		req := mem.ReadReqBuilder{}.
+			WithSrc(cu.ToScalarMem.AsRemote()).
+			WithDst(scalarMem.AsRemote()).
+			WithAddress(1024).
+			WithByteSize(4).
+			Build()
+		bu.readBuf = append(bu.readBuf, req)
+
+		toScalarMem.EXPECT().Send(gomock.Any()).Do(func(r sim.Msg) {
+			req := r.(*mem.ReadReq)
+			Expect(req.Src).To(BeIdenticalTo(cu.ToScalarMem.AsRemote()))
+			Expect(req.Dst).To(BeIdenticalTo(scalarMem.AsRemote()))
+			Expect(req.Address).To(Equal(uint64(1024)))
+			Expect(req.AccessByteSize).To(Equal(uint64(4)))
+		})
+
+		bu.Run()
+
+		Expect(bu.readBuf).To(HaveLen(0))
+	})
+
+	It("should retry if send request failed", func() {
+		req := mem.ReadReqBuilder{}.
+			WithSrc(cu.ToScalarMem.AsRemote()).
+			WithDst(scalarMem.AsRemote()).
+			WithAddress(1024).
+			WithByteSize(4).
+			Build()
+		bu.readBuf = append(bu.readBuf, req)
+
+		toScalarMem.EXPECT().Send(gomock.Any()).Do(func(r sim.Msg) {
+			req := r.(*mem.ReadReq)
+			Expect(req.Src).To(BeIdenticalTo(cu.ToScalarMem.AsRemote()))
+			Expect(req.Dst).To(BeIdenticalTo(scalarMem.AsRemote()))
+			Expect(req.Address).To(Equal(uint64(1024)))
+			Expect(req.AccessByteSize).To(Equal(uint64(4)))
+		}).Return(&sim.SendError{})
+
+		bu.Run()
+
+		Expect(bu.readBuf).To(HaveLen(1))
+	})
+	It("should flush the scalar unit", func() {
+		wave := wavefront.NewWavefront(nil)
+		inst := wavefront.NewInst(insts.NewInst())
+		inst.FormatType = insts.SMEM
+		inst.Opcode = 1
+		inst.Data = insts.NewSRegOperand(0, 0, 1)
+		wave.SetDynamicInst(inst)
+
+		bu.toExec = wave
+		bu.toWrite = wave
+		bu.toRead = wave
+
+		bu.Flush()
+
+		Expect(bu.toRead).To(BeNil())
+		Expect(bu.toWrite).To(BeNil())
+		Expect(bu.toExec).To(BeNil())
+	})
+
+	It("should return correct num of cacheline", func() {
+		Expect(bu.numCacheline(0x1038, uint64(80))).To(Equal(3))
+	})
+})
