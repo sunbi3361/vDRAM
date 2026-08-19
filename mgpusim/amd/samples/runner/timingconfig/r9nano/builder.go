@@ -58,6 +58,7 @@ type Builder struct {
 	l2ToDramConnection *directconnection.Comp
 	l1AddressMapper    *mem.InterleavedAddressPortMapper
 	l1TLBAddressMapper *mem.SinglePortMapper
+	l1tlbFactory       func(name string, engine sim.Engine, freq sim.Freq, pageTable vm.PageTable, mapper mem.AddressToPortMapper, numReqPerCycle int) sim.Component //nolint:lll // sbin_codex: ideal-L1-TLB factory injection (todo 5).
 	pmcAddressMapper   mem.AddressToPortMapper
 }
 
@@ -159,6 +160,22 @@ func (b Builder) WithMMU(mmu *mmu.Comp) Builder {
 // WithPageTable binds the GPU builder to its per-GPU page table. // sbin_codex
 func (b Builder) WithPageTable(pageTable vm.PageTable) gpubuilder.GPUBuilder {
 	b.pageTable = pageTable
+	return b
+}
+
+// WithL1TLBFactory sets the factory that builds L1 TLBs for this GPU.
+// When nil, the default tlb.MakeBuilder is used. // sbin_codex
+func (b Builder) WithL1TLBFactory(
+	f func(
+		name string,
+		engine sim.Engine,
+		freq sim.Freq,
+		pageTable vm.PageTable,
+		mapper mem.AddressToPortMapper,
+		numReqPerCycle int,
+	) sim.Component,
+) Builder {
+	b.l1tlbFactory = f
 	return b
 }
 
@@ -454,15 +471,28 @@ func (b *Builder) connectCPWithCaches() {
 }
 
 func (b *Builder) buildSAs() {
-	saBuilder := shaderarray.MakeBuilder().
-		WithSimulation(b.simulation).
-		WithFreq(b.freq).
-		WithGPUID(b.gpuID).
-		WithNumCUs(b.numCUPerShaderArray).
-		WithLog2CacheLineSize(b.log2CacheLineSize).
-		WithLog2PageSize(b.log2PageSize).
-		WithL1AddressMapper(b.l1AddressMapper).
-		WithL1TLBAddressMapper(b.l1TLBAddressMapper)
+	// Original chain (commented per AGENTS.md convention):
+	// saBuilder := shaderarray.MakeBuilder().
+	// 	WithSimulation(b.simulation).
+	// 	WithFreq(b.freq).
+	// 	WithGPUID(b.gpuID).
+	// 	WithNumCUs(b.numCUPerShaderArray).
+	// 	WithLog2CacheLineSize(b.log2CacheLineSize).
+	// 	WithLog2PageSize(b.log2PageSize).
+	// 	WithL1AddressMapper(b.l1AddressMapper).
+	// 	WithL1TLBAddressMapper(b.l1TLBAddressMapper)
+
+	saBuilder := shaderarray.MakeBuilder(). // sbin_codex
+						WithSimulation(b.simulation).
+						WithFreq(b.freq).
+						WithGPUID(b.gpuID).
+						WithNumCUs(b.numCUPerShaderArray).
+						WithLog2CacheLineSize(b.log2CacheLineSize).
+						WithLog2PageSize(b.log2PageSize).
+						WithL1AddressMapper(b.l1AddressMapper).
+						WithL1TLBAddressMapper(b.l1TLBAddressMapper).
+						WithPageTable(b.pageTable).      // sbin_codex: pass page table for ideal-L1-TLB factory (todo 5).
+						WithL1TLBFactory(b.l1tlbFactory) // sbin_codex: pass ideal-L1-TLB factory hook (todo 5).
 
 	// if b.enableISADebugging {
 	// 	saBuilder = saBuilder.withIsaDebugging()

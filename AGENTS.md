@@ -11,7 +11,9 @@
 
 ```bash
 # Toolchain (go is NOT on the default PATH)
-export PATH=/home/sbin/tools/go1.26/bin:$(go env GOPATH)/bin:$PATH
+export GOROOT=/home/sbin/tools/go1.26
+export GOPATH=/home/sbin/tools/go1.26/gopath
+export PATH=$PATH:$GOROOT/bin:$GOPATH/bin
 
 # Build
 ( cd akita && go build ./... )

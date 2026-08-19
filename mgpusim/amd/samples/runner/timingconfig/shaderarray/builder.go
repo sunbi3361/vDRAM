@@ -7,6 +7,7 @@ import (
 	"github.com/sarchlab/akita/v4/mem/cache/writearound"
 	"github.com/sarchlab/akita/v4/mem/cache/writethrough"
 	"github.com/sarchlab/akita/v4/mem/mem"
+	"github.com/sarchlab/akita/v4/mem/vm"
 	"github.com/sarchlab/akita/v4/mem/vm/addresstranslator"
 	"github.com/sarchlab/akita/v4/mem/vm/tlb"
 	"github.com/sarchlab/akita/v4/sim"
@@ -21,27 +22,30 @@ import (
 type Builder struct {
 	simulation *simulation.Simulation
 
-	gpuID              uint64
-	name               string
-	numCUs             int
-	freq               sim.Freq
-	log2CacheLineSize  uint64
-	log2PageSize       uint64
+	gpuID                     uint64
+	name                      string
+	numCUs                    int
+	freq                      sim.Freq
+	log2CacheLineSize         uint64
+	log2PageSize              uint64
 	wfPoolSize                int
 	vgprCount                 []int
 	numSinglePrecisionUnits   int
-	vecMemInstPipelineStages   int
-	vecMemTransPipelineStages  int
-	vecMemTransPipelineWidth   int
-	cuMemPipelineBufferSize    int
-	l1vCacheSize               uint64
+	vecMemInstPipelineStages  int
+	vecMemTransPipelineStages int
+	vecMemTransPipelineWidth  int
+	cuMemPipelineBufferSize   int
+	l1vCacheSize              uint64
 	l1vBankLatency            int
 	memPipelineBufferSize     int
 	maxCoalescingPenalty      int
 	registerScoreboard        bool
 	l1AddressMapper           mem.AddressToPortMapper
 	l1TLBAddressMapper        mem.AddressToPortMapper
-	aluFactory                emu.ALUFactory
+	l1tlbFactory              func(name string, engine sim.Engine, freq sim.Freq, pageTable vm.PageTable, mapper mem.AddressToPortMapper, numReqPerCycle int) sim.Component //nolint:lll // sbin_codex: ideal-L1-TLB factory hook (todo 4).
+	// sbin_codex: page table passed to ideal-L1-TLB factory (todo 4).
+	pageTable  vm.PageTable
+	aluFactory emu.ALUFactory
 
 	sa        *sim.Domain
 	cus       []*cu.ComputeUnit
@@ -54,9 +58,9 @@ type Builder struct {
 	l1vCaches []*writearound.Comp
 	l1sCache  *writethrough.Comp
 	l1iCache  *writethrough.Comp
-	l1vTLBs   []*tlb.Comp
-	l1sTLB    *tlb.Comp
-	l1iTLB    *tlb.Comp
+	l1vTLBs   []sim.Component // sbin_codex: relax concrete type for ideal-L1-TLB injection (todo 4).
+	l1sTLB    sim.Component   // sbin_codex: relax concrete type for ideal-L1-TLB injection (todo 4).
+	l1iTLB    sim.Component   // sbin_codex: relax concrete type for ideal-L1-TLB injection (todo 4).
 
 	// Mapper pointers to allow left-to-right component build order
 	// Vector path: ROB -> AT -(mem)-> L1V Cache, AT -(xlate)-> L1V TLB
@@ -133,6 +137,29 @@ func (b Builder) WithL1TLBAddressMapper(
 	l1TLBAddressMapper mem.AddressToPortMapper,
 ) Builder {
 	b.l1TLBAddressMapper = l1TLBAddressMapper
+	return b
+}
+
+// WithL1TLBFactory sets a factory that creates an ideal L1 TLB component.
+// sbin_codex: used by ideal-L1-TLB GPU configs (todo 4).
+func (b Builder) WithL1TLBFactory(
+	f func(
+		name string,
+		engine sim.Engine,
+		freq sim.Freq,
+		pageTable vm.PageTable,
+		mapper mem.AddressToPortMapper,
+		numReqPerCycle int,
+	) sim.Component,
+) Builder {
+	b.l1tlbFactory = f
+	return b
+}
+
+// WithPageTable sets the page table passed to the ideal L1 TLB factory.
+// sbin_codex: used by ideal-L1-TLB GPU configs (todo 4).
+func (b Builder) WithPageTable(pageTable vm.PageTable) Builder {
+	b.pageTable = pageTable
 	return b
 }
 
@@ -536,6 +563,18 @@ func (b *Builder) buildL1VAddressTranslators() {
 }
 
 func (b *Builder) buildL1VTLBs() {
+	// sbin_codex: ideal-L1-TLB factory branch (todo 4).
+	if b.l1tlbFactory != nil {
+		for i := 0; i < b.numCUs; i++ {
+			name := fmt.Sprintf("%s.L1VTLB[%d]", b.name, i)
+			comp := b.l1tlbFactory(name, b.simulation.GetEngine(), b.freq,
+				b.pageTable, b.l1TLBAddressMapper, 32)
+			b.l1vTLBs = append(b.l1vTLBs, comp)
+			b.simulation.RegisterComponent(comp)
+		}
+		return
+	}
+
 	builder := tlb.MakeBuilder().
 		WithEngine(b.simulation.GetEngine()).
 		WithFreq(b.freq).
@@ -627,6 +666,16 @@ func (b *Builder) buildL1SAddressTranslator() {
 }
 
 func (b *Builder) buildL1STLB() {
+	// sbin_codex: ideal-L1-TLB factory branch (todo 4).
+	if b.l1tlbFactory != nil {
+		name := fmt.Sprintf("%s.L1STLB", b.name)
+		comp := b.l1tlbFactory(name, b.simulation.GetEngine(), b.freq,
+			b.pageTable, b.l1TLBAddressMapper, 32)
+		b.l1sTLB = comp
+		b.simulation.RegisterComponent(comp)
+		return
+	}
+
 	builder := tlb.MakeBuilder().
 		WithEngine(b.simulation.GetEngine()).
 		WithFreq(b.freq).
@@ -698,6 +747,16 @@ func (b *Builder) buildL1IAddressTranslator() {
 }
 
 func (b *Builder) buildL1ITLB() {
+	// sbin_codex: ideal-L1-TLB factory branch (todo 4).
+	if b.l1tlbFactory != nil {
+		name := fmt.Sprintf("%s.L1ITLB", b.name)
+		comp := b.l1tlbFactory(name, b.simulation.GetEngine(), b.freq,
+			b.pageTable, b.l1TLBAddressMapper, 4)
+		b.l1iTLB = comp
+		b.simulation.RegisterComponent(comp)
+		return
+	}
+
 	builder := tlb.MakeBuilder().
 		WithEngine(b.simulation.GetEngine()).
 		WithFreq(b.freq).

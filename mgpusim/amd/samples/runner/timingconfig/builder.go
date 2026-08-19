@@ -12,6 +12,7 @@ import (
 	"github.com/sarchlab/akita/v4/simulation"
 	"github.com/sarchlab/mgpusim/v4/amd/driver"
 	"github.com/sarchlab/mgpusim/v4/amd/samples/runner/timingconfig/gpubuilder"
+	"github.com/sarchlab/mgpusim/v4/amd/samples/runner/timingconfig/ideal-l1tlb" // sbin_codex: ideal-L1-TLB GPU builder
 	"github.com/sarchlab/mgpusim/v4/amd/samples/runner/timingconfig/r9nano"
 )
 
@@ -182,6 +183,12 @@ func (b *Builder) createGPUBuilder(
 	b.createRDMAAddressMapper()
 
 	switch b.gpuType {
+	case "ideal-l1-tlb": // sbin_codex: ideal-L1-TLB GPU config (todo 7).
+		return ideall1tlb.MakeBuilder().
+			WithSimulation(b.simulation).
+			WithMMU(mmuComponent).
+			WithLog2PageSize(b.log2PageSize).
+			WithGlobalStorage(b.globalStorage)
 	default:
 		return r9nano.MakeBuilder().
 			WithSimulation(b.simulation).
