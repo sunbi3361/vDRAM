@@ -1,3 +1,6 @@
+# PROJECT KNOWLEDGE BASE
+# branch: main | commit: bba8240 | generated: 2026-08-19
+
 새롭게 파일 수정 시
 
 수정 전 코드는 주석 처리
@@ -6,6 +9,64 @@
 필수 사용 flag: -timing -parallel -gpu=r9nano -arch=gcn3 -report-all
 
 ---
+
+## OVERVIEW
+
+Two independent Go modules.
+- akita: discrete-event simulation framework.
+- mgpusim: AMD GCN3 GPU simulator built on akita.
+- mgpusim/go.mod replaces github.com/sarchlab/akita/v4 with ../akita.
+- scripts/ is a gitignored experiment workspace.
+
+## STRUCTURE
+
+Maintained source:
+- akita/
+- mgpusim/
+- mgpusim/amd/samples/
+
+Generated or copied areas (do not treat as source of truth):
+- scripts/benchmarks/
+- .omo/
+- akita/daisen/static/dist/ and akita/monitoring/web/dist/
+- HSACO/binaries/
+
+## WHERE TO LOOK
+
+- akita/sim/ and akita/simulation/: engine and component wiring.
+- mgpusim/amd/samples/runner/, mgpusim/amd/driver/,
+  mgpusim/amd/samples/runner/timingconfig/: run control and config.
+- mgpusim/amd/: GCN3 implementation.
+- scripts/: benchmark automation.
+
+## CODE MAP
+
+Core roles. Refs are unmeasured; LSP/codegraph were unavailable.
+- sim.Engine: discrete-event engine.
+- simulation.Builder: builds and wires a simulation.
+- runner.Runner: sample/simulation driver.
+- timingconfig.Builder: constructs timing GPU configuration.
+- driver.Driver: host command submission interface.
+- cp.CommandProcessor: GPU command processor.
+- cu.ComputeUnit: timing compute unit.
+- emu.ComputeUnit: functional emulator compute unit.
+- insts.Disassembler: instruction decoding/disassembly.
+
+## CONVENTIONS
+
+- Comment out pre-edit code; mark modified code with sbin_codex.
+- Mandatory flags: -timing -parallel -gpu=r9nano -arch=gcn3 -report-all.
+- Use the custom Go toolchain:
+  GOROOT=/home/sbin/tools/go1.26
+  GOPATH=/home/sbin/tools/go1.26/gopath
+  PATH append.
+
+## ANTI-PATTERNS (THIS PROJECT)
+
+- Do not rely on the NVIDIA path; it is prototype/unsupported.
+- Do not assume virtual-caching or mi300a GPU selectors target distinct hardware;
+  the current timing builder falls through to r9nano.
+- Do not edit generated/copied areas as authoritative source.
 
 ## COMMANDS
 
@@ -33,8 +94,8 @@ cd mgpusim/amd/tests/acceptance && go build && ./acceptance -num-gpu=1 -arch=gcn
 cd mgpusim/amd/tests/deterministic && python3 test.py
 
 # Sample run (mandatory flags)
-cd mgpusim/amd/samples/fir && go build
-./matrixtranspose -timing -parallel -arch=gcn3 -report-all -verify -disable-rtm \
+cd mgpusim/amd/samples/matrixtranspose && go build
+./matrixtranspose -timing -parallel -gpu=r9nano -arch=gcn3 -report-all -verify -disable-rtm \
 	-metric-file-name=exp_baseline_matrixtranspose \
 	-progress-interval=1000000 \
 	-max-inst=100000000 \
@@ -49,3 +110,9 @@ python3 3_gen_runners.py
 bash 4_run_benchmarks.sh
 python3 5_collect_metrics.py
 ```
+
+## NOTES
+
+- Generated for commit bba8240 on branch main, 2026-08-19.
+- CODE MAP symbol roles are heuristic; centrality was not measured.
+- AMD GCN3 is the stable target; NVIDIA support is experimental and unsupported.
