@@ -17,11 +17,13 @@ var parallelFlag = flag.Bool("parallel", false,
 	"Run the simulation in parallel.")
 var isaDebug = flag.Bool("debug-isa", false, "Generate the ISA debugging file.")
 var archFlag = flag.String("arch", "gcn3", "GPU architecture: gcn3 or cdna3.")
+
 // sbin_codex: added ideal-l1-tlb to the help text.
 // var gpuTypeFlag = flag.String("gpu", "r9nano",
-// 	"GPU model for timing simulation: r9nano or mi300a.")
+//
+//	"GPU model for timing simulation: r9nano or mi300a.")
 var gpuTypeFlag = flag.String("gpu", "r9nano",
-	"GPU model for timing simulation: r9nano, mi300a, or ideal-l1-tlb.")
+	"GPU model for timing simulation: r9nano, mi300a, or ideal-l1tlb.")
 
 var verifyFlag = flag.Bool("verify", false, "Verify the emulation result.")
 var memTracing = flag.Bool("trace-mem", false, "Generate memory trace")
