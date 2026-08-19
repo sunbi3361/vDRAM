@@ -62,6 +62,8 @@ var memoryFootprintReportFlag = flag.Bool("report-memory-footprint", false,
 	"Report current, peak, and cumulative physical memory footprint.")
 var pageMigrationReportFlag = flag.Bool("report-page-migration", false,
 	"Report page-migration summaries and payload bytes.")
+var l2TLBMPKIReportFlag = flag.Bool("report-l2-tlb-mpki", false,
+	"Report L2 TLB misses per thousand retired instructions.")
 var customPortForAkitaRTM = flag.Int("akitartm-port", 0,
 	`Custom port to host AkitaRTM. A 4-digit or 5-digit port number is required. If 
 this number is not given or a invalid number is given number, a random port 

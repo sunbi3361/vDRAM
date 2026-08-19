@@ -193,7 +193,6 @@ func (d *DispatcherImpl) processMessagesFromCU() bool {
 				d.alg.FreeResources(location)
 				delete(d.inflightWGs, rspToID)
 				d.numCompletedWGs++
-				d.updateMaxInflight() // sbin_codex
 				if d.numCompletedWGs == d.alg.NumWG() {
 					d.cycleLeft = d.constantKernelOverhead
 				}
@@ -329,6 +328,7 @@ func (d *DispatcherImpl) dispatchNextWG() (madeProgress bool) {
 	if err == nil {
 		d.currWG.valid = false
 		d.numDispatchedWGs++
+		d.updateMaxInflight() // sbin_codex
 		d.inflightWGs[req.ID] = d.currWG
 		d.originalReqs[req.ID] = req
 		d.cycleLeft = d.latencyTable[len(d.currWG.locations)]

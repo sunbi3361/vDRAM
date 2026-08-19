@@ -27,6 +27,7 @@ type extendedReporter struct {
 	mmuTracers  []*componentGMMUTracer
 	workingSet  *componentWorkingSetTracer
 	migration   *migrationTracer
+	l2TLBMPKI   *l2TLBMPKIReporter // sbin_codex: GPU-level L2 TLB MPKI.
 }
 
 func newExtendedReporter(s *simulation.Simulation) *extendedReporter {
@@ -44,6 +45,7 @@ func (r *extendedReporter) injectTracers(s *simulation.Simulation) {
 	if *reportAll || *pageMigrationReportFlag {
 		r.injectMigrationTracer(s)
 	}
+	r.injectL2TLBMPKITracer(s) // sbin_codex: collect L2 TLB misses and GPU instructions.
 }
 
 func (r *extendedReporter) injectTranslationTracers(s *simulation.Simulation) {
@@ -122,6 +124,7 @@ func (r *extendedReporter) report(base *reporter) {
 	if *reportAll || *pageMigrationReportFlag {
 		r.reportMigrationMetrics(base)
 	}
+	r.reportL2TLBMPKI(base) // sbin_codex: emit GPU-level L2 TLB MPKI.
 }
 
 func (r *extendedReporter) reportTranslationMetrics(base *reporter) {
