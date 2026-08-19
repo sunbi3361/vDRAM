@@ -210,9 +210,9 @@ func (b *Benchmark) allocateGPUMem() {
 	b.dInputItemSets = b.allocate(uint64(b.col * b.row * 4))
 	b.dOutputItemSets = b.allocate(uint64(b.col * b.row * 4))
 	b.dReference = b.allocate(uint64(b.col * b.row * 4))
-	b.driver.Distribute(b.context, b.dInputItemSets, uint64(b.col*b.row*4), b.gpuIDs)
-	b.driver.Distribute(b.context, b.dOutputItemSets, uint64(b.col*b.row*4), b.gpuIDs)
-	b.driver.Distribute(b.context, b.dReference, uint64(b.col*b.row*4), b.gpuIDs)
+	// b.driver.Distribute(b.context, b.dInputItemSets, uint64(b.col*b.row*4), b.gpuIDs)
+	// b.driver.Distribute(b.context, b.dOutputItemSets, uint64(b.col*b.row*4), b.gpuIDs)
+	// b.driver.Distribute(b.context, b.dReference, uint64(b.col*b.row*4), b.gpuIDs)
 }
 
 func (b *Benchmark) allocate(byteSize uint64) driver.Ptr {

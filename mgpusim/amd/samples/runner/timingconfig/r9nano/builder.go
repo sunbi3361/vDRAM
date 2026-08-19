@@ -704,16 +704,19 @@ func (b *Builder) connectL2TLBToGMMU() {
 }
 
 func (b *Builder) buildL2TLB() {
+	numEntries := 512
 	numWays := 64
+	numSets := int(numEntries/numWays)
+
 	builder := tlb.MakeBuilder().
 		WithEngine(b.simulation.GetEngine()).
 		WithFreq(b.freq).
 		WithNumWays(numWays).
-		WithNumSets(int(b.dramSize / (1 << b.log2PageSize) / uint64(numWays))).
+		WithNumSets(numSets).
 		WithNumMSHREntry(64).
 		WithNumReqPerCycle(1024).
-		WithPageSize(1 << b.log2PageSize).
-		WithLowModule(b.gmmu.GetPortByName("Top").AsRemote()). // sbin_codex: route L2 misses through GMMU.
+		WithLog2PageSize(b.log2PageSize).
+		// WithLowModule(b.gmmu.GetPortByName("Top").AsRemote()). // sbin_codex: route L2 misses through GMMU.
 		WithTranslationProviderMapper(&mem.SinglePortMapper{
 			Port: b.gmmu.GetPortByName("Top").AsRemote(), // sbin_codex
 		})
