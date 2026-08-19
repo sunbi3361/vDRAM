@@ -14,6 +14,7 @@ type Builder struct {
 	freq                sim.Freq
 	log2PageSize        uint64
 	pageTable           vm.PageTable
+	gpuPageTables       []vm.PageTable // sbin_codex: per-GPU tables managed by the driver allocator.
 	globalStorage       *mem.Storage
 	useMagicMemoryCopy  bool
 	middlewareD2HCycles int
@@ -43,6 +44,12 @@ func (b Builder) WithFreq(freq sim.Freq) Builder {
 // WithPageTable sets the global page table.
 func (b Builder) WithPageTable(pt vm.PageTable) Builder {
 	b.pageTable = pt
+	return b
+}
+
+// WithGPUPageTables sets the per-GPU page tables managed by the driver. // sbin_codex
+func (b Builder) WithGPUPageTables(pageTables []vm.PageTable) Builder {
+	b.gpuPageTables = pageTables
 	return b
 }
 
@@ -84,6 +91,9 @@ func (b Builder) Build(name string) *Driver {
 	driver.Log2PageSize = b.log2PageSize
 
 	memAllocatorImpl := internal.NewMemoryAllocator(b.pageTable, b.log2PageSize)
+	for i, pageTable := range b.gpuPageTables { // sbin_codex: GPU IDs are 1-based.
+		memAllocatorImpl.RegisterPageTable(i+1, pageTable)
+	}
 	driver.memAllocator = memAllocatorImpl
 
 	distributorImpl := newDistributorImpl(memAllocatorImpl)

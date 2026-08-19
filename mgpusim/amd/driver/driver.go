@@ -691,7 +691,7 @@ func (d *Driver) preparePageForMigration(
 	newPage.DeviceID = gpuID + 1
 
 	newPage.IsMigrating = true
-	d.pageTable.Update(newPage)
+	d.memAllocator.UpdatePage(newPage) // sbin_codex: keep CPU and GPU page tables synchronized.
 
 	return &newPage, oldPAddr
 }

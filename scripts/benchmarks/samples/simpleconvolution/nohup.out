@@ -1,0 +1,12 @@
+srun: job 220759 queued and waiting for resources
+srun: job 220759 has been allocated resources
+srun: Force Terminated job 220759
+srun: Job step aborted: Waiting up to 32 seconds for job step to finish.
+srun: error: compasslab1: task 0: Terminated
+srun: job 220777 queued and waiting for resources
+srun: job 220777 has been allocated resources
+srun: Force Terminated job 220777
+srun: Job step aborted: Waiting up to 32 seconds for job step to finish.
+srun: error: compasslab1: task 0: Terminated
+srun: job 220795 queued and waiting for resources
+srun: job 220795 has been allocated resources

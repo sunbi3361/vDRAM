@@ -10,12 +10,14 @@ import (
 // A MemoryAllocator can allocate memory on the CPU and GPUs
 type MemoryAllocator interface {
 	RegisterDevice(device *Device)
+	RegisterPageTable(deviceID int, pageTable vm.PageTable) // sbin_codex: register a GPU-owned page table.
 	GetDeviceIDByPAddr(pAddr uint64) int
 	Allocate(pid vm.PID, byteSize uint64, deviceID int) uint64
 	AllocateUnified(pid vm.PID, byteSize uint64) uint64
 	Free(vAddr uint64)
 	Remap(pid vm.PID, pageVAddr, byteSize uint64, deviceID int)
 	RemovePage(vAddr uint64)
+	UpdatePage(page vm.Page) // sbin_codex: update CPU and GPU page tables under the allocator lock.
 	AllocatePageWithGivenVAddr(
 		pid vm.PID,
 		deviceID int,
@@ -36,6 +38,7 @@ func NewMemoryAllocator(
 		processMemoryStates:  make(map[vm.PID]*processMemoryState),
 		vAddrToPageMapping:   make(map[uint64]vm.Page),
 		devices:              make(map[int]*Device),
+		gpuPageTables:        make(map[int]vm.PageTable), // sbin_codex
 	}
 	return a
 }
@@ -54,6 +57,7 @@ type memoryAllocatorImpl struct {
 	vAddrToPageMapping   map[uint64]vm.Page
 	processMemoryStates  map[vm.PID]*processMemoryState
 	devices              map[int]*Device
+	gpuPageTables        map[int]vm.PageTable // sbin_codex: device ID to GPU page table.
 	totalStorageByteSize uint64
 }
 
@@ -67,6 +71,46 @@ func (a *memoryAllocatorImpl) RegisterDevice(device *Device) {
 	a.totalStorageByteSize += state.getStorageSize()
 
 	a.devices[device.ID] = device
+}
+
+// RegisterPageTable registers a GPU page table for subsequent page mutations.
+// The v4 GMMU cannot fault to the CPU table, so every GPU table receives every
+// mapping while remaining a distinct page-table instance. // sbin_codex
+func (a *memoryAllocatorImpl) RegisterPageTable(
+	deviceID int,
+	pageTable vm.PageTable,
+) {
+	a.Lock()
+	defer a.Unlock()
+
+	a.gpuPageTables[deviceID] = pageTable
+}
+
+// insertPage inserts the same mapping into the CPU table and every GPU table.
+// sbin_codex
+func (a *memoryAllocatorImpl) insertPage(page vm.Page) {
+	a.pageTable.Insert(page)
+	for _, gpuPageTable := range a.gpuPageTables {
+		gpuPageTable.Insert(page)
+	}
+}
+
+// updatePage updates the same mapping in the CPU table and every GPU table.
+// sbin_codex
+func (a *memoryAllocatorImpl) updatePage(page vm.Page) {
+	a.pageTable.Update(page)
+	for _, gpuPageTable := range a.gpuPageTables {
+		gpuPageTable.Update(page)
+	}
+}
+
+// removePageFromTables removes a mapping from the CPU and every GPU table.
+// sbin_codex
+func (a *memoryAllocatorImpl) removePageFromTables(page vm.Page) {
+	a.pageTable.Remove(page.PID, page.VAddr)
+	for _, gpuPageTable := range a.gpuPageTables {
+		gpuPageTable.Remove(page.PID, page.VAddr)
+	}
 }
 
 func (a *memoryAllocatorImpl) GetDeviceIDByPAddr(pAddr uint64) int {
@@ -163,7 +207,7 @@ func (a *memoryAllocatorImpl) allocatePages(
 
 		// fmt.Printf("page.addr is %x piage Device ID is %d \n", page.PAddr, page.DeviceID)
 		// debug.PrintStack()
-		a.pageTable.Insert(page)
+		a.insertPage(page) // sbin_codex: driver owns CPU/GPU page-table synchronization.
 		a.vAddrToPageMapping[page.VAddr] = page
 	}
 
@@ -209,7 +253,17 @@ func (a *memoryAllocatorImpl) removePage(vAddr uint64) {
 	dState := a.devices[deviceID].MemState
 	dState.addSinglePAddr(page.PAddr)
 
-	a.pageTable.Remove(page.PID, page.VAddr)
+	a.removePageFromTables(page) // sbin_codex
+}
+
+// UpdatePage updates a page's runtime state in every driver-managed table.
+// sbin_codex
+func (a *memoryAllocatorImpl) UpdatePage(page vm.Page) {
+	a.Lock()
+	defer a.Unlock()
+
+	a.vAddrToPageMapping[page.VAddr] = page
+	a.updatePage(page)
 }
 
 func (a *memoryAllocatorImpl) AllocatePageWithGivenVAddr(
@@ -245,7 +299,7 @@ func (a *memoryAllocatorImpl) allocatePageWithGivenVAddr(
 		Unified:  isUnified,
 	}
 	a.vAddrToPageMapping[page.VAddr] = page
-	a.pageTable.Update(page)
+	a.updatePage(page) // sbin_codex
 
 	return page
 }
@@ -272,7 +326,7 @@ func (a *memoryAllocatorImpl) allocateMultiplePagesWithGivenVAddrs(
 			Unified:  isUnified,
 		}
 		a.vAddrToPageMapping[page.VAddr] = page
-		a.pageTable.Update(page)
+		a.updatePage(page) // sbin_codex
 		pages = append(pages, page)
 	}
 
