@@ -27,25 +27,26 @@ type Dispatcher interface {
 type DispatcherImpl struct {
 	sim.HookableBase
 
-	cp                     tracing.NamedHookable
-	name                   string
-	respondingPort         sim.Port
-	dispatchingPort        sim.Port
-	alg                    algorithm
-	dispatching            *protocol.LaunchKernelReq
-	currWG                 dispatchLocation
-	cycleLeft              int
-	numDispatchedWGs       int
-	numCompletedWGs        int
-	inflightWGs            map[string]dispatchLocation
-	originalReqs           map[string]*protocol.MapWGReq
-	latencyTable                 []int
-	constantKernelOverhead              int
-	constantKernelLaunchOverhead        int
-	subsequentKernelLaunchOverhead      int
-	firstKernelLaunched                 bool
-	prevKernelWGCount                   int
-	wgScalingThreshold                  int
+	cp                             tracing.NamedHookable
+	name                           string
+	respondingPort                 sim.Port
+	dispatchingPort                sim.Port
+	alg                            algorithm
+	dispatching                    *protocol.LaunchKernelReq
+	currWG                         dispatchLocation
+	cycleLeft                      int
+	numDispatchedWGs               int
+	numCompletedWGs                int
+	inflightWGs                    map[string]dispatchLocation
+	originalReqs                   map[string]*protocol.MapWGReq
+	latencyTable                   []int
+	constantKernelOverhead         int
+	constantKernelLaunchOverhead   int
+	subsequentKernelLaunchOverhead int
+	firstKernelLaunched            bool
+	prevKernelWGCount              int
+	wgScalingThreshold             int
+	maxInflightWGs                 int // sbin_codex
 
 	monitor     *monitoring.Monitor
 	progressBar *monitoring.ProgressBar
@@ -80,6 +81,19 @@ func (d *DispatcherImpl) StartDispatching(req *protocol.LaunchKernelReq) {
 
 	d.numDispatchedWGs = 0
 	d.numCompletedWGs = 0
+
+	d.maxInflightWGs = 0      // sbin_codex
+	totalWGs := d.alg.NumWG() // sbin_codex
+
+	// sbin_codex
+	if req.CodeObject != nil && req.CodeObject.Symbol != nil &&
+		req.Packet != nil {
+		fmt.Printf("[kernel-info] %s grid=%dx%dx%d wg=%dx%dx%d totalWGs=%d\n",
+			req.CodeObject.Symbol.Name,
+			req.Packet.GridSizeX, req.Packet.GridSizeY, req.Packet.GridSizeZ,
+			req.Packet.WorkgroupSizeX, req.Packet.WorkgroupSizeY,
+			req.Packet.WorkgroupSizeZ, totalWGs)
+	}
 	if !d.firstKernelLaunched {
 		d.cycleLeft = d.constantKernelLaunchOverhead
 		d.firstKernelLaunched = true
@@ -179,9 +193,11 @@ func (d *DispatcherImpl) processMessagesFromCU() bool {
 				d.alg.FreeResources(location)
 				delete(d.inflightWGs, rspToID)
 				d.numCompletedWGs++
+				d.updateMaxInflight() // sbin_codex
 				if d.numCompletedWGs == d.alg.NumWG() {
 					d.cycleLeft = d.constantKernelOverhead
 				}
+				d.printWGProgress() // sbin_codex
 
 				originalReq := d.originalReqs[rspToID]
 				delete(d.originalReqs, rspToID)
@@ -201,6 +217,49 @@ func (d *DispatcherImpl) processMessagesFromCU() bool {
 	}
 
 	return madeProgress
+}
+
+// sbin_codex:
+// updateMaxInflight tracks the highest number of work-groups resident on the
+// GPU at once. Once the GPU has been filled, this equals the number of
+// work-groups that can be loaded concurrently (its resident capacity).
+func (d *DispatcherImpl) updateMaxInflight() {
+	inflight := d.numDispatchedWGs - d.numCompletedWGs
+	if inflight > d.maxInflightWGs {
+		d.maxInflightWGs = inflight
+	}
+}
+
+// sbin_codex:
+// printWGProgress reports kernel progress as completed GPU-loads ("waves"):
+// each wave is one full batch of work-groups resident on the GPU at once.
+func (d *DispatcherImpl) printWGProgress() {
+	capacity := d.maxInflightWGs
+	total := d.alg.NumWG()
+	// if capacity <= 0 || d.numCompletedWGs%capacity != 0 {
+	// 	return
+	// }
+	if capacity <= 0 ||
+		(d.numCompletedWGs%capacity != 0 && d.numCompletedWGs != total) {
+		return
+	}
+	totalWaves := (total + capacity - 1) / capacity
+	curWave := (d.numCompletedWGs + capacity - 1) / capacity
+	fmt.Printf("[kernel-progress] %s wave %d/%d (%d%%) [cap=%d WGs]\n",
+		d.kernelName(), curWave, totalWaves, curWave*100/totalWaves, capacity)
+}
+
+// sbin_codex
+func (d *DispatcherImpl) kernelName() string {
+	if d.dispatching.CodeObject != nil && d.dispatching.CodeObject.Symbol != nil {
+		if n := d.dispatching.CodeObject.Symbol.Name; n != "" {
+			return n
+		}
+	}
+	if d.dispatching.Packet != nil {
+		return fmt.Sprintf("kernel@0x%x", d.dispatching.Packet.KernelObject)
+	}
+	return "kernel"
 }
 
 func (d *DispatcherImpl) kernelCompleted() bool {
