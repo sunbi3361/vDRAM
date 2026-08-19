@@ -11,6 +11,8 @@ import (
 var timingFlag = flag.Bool("timing", false, "Run detailed timing simulation.")
 var maxInstCount = flag.Uint64("max-inst", 0,
 	"Terminate the simulation after the given number of instructions is retired.")
+var progressIntervalFlag = flag.Uint64("progress-interval", 0,
+	"Print the total number of retired instructions to stdout every N instructions (0 = disabled).") // sbin_codex
 var parallelFlag = flag.Bool("parallel", false,
 	"Run the simulation in parallel.")
 var isaDebug = flag.Bool("debug-isa", false, "Generate the ISA debugging file.")
@@ -79,6 +81,18 @@ var visTraceStartTime = flag.Float64("trace-vis-start", -1,
 var visTraceEndTime = flag.Float64("trace-vis-end", -1,
 	"The end time of collecting visualization traces. A negative number"+
 		"means that the trace will be collected to the end of the simulation.")
+
+// sbin_codex
+func metricFileNameFlagIsSet() bool {
+	isSet := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "metric-file-name" {
+			isSet = true
+		}
+	})
+
+	return isSet
+}
 
 // parseFlag applies the runner flag to runner object
 func (r *Runner) parseFlag() *Runner {

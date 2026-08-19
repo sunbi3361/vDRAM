@@ -16,6 +16,7 @@ import (
 	"github.com/sarchlab/mgpusim/v4/amd/samples/runner/emusystem"
 	"github.com/sarchlab/mgpusim/v4/amd/samples/runner/timingconfig"
 	"github.com/sarchlab/mgpusim/v4/amd/sampling"
+	"github.com/tebeka/atexit"
 )
 
 type verificationPreEnablingBenchmark interface {
@@ -39,6 +40,8 @@ type Runner struct {
 
 	GPUIDs     []int
 	benchmarks []benchmarks.Benchmark
+
+	reported bool // sbin_codex
 }
 
 // Init initializes the platform simulate
@@ -75,6 +78,11 @@ func (r *Runner) initSimulation() {
 
 	if *visTracing {
 		builder = builder.WithVisTracingOnStart()
+	}
+
+	// sbin_codex
+	if metricFileNameFlagIsSet() {
+		builder = builder.WithOutputFileName(*filenameFlag)
 	}
 
 	r.simulation = builder.Build()
@@ -141,6 +149,18 @@ func (r *Runner) AddBenchmarkWithoutSettingGPUsToUse(b benchmarks.Benchmark) {
 
 // Run runs the benchmark
 func (r *Runner) Run() {
+	// sbin_codex: max_inst
+	progressInterval = *progressIntervalFlag
+	if *maxInstCount > 0 {
+		onMaxInstReached = func() {
+			r.flushReport()
+			atexit.Exit(0)
+		}
+	}
+	atexit.Register(func() {
+		r.flushReport()
+	})
+
 	r.Driver().Run()
 
 	var wg sync.WaitGroup
@@ -170,6 +190,18 @@ func (r *Runner) Run() {
 
 	r.Driver().Terminate()
 	r.simulation.Terminate()
+}
+
+// sbin_codex: flushReport writes the collected metrics once. It is safe
+// to call from the normal completion path and from the -max-inst atexit handler
+// (which flushes partial metrics before the process exits).
+func (r *Runner) flushReport() {
+	if r.reporter == nil || r.reported {
+		return
+	}
+	r.reporter.report()
+	r.reporter.dataRecorder.Flush()
+	r.reported = true
 }
 
 // Driver returns the GPU driver used by the current runner.

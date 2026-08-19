@@ -1,9 +1,16 @@
 package runner
 
 import (
+	"fmt"
+	"sync/atomic"
+
 	"github.com/sarchlab/akita/v4/tracing"
 	"github.com/tebeka/atexit"
 )
+
+var sharedInstCount uint64                       // sbin_codex
+var progressInterval uint64                      // sbin_codex
+var onMaxInstReached = func() { atexit.Exit(0) } // sbin_codex
 
 // instTracer can trace the number of instruction completed.
 type instTracer struct {
@@ -69,7 +76,12 @@ func (t *instTracer) EndTask(task tracing.Task) {
 
 	t.count++
 
-	if t.maxCount > 0 && t.count >= t.maxCount {
-		atexit.Exit(0)
+	// sbin_codex
+	n := atomic.AddUint64(&sharedInstCount, 1)
+	if progressInterval > 0 && n%progressInterval == 0 {
+		fmt.Printf("[inst-progress] %d instructions retired\n", n)
+	}
+	if t.maxCount > 0 && n >= t.maxCount {
+		onMaxInstReached()
 	}
 }
