@@ -59,6 +59,9 @@ type memoryAllocatorImpl struct {
 	devices              map[int]*Device
 	gpuPageTables        map[int]vm.PageTable // sbin_codex: device ID to GPU page table.
 	totalStorageByteSize uint64
+	livePageCount        uint64 // sbin_codex: physical footprint tracer state.
+	peakPageCount        uint64 // sbin_codex: physical footprint tracer state.
+	totalPageCount       uint64 // sbin_codex: physical footprint tracer state.
 }
 
 func (a *memoryAllocatorImpl) RegisterDevice(device *Device) {
@@ -210,6 +213,7 @@ func (a *memoryAllocatorImpl) allocatePages(
 		a.insertPage(page) // sbin_codex: driver owns CPU/GPU page-table synchronization.
 		a.vAddrToPageMapping[page.VAddr] = page
 	}
+	a.recordAllocation(numPages) // sbin_codex: update physical footprint counters.
 
 	pState.nextVAddr += pageSize * uint64(numPages)
 
@@ -252,6 +256,8 @@ func (a *memoryAllocatorImpl) removePage(vAddr uint64) {
 	deviceID := a.deviceIDByPAddr(page.PAddr)
 	dState := a.devices[deviceID].MemState
 	dState.addSinglePAddr(page.PAddr)
+	a.recordFree()                      // sbin_codex: update physical footprint counters.
+	delete(a.vAddrToPageMapping, vAddr) // sbin_codex: keep live-page accounting accurate.
 
 	a.removePageFromTables(page) // sbin_codex
 }
@@ -299,7 +305,8 @@ func (a *memoryAllocatorImpl) allocatePageWithGivenVAddr(
 		Unified:  isUnified,
 	}
 	a.vAddrToPageMapping[page.VAddr] = page
-	a.updatePage(page) // sbin_codex
+	a.updatePage(page)    // sbin_codex
+	a.recordAllocation(1) // sbin_codex: migration allocation contributes to footprint.
 
 	return page
 }
@@ -329,6 +336,7 @@ func (a *memoryAllocatorImpl) allocateMultiplePagesWithGivenVAddrs(
 		a.updatePage(page) // sbin_codex
 		pages = append(pages, page)
 	}
+	a.recordAllocation(len(vAddrs)) // sbin_codex: remap allocations contribute to footprint.
 
 	return pages
 }

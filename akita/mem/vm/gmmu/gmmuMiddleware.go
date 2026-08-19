@@ -75,7 +75,7 @@ func (m *middleware) parseFromPageWalkCache() bool {
 	return m.handlePageWalkCacheResponse(rsp)
 }
 
-// sbin_codex: look up page-table segments from the root level downward.
+// sbin_codex: issue one aggregate lookup for all page-walk-cache levels.
 func (m *middleware) sendToPageWalkCache(i int) bool {
 	trans := &m.walkingTranslations[i]
 	if trans.state != newTransaction {
@@ -90,7 +90,6 @@ func (m *middleware) sendToPageWalkCache(i int) bool {
 		WithDst(m.pageWalkCache.AsRemote()).
 		WithPID(trans.req.PID).
 		WithVAddr(trans.req.VAddr).
-		WithLevel(trans.level).
 		Build()
 	if err := m.pageWalkCachePort.Send(lookup); err != nil {
 		return false
@@ -101,7 +100,7 @@ func (m *middleware) sendToPageWalkCache(i int) bool {
 	return true
 }
 
-// sbin_codex: one cache miss represents every still-unresolved lower level.
+// sbin_codex: aggregate lookup latency is followed by the remaining walk.
 func (m *middleware) advancePageWalk(i int) bool {
 	trans := &m.walkingTranslations[i]
 	if trans.state != pageWalkCacheDone {
@@ -116,11 +115,11 @@ func (m *middleware) advancePageWalk(i int) bool {
 	return m.fillPageWalkCache(i)
 }
 
-// sbin_codex: install every level resolved by the modeled miss.
+// sbin_codex: install every cacheable level resolved by the modeled walk.
 func (m *middleware) fillPageWalkCache(i int) bool {
 	trans := &m.walkingTranslations[i]
 	madeProgress := false
-	for trans.fillLevel >= 0 {
+	for trans.fillLevel >= lowestPageWalkCacheLevel {
 		if !m.pageWalkCachePort.CanSend() {
 			return madeProgress
 		}
@@ -141,7 +140,8 @@ func (m *middleware) fillPageWalkCache(i int) bool {
 	return true
 }
 
-// sbin_codex: a hit skips one level; a miss charges all remaining levels.
+// sbin_codex: one response reports the deepest cache hit; GMMU then walks only
+// the uncached lower levels and fills cacheable levels reached by that walk.
 func (m *middleware) handlePageWalkCacheResponse(
 	rsp *pagewalkcache.LookupRsp,
 ) bool {
@@ -152,14 +152,19 @@ func (m *middleware) handlePageWalkCacheResponse(
 		}
 
 		if rsp.Hit {
+			if rsp.Level < lowestPageWalkCacheLevel || rsp.Level >= pageTableLevels {
+				panic("page-walk-cache returned an invalid hit level")
+			}
 			tracing.AddTaskStep(
 				tracing.MsgIDAtReceiver(trans.req, m.Comp),
 				m.Comp,
-				"pwc-hit-level"+strconv.Itoa(trans.level),
+				"pwc-hit-level"+strconv.Itoa(rsp.Level),
 			)
 
-			trans.level--
-			trans.state = newTransaction
+			trans.level = rsp.Level - 1
+			trans.cycleLeft = uint64(trans.level+1) * uint64(m.latency)
+			trans.fillLevel = trans.level
+			trans.state = pageWalkCacheDone
 
 			return true
 		}

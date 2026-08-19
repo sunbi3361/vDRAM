@@ -43,13 +43,15 @@ type setState struct {
 	LRU    []int
 }
 
+const lowestCacheLevel = 1 // sbin_codex: leaf level zero is never cached.
+
 func (c *Comp) Tick() bool {
 	return c.MiddlewareHolder.Tick()
 }
 
 func initSets(numLevels, numBlocks int) []setState {
 	sets := make([]setState, numLevels)
-	for level := range sets {
+	for level := lowestCacheLevel; level < len(sets); level++ {
 		sets[level].Blocks = make([]blockState, numBlocks)
 		sets[level].LRU = make([]int, numBlocks)
 		for way := 0; way < numBlocks; way++ {
@@ -96,25 +98,42 @@ func setVisit(s *setState, wayID int) {
 	s.LRU = append(s.LRU, wayID)
 }
 
-func pageTableSegment(vAddr, log2PageSize, bitsPerLevel uint64, level int) uint64 {
+func pageTableSegment(
+	vAddr, log2PageSize, bitsPerLevel uint64,
+	numLevels, level int,
+) uint64 {
 	vpn := vAddr >> log2PageSize
 	shift := uint64(level) * bitsPerLevel
-	return (vpn >> shift) & ((uint64(1) << bitsPerLevel) - 1)
+	prefixBits := uint64(numLevels-level) * bitsPerLevel
+	return (vpn >> shift) & lowBitsMask(prefixBits)
 }
 
-func (c *Comp) segment(req *LookupReq) (uint64, bool) {
-	if req.Level < 0 || req.Level >= c.numLevels {
+func lowBitsMask(bits uint64) uint64 {
+	if bits >= 64 {
+		return ^uint64(0)
+	}
+	return (uint64(1) << bits) - 1
+}
+
+func (c *Comp) segment(vAddr uint64, level int) (uint64, bool) {
+	if level < lowestCacheLevel || level >= c.numLevels {
 		return 0, false
 	}
-	return pageTableSegment(req.VAddr, c.log2PageSize, c.bitsPerLevel, req.Level), true
+	return pageTableSegment(
+		vAddr,
+		c.log2PageSize,
+		c.bitsPerLevel,
+		c.numLevels,
+		level,
+	), true
 }
 
 func (c *Comp) fill(req *FillReq) {
-	if req.Level < 0 || req.Level >= c.numLevels {
+	segment, validLevel := c.segment(req.VAddr, req.Level)
+	if !validLevel {
 		return
 	}
 	set := &c.sets[req.Level]
-	segment := pageTableSegment(req.VAddr, c.log2PageSize, c.bitsPerLevel, req.Level)
 	if _, found := setLookup(set, req.PID, segment); found {
 		return
 	}
@@ -122,6 +141,27 @@ func (c *Comp) fill(req *FillReq) {
 	if ok {
 		setUpdate(set, wayID, req.PID, segment)
 	}
+}
+
+// lookup checks every level in one modeled access. // sbin_codex: each level
+// is an independent fully-associative bank, so the lowest numerical hit is
+// the deepest page-walk level available to GMMU.
+func (c *Comp) lookup(req *LookupReq) (int, bool) {
+	deepestHitLevel := -1
+	for level := c.numLevels - 1; level >= lowestCacheLevel; level-- {
+		segment, validLevel := c.segment(req.VAddr, level)
+		if !validLevel {
+			continue
+		}
+		set := &c.sets[level]
+		wayID, found := setLookup(set, req.PID, segment)
+		if !found {
+			continue
+		}
+		setVisit(set, wayID)
+		deepestHitLevel = level
+	}
+	return deepestHitLevel, deepestHitLevel >= lowestCacheLevel
 }
 
 var _ sim.Component = (*Comp)(nil)

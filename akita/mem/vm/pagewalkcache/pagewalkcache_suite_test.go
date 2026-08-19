@@ -27,7 +27,7 @@ type testHarness struct {
 func newTestHarness(latency int) testHarness {
 	cache := MakeBuilder().
 		WithEngine(sim.NewSerialEngine()).
-		WithNumLevels(3).
+		WithNumLevels(5).
 		WithNumBlocks(2).
 		WithNumReqPerCycle(4).
 		WithLatency(latency).
@@ -38,12 +38,11 @@ func newTestHarness(latency int) testHarness {
 	return testHarness{cache: cache, topPort: topPort}
 }
 
-func lookupReq(port sim.Port, pid vm.PID, addr uint64, level int) *LookupReq {
+func lookupReq(port sim.Port, pid vm.PID, addr uint64) *LookupReq {
 	return LookupReqBuilder{}.
 		WithSrc("GMMU").
 		WithDst(port.AsRemote()).
 		WithPID(pid).
 		WithVAddr(addr).
-		WithLevel(level).
 		Build()
 }

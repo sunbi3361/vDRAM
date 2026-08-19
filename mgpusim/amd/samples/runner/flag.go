@@ -52,6 +52,16 @@ var bufferLevelTracePeriodFlag = flag.Float64("buffer-level-trace-period", 0.0,
 	"The period to dump the buffer level trace.")
 var simdBusyTimeTracerFlag = flag.Bool("report-busy-time", false, "Report SIMD Unit's busy time")
 var reportCPIStackFlag = flag.Bool("report-cpi-stack", false, "Report CPI stack")
+
+// sbin_codex: extended translation report controls.
+var gmmuReportFlag = flag.Bool("report-gmmu", false,
+	"Report GMMU/MMU translation and page-walk-cache statistics.")
+var workingSetReportFlag = flag.Bool("report-working-set", false,
+	"Report distinct pages observed by the L1 TLBs.")
+var memoryFootprintReportFlag = flag.Bool("report-memory-footprint", false,
+	"Report current, peak, and cumulative physical memory footprint.")
+var pageMigrationReportFlag = flag.Bool("report-page-migration", false,
+	"Report page-migration summaries and payload bytes.")
 var customPortForAkitaRTM = flag.Int("akitartm-port", 0,
 	`Custom port to host AkitaRTM. A 4-digit or 5-digit port number is required. If 
 this number is not given or a invalid number is given number, a random port 

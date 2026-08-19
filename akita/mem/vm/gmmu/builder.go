@@ -140,6 +140,7 @@ func (b Builder) createPageWalkCache(name string, c *Comp) {
 		WithFreq(b.freq). // sbin_codex: keep cache and GMMU in the same clock domain.
 		WithLog2PageSize(b.log2PageSize).
 		WithNumLevels(pageTableLevels). // sbin_codex
+		WithNumBlocks(128).             // sbin_codex
 		WithBitsPerLevel(9)
 
 	pageWalkCache := pageWalkCacheBuilder.Build(name + ".PageWalkCache")

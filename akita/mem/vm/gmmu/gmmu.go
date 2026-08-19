@@ -20,6 +20,8 @@ const ( // sbin_codex: states for the typed page-walk-cache latency model.
 // sbin_codex: GMMU and its page-walk cache model a five-level page table.
 const pageTableLevels = 5
 
+const lowestPageWalkCacheLevel = 1 // sbin_codex: level zero is never cached.
+
 // sbin_codex: control states are local to GMMU rather than borrowed from TLB.
 type controlState int
 
@@ -35,8 +37,8 @@ type transaction struct {
 	page      vm.Page
 	cycleLeft uint64 // sbin_codex: remaining modeled page-walk cycles.
 
-	level     int // sbin_codex: current cache level, walked from root to leaf.
-	fillLevel int // sbin_codex: next missed level to install in the cache.
+	level     int // sbin_codex: first uncached level still walked by GMMU.
+	fillLevel int // sbin_codex: next cacheable level to install.
 	msgID     string
 	state     transactionState
 }

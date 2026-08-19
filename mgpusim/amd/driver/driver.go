@@ -49,6 +49,7 @@ type Driver struct {
 	Log2PageSize uint64
 
 	currentPageMigrationReq         *vm.PageMigrationReqToDriver
+	pageMigrationTraceID            string // sbin_codex: summary-only migration trace task.
 	toSendToMMU                     *vm.PageMigrationRspFromDriver
 	migrationReqToSendToCP          []*protocol.PageMigrationReqToCP
 	isCurrentlyHandlingMigrationReq bool
@@ -540,6 +541,19 @@ func (d *Driver) parseFromMMU() bool {
 	switch req := req.(type) {
 	case *vm.PageMigrationReqToDriver:
 		d.currentPageMigrationReq = req
+		// sbin_codex: record migration summary timing without page-level records.
+		d.pageMigrationTraceID = req.ID + "_page_migration"
+		if req.ID == "" {
+			d.pageMigrationTraceID = xid.New().String()
+		}
+		tracing.StartTask(
+			d.pageMigrationTraceID,
+			d.simulationID,
+			d,
+			"page_migration",
+			"PageMigration",
+			req,
+		)
 		d.isCurrentlyHandlingMigrationReq = true
 		d.initiateRDMADrain()
 	default:
@@ -797,6 +811,11 @@ func (d *Driver) processRDMARestartRspToDriver(
 	d.numRDMARestartACK--
 
 	if d.numRDMARestartACK == 0 {
+		// sbin_codex: close the summary-only migration trace task.
+		if d.pageMigrationTraceID != "" {
+			tracing.EndTask(d.pageMigrationTraceID, d)
+			d.pageMigrationTraceID = ""
+		}
 		d.currentPageMigrationReq = nil
 		d.isCurrentlyHandlingMigrationReq = false
 		return true

@@ -1,6 +1,8 @@
 package simulation
 
 import (
+	"time"
+
 	"github.com/rs/xid"
 	"github.com/sarchlab/akita/v4/datarecording"
 	"github.com/sarchlab/akita/v4/monitoring"
@@ -10,11 +12,11 @@ import (
 
 // Builder can be used to build a simulation.
 type Builder struct {
-	parallelEngine     bool
-	monitorOn          bool
-	monitorPort        int
-	outputFileName     string
-	visTracingOnStart  bool
+	parallelEngine    bool
+	monitorOn         bool
+	monitorPort       int
+	outputFileName    string
+	visTracingOnStart bool
 }
 
 // MakeBuilder creates a new builder.
@@ -88,6 +90,9 @@ func (b Builder) createDataRecorder(s *Simulation) {
 	if outputPath == "" {
 		outputPath = "akita_sim_" + s.id
 	}
+	// sbin_codex: add timestamp to avoid overwriting previous simulation data.
+	outputPath += "_" + time.Now().Format("060102_1504")
+
 	s.dataRecorder = datarecording.NewDataRecorder(outputPath)
 }
 

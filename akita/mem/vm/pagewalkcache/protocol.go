@@ -7,14 +7,13 @@ import (
 	"github.com/sarchlab/akita/v4/sim"
 )
 
-// LookupReq asks the page-walk cache whether a page-table segment is present.
-// GMMU sends one request for the level it is about to walk.
+// LookupReq asks all cacheable page-table levels whether the address is
+// present. // sbin_codex: one request probes every level in parallel.
 type LookupReq struct {
 	sim.MsgMeta
 
 	PID   vm.PID
 	VAddr uint64
-	Level int
 }
 
 // Meta returns the message metadata.
@@ -27,7 +26,7 @@ func (r *LookupReq) Clone() sim.Msg {
 	return &clone
 }
 
-// GenerateRsp creates an empty response. The cache fills in Hit and Segment.
+// GenerateRsp creates an empty aggregate response. // sbin_codex
 func (r *LookupReq) GenerateRsp() sim.Rsp {
 	return &LookupRsp{
 		MsgMeta: sim.MsgMeta{
@@ -39,7 +38,7 @@ func (r *LookupReq) GenerateRsp() sim.Rsp {
 		RspTo: r.ID,
 		PID:   r.PID,
 		VAddr: r.VAddr,
-		Level: r.Level,
+		Level: -1,
 	}
 }
 
@@ -48,7 +47,6 @@ type LookupReqBuilder struct {
 	src, dst sim.RemotePort
 	pid      vm.PID
 	vAddr    uint64
-	level    int
 }
 
 // WithSrc sets the request source.
@@ -75,12 +73,6 @@ func (b LookupReqBuilder) WithVAddr(vAddr uint64) LookupReqBuilder {
 	return b
 }
 
-// WithLevel sets the page-table level being queried.
-func (b LookupReqBuilder) WithLevel(level int) LookupReqBuilder {
-	b.level = level
-	return b
-}
-
 // Build creates a lookup request.
 func (b LookupReqBuilder) Build() *LookupReq {
 	return &LookupReq{
@@ -92,13 +84,13 @@ func (b LookupReqBuilder) Build() *LookupReq {
 		},
 		PID:   b.pid,
 		VAddr: b.vAddr,
-		Level: b.level,
 	}
 }
 
-// LookupRsp reports whether the requested page-table segment was cached.
+// LookupRsp reports whether a page-table segment was cached.
 // A miss is represented by Hit=false and is still returned immediately; the
-// cache does not retain a miss until a later fill arrives.
+// cache does not retain a miss until a later fill arrives. // sbin_codex:
+// Level is the deepest cache hit across levels 4..1, or -1 when all miss.
 type LookupRsp struct {
 	sim.MsgMeta
 
@@ -107,7 +99,6 @@ type LookupRsp struct {
 	PID     vm.PID
 	VAddr   uint64
 	Level   int
-	Segment uint64
 }
 
 // Meta returns the message metadata.
@@ -125,6 +116,7 @@ func (r *LookupRsp) GetRspTo() string { return r.RspTo }
 
 // FillReq inserts a page-table segment into the cache. GMMU owns the fill
 // timing and sends this message after it has completed the corresponding walk.
+// sbin_codex: level zero fills are ignored by the cache.
 type FillReq struct {
 	sim.MsgMeta
 

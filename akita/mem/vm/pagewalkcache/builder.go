@@ -42,13 +42,15 @@ func (b Builder) WithFreq(freq sim.Freq) Builder {
 	return b
 }
 
-// WithNumBlocks sets the number of ways per page-table level.
+// WithNumBlocks sets the number of fully-associative entries per cacheable
+// page-table level. // sbin_codex
 func (b Builder) WithNumBlocks(numBlocks int) Builder {
 	b.numBlocks = numBlocks
 	return b
 }
 
-// WithNumLevels sets the number of page-table levels.
+// WithNumLevels sets the number of page-table levels. Level zero remains
+// uncached. // sbin_codex
 func (b Builder) WithNumLevels(numLevels int) Builder {
 	b.numLevels = numLevels
 	return b
@@ -123,6 +125,9 @@ func (b Builder) Build(name string) *Comp {
 	}
 	if b.bitsPerLevel == 0 || b.bitsPerLevel > 63 {
 		panic("pagewalkcache: bits per level must be between 1 and 63")
+	}
+	if uint64(b.numLevels)*b.bitsPerLevel > 63 { // sbin_codex
+		panic("pagewalkcache: page-table VPN must fit in 63 bits")
 	}
 
 	cache := &Comp{

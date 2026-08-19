@@ -87,16 +87,8 @@ func (m *middleware) sendLookupRsp(req *LookupReq) bool {
 		return false
 	}
 
-	segment, validLevel := m.segment(req)
-	hit := false
-	if validLevel {
-		set := &m.sets[req.Level]
-		wayID, found := setLookup(set, req.PID, segment)
-		hit = found
-		if found {
-			setVisit(set, wayID)
-		}
-	}
+	// sbin_codex: all four cacheable levels are checked by one response.
+	hitLevel, hit := m.lookup(req)
 
 	rsp := &LookupRsp{
 		MsgMeta: sim.MsgMeta{
@@ -109,8 +101,7 @@ func (m *middleware) sendLookupRsp(req *LookupReq) bool {
 		Hit:     hit,
 		PID:     req.PID,
 		VAddr:   req.VAddr,
-		Level:   req.Level,
-		Segment: segment,
+		Level:   hitLevel,
 	}
 	return m.topPort.Send(rsp) == nil
 }

@@ -71,6 +71,7 @@ type cuCPIStackTracer struct {
 
 type reporter struct {
 	dataRecorder datarecording.DataRecorder
+	extended     *extendedReporter // sbin_codex: GMMU/memory/working-set reports.
 
 	kernelTimeTracer        *kernelTimeTracer
 	perGPUKernelTimeTracers []*kernelTimeTracer
@@ -96,6 +97,7 @@ type reporter struct {
 func newReporter(s *simulation.Simulation) *reporter {
 	r := &reporter{
 		dataRecorder: s.GetDataRecorder(),
+		extended:     newExtendedReporter(s), // sbin_codex: install extended reporters.
 	}
 
 	r.injectTracers(s)
@@ -115,6 +117,7 @@ func (r *reporter) injectTracers(s *simulation.Simulation) {
 	r.injectRDMAEngineTracer(s)
 	r.injectDRAMTracer(s)
 	r.injectSIMDBusyTimeTracer(s)
+	r.extended.injectTracers(s) // sbin_codex: install extended tracers.
 }
 
 func (r *reporter) injectKernelTimeTracer(s *simulation.Simulation) {
@@ -362,6 +365,7 @@ func (r *reporter) report() {
 	r.reportTLBHitRate()
 	r.reportRDMATransactionCount()
 	r.reportDRAMTransactionCount()
+	r.extended.report(r) // sbin_codex: emit summary metrics without page-fault detail rows.
 }
 
 func (r *reporter) reportKernelTime() {
