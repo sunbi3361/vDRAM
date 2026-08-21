@@ -4,6 +4,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/sarchlab/akita/v4/mem/cache"
+	"github.com/sarchlab/akita/v4/mem/vm"
 	"github.com/sarchlab/akita/v4/sim"
 	"go.uber.org/mock/gomock"
 )
@@ -158,6 +159,7 @@ var _ = Describe("Flusher", func() {
 
 			blocks := []*cache.Block{
 				{
+					PID: 1,
 					Tag: 0x80,
 					DirtyMask: []bool{
 						true, true, false, false, true, true, false, false,
@@ -177,6 +179,7 @@ var _ = Describe("Flusher", func() {
 			bankBuf.EXPECT().Push(gomock.Any()).Do(func(trans *transaction) {
 				Expect(trans.action).To(Equal(bankEvict))
 				Expect(trans.evictingAddr).To(Equal(uint64(0x80)))
+				Expect(trans.evictingPID).To(Equal(vm.PID(1)))
 				Expect(trans.evictingDirtyMask).To(Equal(blocks[0].DirtyMask))
 			})
 

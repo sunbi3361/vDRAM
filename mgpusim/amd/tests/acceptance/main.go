@@ -50,7 +50,8 @@ type benchmarkCase struct {
 	unifiedMemory bool
 	parallel      bool
 	arch          string // GPU architecture: "gcn3" (default) or "cdna3"
-	gpuType       string // GPU model: "r9nano" (default) or "mi300a"
+	// gpuType       string // GPU model: "r9nano" (default) or "mi300a"
+	gpuType string // sbin_codex: GPU model, including "virtual-caching".
 }
 
 func (b benchmark) compile() error {

@@ -1,6 +1,10 @@
 package dispatching
 
 import (
+	"debug/elf"
+	"io"
+	"os"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/sarchlab/akita/v4/sim"
@@ -68,6 +72,7 @@ var _ = Describe("Dispatcher", func() {
 			Packet:     packet,
 			PacketAddr: packetAddr,
 		})
+		alg.EXPECT().NumWG().Return(0)
 
 		dispatcher.StartDispatching(req)
 
@@ -206,7 +211,7 @@ var _ = Describe("Dispatcher", func() {
 		dispatcher.numCompletedWGs = 48
 
 		alg.EXPECT().HasNext().Return(false).AnyTimes()
-		alg.EXPECT().NumWG().Return(64)
+		alg.EXPECT().NumWG().Return(64).Times(2)
 		alg.EXPECT().FreeResources(location)
 
 		firstPeek := dispatchingPort.EXPECT().
@@ -245,7 +250,7 @@ var _ = Describe("Dispatcher", func() {
 		dispatcher.numCompletedWGs = 63
 
 		alg.EXPECT().HasNext().Return(false).AnyTimes()
-		alg.EXPECT().NumWG().Return(64)
+		alg.EXPECT().NumWG().Return(64).Times(2)
 		alg.EXPECT().FreeResources(location)
 
 		firstPeek := dispatchingPort.EXPECT().
@@ -337,4 +342,106 @@ var _ = Describe("Dispatcher", func() {
 		Expect(madeProgress).To(BeFalse())
 		Expect(dispatcher.dispatching).To(BeIdenticalTo(req))
 	})
+
+	It("should print kernel-info to stderr, not stdout", func() {
+		nilPort := NewMockPort(ctrl)
+		nilPort.EXPECT().AsRemote().AnyTimes()
+
+		hsaco := &insts.KernelCodeObject{
+			KernelCodeObjectMeta: &insts.KernelCodeObjectMeta{},
+			Symbol:               &elf.Symbol{Name: "test_kernel"},
+		}
+		packet := &kernels.HsaKernelDispatchPacket{
+			GridSizeX:      8,
+			GridSizeY:      4,
+			GridSizeZ:      1,
+			WorkgroupSizeX: 2,
+			WorkgroupSizeY: 2,
+			WorkgroupSizeZ: 1,
+		}
+
+		req := protocol.NewLaunchKernelReq(nilPort, respondingPort)
+		req.CodeObject = hsaco
+		req.Packet = packet
+
+		alg.EXPECT().StartNewKernel(gomock.Any())
+		alg.EXPECT().NumWG().Return(8)
+
+		stdout, stderr := captureStreams(func() {
+			dispatcher.StartDispatching(req)
+		})
+
+		Expect(stdout).NotTo(ContainSubstring("[kernel-info]"))
+		Expect(stderr).To(ContainSubstring(
+			"[kernel-info] test_kernel grid=8x4x1 wg=2x2x1 totalWGs=8"))
+	})
+
+	It("should print kernel-progress to stderr, not stdout", func() {
+		nilPort := NewMockPort(ctrl)
+		nilPort.EXPECT().AsRemote().AnyTimes()
+
+		req := protocol.NewLaunchKernelReq(nilPort, respondingPort)
+		dispatcher.dispatching = req
+
+		mapWGReq := protocol.MapWGReqBuilder{}.Build()
+		location := dispatchLocation{}
+		dispatcher.inflightWGs[mapWGReq.ID] = location
+		dispatcher.originalReqs[mapWGReq.ID] = mapWGReq
+
+		wgCompletionMsg := &protocol.WGCompletionMsg{RspTo: []string{mapWGReq.ID}}
+
+		dispatcher.numDispatchedWGs = 64
+		dispatcher.numCompletedWGs = 15
+		dispatcher.maxInflightWGs = 16
+
+		alg.EXPECT().HasNext().Return(false).AnyTimes()
+		alg.EXPECT().NumWG().Return(64).Times(2)
+		alg.EXPECT().FreeResources(location)
+
+		firstPeek := dispatchingPort.EXPECT().
+			PeekIncoming().
+			Return(wgCompletionMsg)
+		dispatchingPort.EXPECT().
+			PeekIncoming().
+			Return(nil).
+			After(firstPeek).
+			AnyTimes()
+		dispatchingPort.EXPECT().
+			RetrieveIncoming()
+
+		stdout, stderr := captureStreams(func() {
+			dispatcher.Tick()
+		})
+
+		Expect(stdout).NotTo(ContainSubstring("[kernel-progress]"))
+		Expect(stderr).To(ContainSubstring(
+			"[kernel-progress] kernel wave 1/4 (25%) [cap=16 WGs]"))
+	})
 })
+
+func captureStreams(f func()) (stdout, stderr string) {
+	oldStdout, oldStderr := os.Stdout, os.Stderr
+	rOut, wOut, err := os.Pipe()
+	if err != nil {
+		panic(err)
+	}
+	rErr, wErr, err := os.Pipe()
+	if err != nil {
+		panic(err)
+	}
+	os.Stdout, os.Stderr = wOut, wErr
+
+	defer func() {
+		os.Stdout, os.Stderr = oldStdout, oldStderr
+		rOut.Close()
+		rErr.Close()
+	}()
+
+	f()
+
+	wOut.Close()
+	wErr.Close()
+	outBytes, _ := io.ReadAll(rOut)
+	errBytes, _ := io.ReadAll(rErr)
+	return string(outBytes), string(errBytes)
+}

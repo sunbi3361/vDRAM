@@ -134,6 +134,36 @@ var _ = Describe("Address Translator", func() {
 				To(BeEquivalentTo(transReqReturn))
 		})
 
+		It("forwards PID zero physical instruction traffic when configured", func() {
+			physicalReq := mem.ReadReqBuilder{}.
+				WithAddress(0x100005040).
+				WithByteSize(64).
+				WithPID(0).
+				Build()
+			physicalBuilder := MakeBuilder().
+				WithLog2PageSize(12).
+				WithFreq(1).
+				WithMemoryProviderMapper(memoryPortMapper).
+				WithTranslationProviderMapper(translationPortMapper).
+				WithPhysicalAddressPassthrough()
+			physicalTranslator := physicalBuilder.Build("PhysicalTranslator")
+			physicalTranslator.topPort = topPort
+			physicalTranslator.bottomPort = bottomPort
+			physicalMiddleware := physicalTranslator.Middlewares()[0].(*middleware)
+
+			memoryPortMapper.EXPECT().Find(uint64(0x100005040)).Return(bottomPort.AsRemote())
+			topPort.EXPECT().PeekIncoming().Return(physicalReq)
+			topPort.EXPECT().RetrieveIncoming()
+			bottomPort.EXPECT().Send(gomock.Any()).DoAndReturn(func(forwarded mem.AccessReq) *sim.SendError {
+				Expect(forwarded.GetAddress()).To(Equal(uint64(0x100005040)))
+				Expect(forwarded.GetPID()).To(Equal(vm.PID(0)))
+				return nil
+			})
+
+			Expect(physicalMiddleware.translate()).To(BeTrue())
+			Expect(physicalMiddleware.inflightReqToBottom).To(HaveLen(1))
+		})
+
 		It("should stall if cannot send for translation", func() {
 			translationPortMapper.EXPECT().
 				Find(uint64(0x100)).

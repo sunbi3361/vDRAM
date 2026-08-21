@@ -14,6 +14,7 @@ import (
 	"github.com/sarchlab/mgpusim/v4/amd/samples/runner/timingconfig/gpubuilder"
 	ideall1tlb "github.com/sarchlab/mgpusim/v4/amd/samples/runner/timingconfig/ideal-l1tlb" // sbin_codex: ideal-L1-TLB GPU builder
 	"github.com/sarchlab/mgpusim/v4/amd/samples/runner/timingconfig/r9nano"
+	virtualcaching "github.com/sarchlab/mgpusim/v4/amd/samples/runner/timingconfig/virtual-caching" // sbin_codex: virtual-caching GPU builder
 )
 
 // Builder builds a hardware platform for timing simulation.
@@ -74,7 +75,8 @@ func (b Builder) WithMagicMemoryCopy() Builder {
 	return b
 }
 
-// WithGPUType sets the GPU type for timing simulation (r9nano or mi300a).
+// WithGPUType sets the GPU type for timing simulation (r9nano, mi300a,
+// ideal-l1tlb, or virtual-caching). // sbin_codex
 func (b Builder) WithGPUType(gpuType string) Builder {
 	b.gpuType = gpuType
 	return b
@@ -185,6 +187,12 @@ func (b *Builder) createGPUBuilder(
 	switch b.gpuType {
 	case "ideal-l1tlb": // sbin_codex: ideal-L1TLB GPU config (todo 7).
 		return ideall1tlb.MakeBuilder().
+			WithSimulation(b.simulation).
+			WithMMU(mmuComponent).
+			WithLog2PageSize(b.log2PageSize).
+			WithGlobalStorage(b.globalStorage)
+	case "virtual-caching": // sbin_codex: virtual-caching GPU config.
+		return virtualcaching.MakeBuilder().
 			WithSimulation(b.simulation).
 			WithMMU(mmuComponent).
 			WithLog2PageSize(b.log2PageSize).

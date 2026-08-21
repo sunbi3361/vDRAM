@@ -107,6 +107,7 @@ var benchmarks = []benchmark{
 			{gpus: []int{1}, timing: false, parallel: true, unifiedGPU: false, unifiedMemory: false},
 			{gpus: []int{1}, timing: true, parallel: false, unifiedGPU: false, unifiedMemory: false},
 			{gpus: []int{1}, timing: true, parallel: true, unifiedGPU: false, unifiedMemory: false},
+			{gpus: []int{1}, timing: true, parallel: true, unifiedGPU: false, unifiedMemory: false, arch: "gcn3", gpuType: "virtual-caching"}, // sbin_codex: focused FIR virtual-caching acceptance case.
 			{gpus: []int{1, 2}, timing: false, parallel: false, unifiedGPU: false, unifiedMemory: false},
 			{gpus: []int{1, 2}, timing: false, parallel: true, unifiedGPU: false, unifiedMemory: false},
 			{gpus: []int{1, 2}, timing: true, parallel: false, unifiedGPU: false, unifiedMemory: false},

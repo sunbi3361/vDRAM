@@ -23,7 +23,7 @@ var archFlag = flag.String("arch", "gcn3", "GPU architecture: gcn3 or cdna3.")
 //
 //	"GPU model for timing simulation: r9nano or mi300a.")
 var gpuTypeFlag = flag.String("gpu", "r9nano",
-	"GPU model for timing simulation: r9nano, mi300a, or ideal-l1tlb.")
+	"GPU model for timing simulation: r9nano, mi300a, ideal-l1tlb, or virtual-caching.") // sbin_codex
 
 var verifyFlag = flag.Bool("verify", false, "Verify the emulation result.")
 var memTracing = flag.Bool("trace-mem", false, "Generate memory trace")

@@ -107,9 +107,12 @@ func (m *ctrlMiddleware) processRspFromATs() bool {
 
 	msg := item.(*mem.ControlMsg)
 
-	if m.numAddrTranslationFlushAck > 0 {
-		return m.processAddressTranslatorFlushRsp(msg)
-	} else if m.numAddrTranslationRestartAck > 0 {
+	switch { // sbin_codex: route acknowledgements by explicit lifecycle phase.
+	case m.numPreCacheTranslatorFlushAck > 0:
+		return m.processPreCacheTranslatorFlushRsp(msg)
+	case m.numPostCacheTranslatorFlushAck > 0:
+		return m.processPostCacheTranslatorFlushRsp(msg)
+	case m.numAddrTranslationRestartAck > 0:
 		return m.processAddressTranslatorRestartRsp(msg)
 	}
 
@@ -167,14 +170,14 @@ func (m *ctrlMiddleware) processCUPipelineFlushRsp(
 	m.numCUAck--
 
 	if m.numCUAck == 0 {
-		for i := 0; i < len(m.AddressTranslators); i++ {
+		for _, port := range m.PreCacheTranslators.Ports { // sbin_codex: pre-cache discard follows CU quiescence.
 			req := mem.ControlMsgBuilder{}.
 				WithSrc(m.ToAddressTranslators.AsRemote()).
-				WithDst(m.AddressTranslators[i].AsRemote()).
+				WithDst(port.AsRemote()).
 				ToDiscardTransactions().
 				Build()
 			m.ToAddressTranslators.Send(req)
-			m.numAddrTranslationFlushAck++
+			m.numPreCacheTranslatorFlushAck++
 		}
 	}
 
@@ -183,12 +186,12 @@ func (m *ctrlMiddleware) processCUPipelineFlushRsp(
 	return true
 }
 
-func (m *ctrlMiddleware) processAddressTranslatorFlushRsp(
+func (m *ctrlMiddleware) processPreCacheTranslatorFlushRsp(
 	msg *mem.ControlMsg,
 ) bool {
-	m.numAddrTranslationFlushAck--
+	m.numPreCacheTranslatorFlushAck-- // sbin_codex
 
-	if m.numAddrTranslationFlushAck == 0 {
+	if m.numPreCacheTranslatorFlushAck == 0 {
 		for _, port := range m.L1SCaches {
 			m.flushAndResetL1Cache(port)
 		}
@@ -277,11 +280,43 @@ func (m *ctrlMiddleware) processCacheFlushCausedByTLBShootdown(
 ) bool {
 	m.currFlushRequest = nil
 
-	for i := 0; i < len(m.TLBs); i++ {
+	if len(m.PostCacheTranslators.Ports) == 0 { // sbin_codex: a topology with no post-cache boundary proceeds directly.
+		m.flushTLBs()
+		return true
+	}
+
+	for _, port := range m.PostCacheTranslators.Ports { // sbin_codex: dirty writeback completed while this group remained active.
+		req := mem.ControlMsgBuilder{}.
+			WithSrc(m.ToAddressTranslators.AsRemote()).
+			WithDst(port.AsRemote()).
+			ToDiscardTransactions().
+			Build()
+		m.ToAddressTranslators.Send(req)
+		m.numPostCacheTranslatorFlushAck++
+	}
+
+	return true
+}
+
+func (m *ctrlMiddleware) processPostCacheTranslatorFlushRsp(
+	msg *mem.ControlMsg,
+) bool {
+	m.numPostCacheTranslatorFlushAck-- // sbin_codex: TLB invalidation waits for the post-cache group.
+	if m.numPostCacheTranslatorFlushAck == 0 {
+		m.flushTLBs()
+	}
+
+	m.ToAddressTranslators.RetrieveIncoming()
+
+	return true
+}
+
+func (m *ctrlMiddleware) flushTLBs() {
+	for _, port := range m.TLBs { // sbin_codex: shared by the direct and post-L2-translator paths.
 		shootDownCmd := m.currShootdownRequest
 		req := tlb.FlushReqBuilder{}.
 			WithSrc(m.ToTLBs.AsRemote()).
-			WithDst(m.TLBs[i].AsRemote()).
+			WithDst(port.AsRemote()).
 			WithPID(shootDownCmd.PID).
 			WithVAddrs(shootDownCmd.VAddr).
 			Build()
@@ -289,8 +324,6 @@ func (m *ctrlMiddleware) processCacheFlushCausedByTLBShootdown(
 		m.ToTLBs.Send(req)
 		m.numTLBAck++
 	}
-
-	return true
 }
 
 func (m *ctrlMiddleware) processTLBFlushRsp(
@@ -345,17 +378,20 @@ func (m *ctrlMiddleware) processTLBRestartRsp(
 	m.numTLBAck--
 
 	if m.numTLBAck == 0 {
-		for i := 0; i < len(m.AddressTranslators); i++ {
-			req := mem.ControlMsgBuilder{}.
-				WithSrc(m.ToAddressTranslators.AsRemote()).
-				WithDst(m.AddressTranslators[i].AsRemote()).
-				ToRestart().
-				Build()
-			m.ToAddressTranslators.Send(req)
-
-			// fmt.Printf("Restarting %s\n", p.AddressTranslators[i].Name())
-
-			m.numAddrTranslationRestartAck++
+		translatorGroups := []TranslatorControlGroup{ // sbin_codex: all translator phases restart after TLBs.
+			m.PreCacheTranslators,
+			m.PostCacheTranslators,
+		}
+		for _, group := range translatorGroups {
+			for _, port := range group.Ports {
+				req := mem.ControlMsgBuilder{}.
+					WithSrc(m.ToAddressTranslators.AsRemote()).
+					WithDst(port.AsRemote()).
+					ToRestart().
+					Build()
+				m.ToAddressTranslators.Send(req)
+				m.numAddrTranslationRestartAck++
+			}
 		}
 	}
 

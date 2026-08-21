@@ -108,10 +108,10 @@ var _ = Describe("CommandProcessor", func() {
 
 			addressTranslators = append(addressTranslators,
 				NewMockPort(mockCtrl))
-			commandProcessor.AddressTranslators =
-				append(commandProcessor.AddressTranslators,
+			commandProcessor.PreCacheTranslators.Ports =
+				append(commandProcessor.PreCacheTranslators.Ports,
 					sim.NewPort(commandProcessor, 1, 1, "ATPort"))
-			commandProcessor.AddressTranslators[i] = addressTranslators[i]
+			commandProcessor.PreCacheTranslators.Ports[i] = addressTranslators[i] // sbin_codex
 			for _, mockPort := range addressTranslators {
 				mockPort.EXPECT().AsRemote().AnyTimes()
 			}
@@ -249,7 +249,7 @@ var _ = Describe("CommandProcessor", func() {
 
 		madeProgress := commandProcessor.ctrlMiddleware.processCUPipelineFlushRsp(req)
 
-		Expect(commandProcessor.numAddrTranslationFlushAck).
+		Expect(commandProcessor.numPreCacheTranslatorFlushAck).
 			To(Equal(uint64(10)))
 		Expect(madeProgress).To(BeTrue())
 	})
@@ -259,7 +259,7 @@ var _ = Describe("CommandProcessor", func() {
 			WithDst(commandProcessor.ToAddressTranslators.AsRemote()).
 			ToNotifyDone().
 			Build()
-		commandProcessor.numAddrTranslationFlushAck = 1
+		commandProcessor.numPreCacheTranslatorFlushAck = 1 // sbin_codex
 
 		for i := 0; i < 10; i++ {
 			cacheFlushReq := cache.FlushReqBuilder{}.Build()
@@ -307,7 +307,7 @@ var _ = Describe("CommandProcessor", func() {
 
 		toAddressTranslator.EXPECT().RetrieveIncoming()
 
-		madeProgress := commandProcessor.ctrlMiddleware.processAddressTranslatorFlushRsp(
+		madeProgress := commandProcessor.ctrlMiddleware.processPreCacheTranslatorFlushRsp(
 			req)
 
 		Expect(commandProcessor.numCacheACK).To(Equal(uint64(40)))

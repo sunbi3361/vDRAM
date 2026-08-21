@@ -33,11 +33,12 @@ type Comp struct {
 	translationPort sim.Port
 	ctrlPort        sim.Port
 
-	log2PageSize          uint64
-	deviceID              uint64
-	numReqPerCycle        int
-	memoryPortMapper      mem.AddressToPortMapper
-	translationPortMapper mem.AddressToPortMapper
+	log2PageSize               uint64
+	deviceID                   uint64
+	numReqPerCycle             int
+	memoryPortMapper           mem.AddressToPortMapper
+	translationPortMapper      mem.AddressToPortMapper
+	physicalAddressPassthrough bool // sbin_codex: PID zero is already physical only at an explicit boundary.
 
 	isFlushing bool
 
@@ -95,6 +96,23 @@ func (m *middleware) translate() bool {
 	}
 
 	req := item.(mem.AccessReq)
+	if m.physicalAddressPassthrough && req.GetPID() == 0 {
+		pageBase := req.GetAddress() &^ ((uint64(1) << m.log2PageSize) - 1)
+		forwarded := m.createTranslatedReq(req, vm.Page{
+			PAddr:    pageBase,
+			VAddr:    pageBase,
+			PageSize: 1 << m.log2PageSize,
+		}) // sbin_codex: preserve physical L1I page base and apply offset once.
+		if err := m.bottomPort.Send(forwarded); err != nil {
+			return false
+		}
+		m.inflightReqToBottom = append(m.inflightReqToBottom, reqToBottom{
+			reqFromTop:  req,
+			reqToBottom: forwarded,
+		})
+		m.topPort.RetrieveIncoming()
+		return true
+	}
 	vAddr := req.GetAddress()
 	vPageID := m.addrToPageID(vAddr)
 

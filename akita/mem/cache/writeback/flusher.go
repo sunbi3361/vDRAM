@@ -81,6 +81,7 @@ func (f *flusher) processFlush() bool {
 		flush:             f.processingFlush,
 		victim:            block,
 		action:            bankEvict,
+		evictingPID:       block.PID, // sbin_codex: preserve virtual address-space identity on flush.
 		evictingAddr:      block.Tag,
 		evictingDirtyMask: block.DirtyMask,
 	}

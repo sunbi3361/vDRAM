@@ -45,11 +45,13 @@ Binary path:
 - Use builders to wire components and domains; constructors should not recreate platform topology.
 - Run `go generate ./...` after interfaces used by generated mocks change.
 - Parent guides own edit-marker, toolchain, and required-run-flag rules.
+- Virtual-caching mandatory flags: `-timing -parallel -gpu=virtual-caching -arch=gcn3 -report-all`. <!-- sbin_codex -->
 
 ## ANTI-PATTERNS
 
 - Do not rely on the NVIDIA path in the parent repo; it is unsupported.
-- Do not assume mi300a or virtual-caching selectors target distinct hardware; the timing builder falls through to r9nano.
+- Virtual-caching uses a simplified virtual-address model for L1V, L1S, and L2 data caches; L2D misses/refills and dirty writebacks translate through the per-slice L2 address translator, shared L2TLB, and GMMU at the DRAM boundary. <!-- sbin_codex -->
+- Do not assume `mi300a` or other unhandled selectors target distinct hardware; they may fall through to `r9nano` defaults. <!-- sbin_codex -->
 - Do not edit HSACO binaries, embedded kernels, or generated mocks as authoritative source.
 - Do not let the CP duplicate driver-level command queue logic.
 

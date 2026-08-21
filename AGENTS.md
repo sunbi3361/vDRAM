@@ -6,7 +6,7 @@
 수정 전 코드는 주석 처리
 수정된 코드에는 sbin_codex 표기
 
-필수 사용 flag: -timing -parallel -gpu=r9nano -arch=gcn3 -report-all
+필수 사용 flag: -timing -parallel -gpu=r9nano -arch=gcn3 -report-all  <!-- sbin_codex -->
 
 ---
 
@@ -55,7 +55,7 @@ Core roles. Refs are unmeasured; LSP/codegraph were unavailable.
 ## CONVENTIONS
 
 - Comment out pre-edit code; mark modified code with sbin_codex.
-- Mandatory flags: -timing -parallel -gpu=r9nano -arch=gcn3 -report-all.
+- Mandatory flags: -timing -parallel -gpu=virtual-caching -arch=gcn3 -report-all. <!-- sbin_codex -->
 - Use the custom Go toolchain:
   GOROOT=/home/sbin/tools/go1.26
   GOPATH=/home/sbin/tools/go1.26/gopath
@@ -64,8 +64,9 @@ Core roles. Refs are unmeasured; LSP/codegraph were unavailable.
 ## ANTI-PATTERNS (THIS PROJECT)
 
 - Do not rely on the NVIDIA path; it is prototype/unsupported.
-- Do not assume virtual-caching or mi300a GPU selectors target distinct hardware;
-  the current timing builder falls through to r9nano.
+- Virtual-caching uses a simplified virtual-address model for L1V, L1S, and L2 data caches; L2D misses/refills and dirty writebacks translate through the per-slice L2 address translator, shared L2TLB, and GMMU at the DRAM boundary. <!-- sbin_codex -->
+- Do not assume mi300a or other unhandled GPU selectors target distinct hardware;
+  they may fall through to r9nano defaults. <!-- sbin_codex -->
 - Do not edit generated/copied areas as authoritative source.
 
 ## COMMANDS

@@ -37,11 +37,13 @@ Unsupported prototype:
 - HSACO binaries are embedded with `//go:embed kernels.hsaco`.
 - GCN3 uses HSACO V2/V3 with a 256-byte kernel header in `.text`; V5 uses a 64-byte descriptor in `.rodata`.
 - Tests use Ginkgo/Gomega with `go.uber.org/mock`; regenerate mocks with `mockgen` after interface changes.
+- Mandatory timing flags: `-timing -parallel -gpu=virtual-caching -arch=gcn3 -report-all`. <!-- sbin_codex -->
 
 ## ANTI-PATTERNS
 
 - Do not rely on `nvidia/`; it is unsupported.
-- Do not assume GPU selectors such as `mi300a` or virtual-caching target distinct hardware; the timing builder falls through to `r9nano`.
+- Virtual-caching uses a simplified virtual-address model for L1V, L1S, and L2 data caches; L2D misses/refills and dirty writebacks translate through the per-slice L2 address translator, shared L2TLB, and GMMU at the DRAM boundary. <!-- sbin_codex -->
+- Do not assume `mi300a` or other unhandled GPU selectors target distinct hardware; they may fall through to `r9nano` defaults. <!-- sbin_codex -->
 - Do not treat `HSACO/binaries/` or embedded `.hsaco` files as editable source; regenerate them through the HIP/ROCm toolchain.
 - Do not change `go.mod` without confirming the local Akita `replace` directive remains intact.
 

@@ -14,19 +14,20 @@ import (
 type CommandProcessor struct {
 	*sim.TickingComponent
 
-	Dispatchers        []dispatching.Dispatcher
-	DMAEngine          sim.Port
-	Driver             sim.Port
-	TLBs               []sim.Port
-	CUs                []sim.RemotePort
-	AddressTranslators []sim.Port
-	RDMA               sim.Port
-	PMC                sim.Port
-	L1VCaches          []sim.Port
-	L1SCaches          []sim.Port
-	L1ICaches          []sim.Port
-	L2Caches           []sim.Port
-	DRAMControllers    []*idealmemcontroller.Comp
+	Dispatchers          []dispatching.Dispatcher
+	DMAEngine            sim.Port
+	Driver               sim.Port
+	TLBs                 []sim.Port
+	CUs                  []sim.RemotePort
+	PreCacheTranslators  TranslatorControlGroup // sbin_codex: discarded before cache flush so L1 traffic is quiescent.
+	PostCacheTranslators TranslatorControlGroup // sbin_codex: kept active through dirty writeback, then discarded before TLB flush.
+	RDMA                 sim.Port
+	PMC                  sim.Port
+	L1VCaches            []sim.Port
+	L1SCaches            []sim.Port
+	L1ICaches            []sim.Port
+	L2Caches             []sim.Port
+	DRAMControllers      []*idealmemcontroller.Comp
 
 	ToDriver             sim.Port
 	ToDMA                sim.Port
@@ -40,11 +41,12 @@ type CommandProcessor struct {
 	currShootdownRequest *protocol.ShootDownCommand
 	currFlushRequest     *protocol.FlushReq
 
-	numCUAck                     uint64
-	numAddrTranslationFlushAck   uint64
-	numAddrTranslationRestartAck uint64
-	numTLBAck                    uint64
-	numCacheACK                  uint64
+	numCUAck                       uint64
+	numPreCacheTranslatorFlushAck  uint64 // sbin_codex
+	numPostCacheTranslatorFlushAck uint64 // sbin_codex
+	numAddrTranslationRestartAck   uint64
+	numTLBAck                      uint64
+	numCacheACK                    uint64
 
 	shootDownInProcess bool
 
@@ -54,6 +56,11 @@ type CommandProcessor struct {
 
 	middleware     *cpMiddleware
 	ctrlMiddleware *ctrlMiddleware
+}
+
+// TranslatorControlGroup is a lifecycle phase's ordered translator controls. // sbin_codex
+type TranslatorControlGroup struct {
+	Ports []sim.Port // sbin_codex
 }
 
 // CUInterfaceForCP defines the interface that a CP requires from CU.

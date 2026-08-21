@@ -40,7 +40,9 @@ type Builder struct {
 	memPipelineBufferSize     int
 	maxCoalescingPenalty      int
 	registerScoreboard        bool
+	dataPathTopology          DataPathTopology // sbin_codex: injected strategy owns vector/scalar data-path construction and wiring.
 	l1AddressMapper           mem.AddressToPortMapper
+	l1iAddressMapper          mem.AddressToPortMapper // sbin_codex: preserve an independent instruction path mapper.
 	l1TLBAddressMapper        mem.AddressToPortMapper
 	l1tlbFactory              func(name string, engine sim.Engine, freq sim.Freq, pageTable vm.PageTable, mapper mem.AddressToPortMapper, numReqPerCycle int) sim.Component //nolint:lll // sbin_codex: ideal-L1-TLB factory hook (todo 4).
 	// sbin_codex: page table passed to ideal-L1-TLB factory (todo 4).
@@ -85,6 +87,7 @@ func MakeBuilder() Builder {
 		freq:              1 * sim.GHz,
 		log2CacheLineSize: 6,
 		log2PageSize:      12,
+		dataPathTopology:  NewBaselineDataPathTopology(), // sbin_codex: baseline remains the nil-free default.
 	}
 }
 
@@ -129,6 +132,15 @@ func (b Builder) WithL1AddressMapper(
 	l1AddressMapper mem.AddressToPortMapper,
 ) Builder {
 	b.l1AddressMapper = l1AddressMapper
+	return b
+}
+
+// WithL1IAddressMapper sets the L1 instruction address mapper.
+// sbin_codex: when unset, L1I continues to use the shared L1 mapper.
+func (b Builder) WithL1IAddressMapper(
+	l1iAddressMapper mem.AddressToPortMapper,
+) Builder {
+	b.l1iAddressMapper = l1iAddressMapper
 	return b
 }
 
@@ -251,6 +263,12 @@ func (b Builder) WithRegisterScoreboard(enabled bool) Builder {
 	return b
 }
 
+// WithDataPathTopology sets the vector/scalar cache topology strategy. // sbin_codex
+func (b Builder) WithDataPathTopology(topology DataPathTopology) Builder {
+	b.dataPathTopology = topology // sbin_codex
+	return b
+}
+
 // Build builds the shader array.
 func (b Builder) Build(name string) *sim.Domain {
 	b.name = name
@@ -267,14 +285,8 @@ func (b *Builder) buildComponents() {
 
 	// Build in dataflow order
 	b.buildL1VReorderBuffers()
-	b.buildL1VAddressTranslators()
-	b.buildL1VCaches()
-	b.buildL1VTLBs()
-
 	b.buildL1SReorderBuffer()
-	b.buildL1SAddressTranslator()
-	b.buildL1SCache()
-	b.buildL1STLB()
+	b.dataPathTopology.build(b) // sbin_codex
 
 	b.buildL1IReorderBuffer()
 	b.buildL1ICache()
@@ -292,24 +304,10 @@ func (b *Builder) populateExternalPorts() {
 		b.sa.AddPort(fmt.Sprintf("CUCtrl[%d]", i), cu.GetPortByName("Ctrl"))
 		b.sa.AddPort(fmt.Sprintf("L1VROBCtrl[%d]", i), b.l1vROBs[i].
 			GetPortByName("Control"))
-		b.sa.AddPort(fmt.Sprintf("L1VAddrTransCtrl[%d]", i),
-			b.l1vATs[i].GetPortByName("Control"))
-		b.sa.AddPort(fmt.Sprintf("L1VTLBCtrl[%d]", i),
-			b.l1vTLBs[i].GetPortByName("Control"))
-		b.sa.AddPort(fmt.Sprintf("L1VCacheCtrl[%d]", i),
-			b.l1vCaches[i].GetPortByName("Control"))
-		b.sa.AddPort(fmt.Sprintf("L1VCacheBottom[%d]", i),
-			b.l1vCaches[i].GetPortByName("Bottom"))
-		b.sa.AddPort(fmt.Sprintf("L1VTLBBottom[%d]", i),
-			b.l1vTLBs[i].GetPortByName("Bottom"))
 	}
 
 	b.sa.AddPort("L1SROBCtrl", b.l1sROB.GetPortByName("Control"))
-	b.sa.AddPort("L1SAddrTransCtrl", b.l1sAT.GetPortByName("Control"))
-	b.sa.AddPort("L1STLBCtrl", b.l1sTLB.GetPortByName("Control"))
-	b.sa.AddPort("L1SCacheCtrl", b.l1sCache.GetPortByName("Control"))
-	b.sa.AddPort("L1SCacheBottom", b.l1sCache.GetPortByName("Bottom"))
-	b.sa.AddPort("L1STLBBottom", b.l1sTLB.GetPortByName("Bottom"))
+	b.dataPathTopology.addExternalPorts(b) // sbin_codex
 
 	b.sa.AddPort("L1IROBCtrl", b.l1iROB.GetPortByName("Control"))
 	b.sa.AddPort("L1IAddrTransCtrl", b.l1iAT.GetPortByName("Control"))
@@ -321,88 +319,10 @@ func (b *Builder) populateExternalPorts() {
 }
 
 func (b *Builder) connectComponents() {
-	b.connectVectorMem()
-	b.connectScalarMem()
+	// b.connectVectorMem()
+	// b.connectScalarMem()
+	b.dataPathTopology.connect(b) // sbin_codex: injected topology owns vector/scalar connections.
 	b.connectInstMem()
-}
-
-func (b *Builder) connectVectorMem() {
-	bufSize := 8
-	if b.memPipelineBufferSize > 0 {
-		bufSize = b.memPipelineBufferSize
-	}
-
-	for i := range b.numCUs {
-		cu := b.cus[i]
-		rob := b.l1vROBs[i]
-		at := b.l1vATs[i]
-		l1v := b.l1vCaches[i]
-		tlb := b.l1vTLBs[i]
-
-		// Set mapper targets now that cache/TLB are built
-		if b.l1vMemMappers != nil && i < len(b.l1vMemMappers) && b.l1vMemMappers[i] != nil {
-			b.l1vMemMappers[i].Port = l1v.GetPortByName("Top").AsRemote()
-		}
-		if b.l1vTransMappers != nil && i < len(b.l1vTransMappers) && b.l1vTransMappers[i] != nil {
-			b.l1vTransMappers[i].Port = tlb.GetPortByName("Top").AsRemote()
-		}
-
-		cu.VectorMemModules = &mem.SinglePortMapper{
-			Port: rob.GetPortByName("Top").AsRemote(),
-		}
-		b.connectWithDirectConnection(cu.ToVectorMem,
-			rob.GetPortByName("Top"), bufSize)
-
-		atTopPort := at.GetPortByName("Top")
-		rob.BottomUnit = atTopPort.AsRemote()
-		b.connectWithDirectConnection(
-			rob.GetPortByName("Bottom"), atTopPort, bufSize)
-
-		tlbTopPort := tlb.GetPortByName("Top")
-		b.connectWithDirectConnection(
-			at.GetPortByName("Translation"), tlbTopPort, bufSize)
-
-		b.connectWithDirectConnection(l1v.GetPortByName("Top"),
-			at.GetPortByName("Bottom"), bufSize)
-	}
-}
-
-func (b *Builder) connectScalarMem() {
-	rob := b.l1sROB
-	at := b.l1sAT
-	tlb := b.l1sTLB
-	l1s := b.l1sCache
-
-	// Set mapper targets now that cache/TLB are built
-	if b.l1sMemMapper != nil {
-		b.l1sMemMapper.Port = l1s.GetPortByName("Top").AsRemote()
-	}
-	if b.l1sTransMapper != nil {
-		b.l1sTransMapper.Port = tlb.GetPortByName("Top").AsRemote()
-	}
-
-	atTopPort := at.GetPortByName("Top")
-	rob.BottomUnit = atTopPort.AsRemote()
-	b.connectWithDirectConnection(rob.GetPortByName("Bottom"), atTopPort, 32)
-
-	tlbTopPort := tlb.GetPortByName("Top")
-	b.connectWithDirectConnection(
-		at.GetPortByName("Translation"), tlbTopPort, 32)
-	b.connectWithDirectConnection(
-		l1s.GetPortByName("Top"), at.GetPortByName("Bottom"), 32)
-
-	conn := directconnection.MakeBuilder().
-		WithEngine(b.simulation.GetEngine()).
-		WithFreq(b.freq).
-		Build(b.name + ".ScalarMemConn")
-	b.simulation.RegisterComponent(conn)
-
-	conn.PlugIn(rob.GetPortByName("Top"))
-	for i := range b.numCUs {
-		cu := b.cus[i]
-		cu.ScalarMem = rob.GetPortByName("Top")
-		conn.PlugIn(cu.ToScalarMem)
-	}
 }
 
 func (b *Builder) connectInstMem() {
@@ -731,13 +651,18 @@ func (b *Builder) buildL1IAddressTranslator() {
 	if b.l1iTransMapper == nil {
 		b.l1iTransMapper = &mem.SinglePortMapper{}
 	}
+	l1iAddressMapper := b.l1iAddressMapper // sbin_codex: explicit L1I mapper wins.
+	if l1iAddressMapper == nil {
+		l1iAddressMapper = b.l1AddressMapper // sbin_codex: preserve the builder's existing default.
+	}
 	builder := addresstranslator.MakeBuilder().
 		WithEngine(b.simulation.GetEngine()).
 		WithFreq(b.freq).
 		WithDeviceID(b.gpuID).
 		WithLog2PageSize(b.log2PageSize).
 		WithNumReqPerCycle(16).
-		WithMemoryProviderMapper(b.l1AddressMapper).
+		// WithMemoryProviderMapper(b.l1AddressMapper).
+		WithMemoryProviderMapper(l1iAddressMapper). // sbin_codex
 		WithTranslationProviderMapper(b.l1iTransMapper)
 
 	name := fmt.Sprintf("%s.L1IAddrTrans", b.name)

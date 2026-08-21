@@ -9,8 +9,9 @@ import (
 	"github.com/sarchlab/akita/v4/mem/dram"
 	"github.com/sarchlab/akita/v4/mem/idealmemcontroller"
 	"github.com/sarchlab/akita/v4/mem/mem"
-	"github.com/sarchlab/akita/v4/mem/vm"      // sbin_codex: per-GPU page-table ownership.
-	"github.com/sarchlab/akita/v4/mem/vm/gmmu" // sbin_codex: GPU-side page-table walker.
+	"github.com/sarchlab/akita/v4/mem/vm"                   // sbin_codex: per-GPU page-table ownership.
+	"github.com/sarchlab/akita/v4/mem/vm/addresstranslator" // sbin_codex: L2-boundary translation for virtual caching.
+	"github.com/sarchlab/akita/v4/mem/vm/gmmu"              // sbin_codex: GPU-side page-table walker.
 	"github.com/sarchlab/akita/v4/mem/vm/mmu"
 	"github.com/sarchlab/akita/v4/mem/vm/tlb"
 	"github.com/sarchlab/akita/v4/sim"
@@ -44,22 +45,26 @@ type Builder struct {
 	gmmu                           *gmmu.Comp   // sbin_codex: GPU-side translation endpoint.
 	pageTable                      vm.PageTable // sbin_codex: this GPU's private page table.
 	rdmaAddressMapper              mem.AddressToPortMapper
+	dataPathTopology               DataPathTopology // sbin_codex
+	memoryTopology                 MemoryTopology   // sbin_codex
 
-	gpu                *sim.Domain
-	cp                 *cp.CommandProcessor
-	rdmaEngine         *rdma.Comp
-	pmc                *pagemigrationcontroller.PageMigrationController
-	dmaEngine          *cp.DMAEngine
-	sas                []*sim.Domain
-	l2Caches           []*writeback.Comp
-	l2TLBs             []*tlb.Comp
-	drams              []sim.Component
-	internalConn       *directconnection.Comp
-	l2ToDramConnection *directconnection.Comp
-	l1AddressMapper    *mem.InterleavedAddressPortMapper
-	l1TLBAddressMapper *mem.SinglePortMapper
-	l1tlbFactory       func(name string, engine sim.Engine, freq sim.Freq, pageTable vm.PageTable, mapper mem.AddressToPortMapper, numReqPerCycle int) sim.Component //nolint:lll // sbin_codex: ideal-L1-TLB factory injection (todo 5).
-	pmcAddressMapper   mem.AddressToPortMapper
+	gpu                  *sim.Domain
+	cp                   *cp.CommandProcessor
+	rdmaEngine           *rdma.Comp
+	pmc                  *pagemigrationcontroller.PageMigrationController
+	dmaEngine            *cp.DMAEngine
+	sas                  []*sim.Domain
+	l2Caches             []*writeback.Comp
+	l2AddressTranslators []*addresstranslator.Comp // sbin_codex: one translator per L2/DRAM slice.
+	l2TLBs               []*tlb.Comp
+	drams                []sim.Component
+	internalConn         *directconnection.Comp
+	l2ToDramConnection   *directconnection.Comp
+	l1AddressMapper      *mem.InterleavedAddressPortMapper
+	l1DataAddressMapper  *mem.InterleavedAddressPortMapper // sbin_codex: selected by the injected data-path topology.
+	l1TLBAddressMapper   *mem.SinglePortMapper
+	l1tlbFactory         func(name string, engine sim.Engine, freq sim.Freq, pageTable vm.PageTable, mapper mem.AddressToPortMapper, numReqPerCycle int) sim.Component //nolint:lll // sbin_codex: ideal-L1-TLB factory injection (todo 5).
+	pmcAddressMapper     mem.AddressToPortMapper
 }
 
 // MakeBuilder creates a new builder.
@@ -75,6 +80,8 @@ func MakeBuilder() Builder {
 		log2MemoryBankInterleavingSize: 7,
 		memAddrOffset:                  0,
 		dramSize:                       4 * mem.GB,
+		dataPathTopology:               NewBaselineDataPathTopology(), // sbin_codex: baseline is the nil-free default.
+		memoryTopology:                 NewBaselineMemoryTopology(),   // sbin_codex: baseline is the nil-free default.
 	}
 }
 
@@ -195,8 +202,21 @@ func (b Builder) WithRDMAAddressMapper(
 	return b
 }
 
+// WithDataPathTopology sets L1 mapper and control wiring behavior. // sbin_codex
+func (b Builder) WithDataPathTopology(topology DataPathTopology) Builder {
+	b.dataPathTopology = topology // sbin_codex
+	return b
+}
+
+// WithMemoryTopology sets L2 physical-boundary behavior. // sbin_codex
+func (b Builder) WithMemoryTopology(topology MemoryTopology) Builder {
+	b.memoryTopology = topology // sbin_codex
+	return b
+}
+
 // Build builds the hardware platform.
 func (b Builder) Build(name string) *sim.Domain {
+	b.validateTopologyPair() // sbin_codex: reject invalid composition before domain or mapper construction.
 	b.name = name
 	b.gpu = sim.NewDomain(name)
 
@@ -206,6 +226,7 @@ func (b Builder) Build(name string) *sim.Domain {
 	b.l1AddressMapper.LowAddress = b.memAddrOffset
 	b.l1AddressMapper.HighAddress = b.memAddrOffset + b.dramSize
 	b.l1AddressMapper.UseAddressSpaceLimitation = true
+	b.dataPathTopology.initializeMapper(&b) // sbin_codex
 
 	b.l1TLBAddressMapper = &mem.SinglePortMapper{}
 
@@ -215,6 +236,8 @@ func (b Builder) Build(name string) *sim.Domain {
 	b.buildCP()
 	b.buildGMMU() // sbin_codex: the L2 TLB must target the GPU-side walker.
 	b.buildL2TLB()
+	// b.buildL2AddressTranslators()
+	b.memoryTopology.buildBoundary(&b) // sbin_codex: boundary construction follows the shared L2 TLB.
 
 	b.connectCP()
 	b.connectL2AndDRAM()
@@ -266,85 +289,23 @@ func (b *Builder) connectCP() {
 	b.internalConn.PlugIn(pmcControlPort)
 
 	b.connectCPWithCUs()
-	b.connectCPWithAddressTranslators()
-	b.connectCPWithTLBs()
+	// b.connectCPWithAddressTranslators()
+	// b.connectCPWithTLBs()
+	b.dataPathTopology.connectCP(b) // sbin_codex
+	b.memoryTopology.connectCP(b)   // sbin_codex
 	b.connectCPWithCaches()
 }
 
 func (b *Builder) connectL1ToL2() {
-	l1ToL2Conn := directconnection.MakeBuilder().
-		WithEngine(b.simulation.GetEngine()).
-		WithFreq(b.freq).
-		Build(b.name + ".L1ToL2")
-
-	b.rdmaEngine.SetLocalModuleFinder(b.l1AddressMapper)
-	b.l1AddressMapper.ModuleForOtherAddresses = b.rdmaEngine.RDMARequestInside.AsRemote()
-	l1ToL2Conn.PlugIn(b.rdmaEngine.RDMARequestInside)
-	l1ToL2Conn.PlugIn(b.rdmaEngine.RDMADataInside)
-
-	for _, l2 := range b.l2Caches {
-		l1ToL2Conn.PlugIn(l2.GetPortByName("Top"))
-	}
-
-	for _, sa := range b.sas {
-		for i := range b.numCUPerShaderArray {
-			l1ToL2Conn.PlugIn(
-				sa.GetPortByName(fmt.Sprintf("L1VCacheBottom[%d]", i)))
-		}
-
-		l1ToL2Conn.PlugIn(sa.GetPortByName("L1SCacheBottom"))
-		l1ToL2Conn.PlugIn(sa.GetPortByName("L1ICacheBottom"))
-	}
+	b.dataPathTopology.connectL1ToL2(b) // sbin_codex
 }
 
 func (b *Builder) connectL2AndDRAM() {
-	b.l2ToDramConnection = directconnection.MakeBuilder().
-		WithEngine(b.simulation.GetEngine()).
-		WithFreq(b.freq).
-		Build(b.name + ".L2ToDRAM")
-	b.simulation.RegisterComponent(b.l2ToDramConnection)
-
-	lowModuleFinder := mem.NewInterleavedAddressPortMapper(
-		1 << b.log2MemoryBankInterleavingSize)
-
-	for i, l2 := range b.l2Caches {
-		b.l2ToDramConnection.PlugIn(l2.GetPortByName("Bottom"))
-		l2.SetAddressToPortMapper(&mem.SinglePortMapper{
-			Port: b.drams[i].GetPortByName("Top").AsRemote(),
-		})
-	}
-
-	for _, dram := range b.drams {
-		b.l2ToDramConnection.PlugIn(dram.GetPortByName("Top"))
-		lowModuleFinder.LowModules = append(lowModuleFinder.LowModules,
-			dram.GetPortByName("Top").AsRemote())
-	}
-
-	b.dmaEngine.SetLocalDataSource(lowModuleFinder)
-	b.l2ToDramConnection.PlugIn(b.dmaEngine.ToMem)
-
-	b.pmc.MemCtrlFinder = lowModuleFinder
-	b.l2ToDramConnection.PlugIn(
-		b.pmc.GetPortByName("LocalMem"))
+	b.memoryTopology.connectL2AndDRAM(b) // sbin_codex
 }
 
 func (b *Builder) connectL1TLBToL2TLB() {
-	tlbConn := directconnection.MakeBuilder().
-		WithEngine(b.simulation.GetEngine()).
-		WithFreq(b.freq).
-		Build(b.name + ".L1TLBToL2TLB")
-
-	tlbConn.PlugIn(b.l2TLBs[0].GetPortByName("Top"))
-
-	for _, sa := range b.sas {
-		for i := range b.numCUPerShaderArray {
-			tlbConn.PlugIn(
-				sa.GetPortByName(fmt.Sprintf("L1VTLBBottom[%d]", i)))
-		}
-
-		tlbConn.PlugIn(sa.GetPortByName("L1STLBBottom"))
-		tlbConn.PlugIn(sa.GetPortByName("L1ITLBBottom"))
-	}
+	b.dataPathTopology.connectTranslation(b) // sbin_codex
 }
 
 type cuInterfaceForCP struct {
@@ -404,46 +365,25 @@ func (b *Builder) connectCPWithCUs() {
 	}
 }
 
-func (b *Builder) connectCPWithAddressTranslators() {
-	for _, sa := range b.sas {
-		for i := range b.numCUPerShaderArray {
-			at := sa.GetPortByName(fmt.Sprintf("L1VAddrTransCtrl[%d]", i))
-			b.cp.AddressTranslators = append(b.cp.AddressTranslators, at)
-			b.internalConn.PlugIn(at)
-		}
-
-		l1sAT := sa.GetPortByName("L1SAddrTransCtrl")
-		b.cp.AddressTranslators = append(b.cp.AddressTranslators, l1sAT)
-		b.internalConn.PlugIn(l1sAT)
-
-		l1iAT := sa.GetPortByName("L1IAddrTransCtrl")
-		b.cp.AddressTranslators = append(b.cp.AddressTranslators, l1iAT)
-		b.internalConn.PlugIn(l1iAT)
+func (b *Builder) addSharedL2TLBs() { // sbin_codex
+	for _, tlb := range b.l2TLBs {
+		b.addTLB(tlb.GetPortByName("Control"))
 	}
 }
 
-func (b *Builder) connectCPWithTLBs() {
-	for _, sa := range b.sas {
-		for i := range b.numCUPerShaderArray {
-			tlb := sa.GetPortByName(fmt.Sprintf("L1VTLBCtrl[%d]", i))
-			b.cp.TLBs = append(b.cp.TLBs, tlb)
-			b.internalConn.PlugIn(tlb)
-		}
+func (b *Builder) addTLB(port sim.Port) { // sbin_codex
+	b.cp.TLBs = append(b.cp.TLBs, port)
+	b.internalConn.PlugIn(port)
+}
 
-		l1sTLB := sa.GetPortByName("L1STLBCtrl")
-		b.cp.TLBs = append(b.cp.TLBs, l1sTLB)
-		b.internalConn.PlugIn(l1sTLB)
+func (b *Builder) addPreCacheTranslator(port sim.Port) { // sbin_codex
+	b.cp.PreCacheTranslators.Ports = append(b.cp.PreCacheTranslators.Ports, port)
+	b.internalConn.PlugIn(port)
+}
 
-		l1iTLB := sa.GetPortByName("L1ITLBCtrl")
-		b.cp.TLBs = append(b.cp.TLBs, l1iTLB)
-		b.internalConn.PlugIn(l1iTLB)
-	}
-
-	for _, tlb := range b.l2TLBs {
-		ctrlPort := tlb.GetPortByName("Control")
-		b.cp.TLBs = append(b.cp.TLBs, ctrlPort)
-		b.internalConn.PlugIn(ctrlPort)
-	}
+func (b *Builder) addPostCacheTranslator(port sim.Port) { // sbin_codex
+	b.cp.PostCacheTranslators.Ports = append(b.cp.PostCacheTranslators.Ports, port)
+	b.internalConn.PlugIn(port)
 }
 
 func (b *Builder) connectCPWithCaches() {
@@ -489,10 +429,10 @@ func (b *Builder) buildSAs() {
 						WithNumCUs(b.numCUPerShaderArray).
 						WithLog2CacheLineSize(b.log2CacheLineSize).
 						WithLog2PageSize(b.log2PageSize).
-						WithL1AddressMapper(b.l1AddressMapper).
 						WithL1TLBAddressMapper(b.l1TLBAddressMapper).
 						WithPageTable(b.pageTable).      // sbin_codex: pass page table for ideal-L1-TLB factory (todo 5).
 						WithL1TLBFactory(b.l1tlbFactory) // sbin_codex: pass ideal-L1-TLB factory hook (todo 5).
+	saBuilder = b.dataPathTopology.configureShaderArray(b, saBuilder) // sbin_codex
 
 	// if b.enableISADebugging {
 	// 	saBuilder = saBuilder.withIsaDebugging()
@@ -706,7 +646,8 @@ func (b *Builder) connectL2TLBToGMMU() {
 func (b *Builder) buildL2TLB() {
 	numEntries := 512
 	numWays := 64
-	numSets := int(numEntries/numWays)
+	// numSets := int(numEntries/numWays)
+	numSets := numEntries / numWays // sbin_codex: restore the baseline expression shape; both operands are int.
 
 	builder := tlb.MakeBuilder().
 		WithEngine(b.simulation.GetEngine()).

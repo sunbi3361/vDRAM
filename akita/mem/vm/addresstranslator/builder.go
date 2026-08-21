@@ -15,12 +15,13 @@ type Builder struct {
 	log2PageSize   uint64
 	deviceID       uint64
 
-	memPortMapper             mem.AddressToPortMapper
-	memPortMapperType         string
-	memRemotePorts            []sim.RemotePort
-	translationPortMapper     mem.AddressToPortMapper
-	translationPortMapperType string
-	translationRemotePorts    []sim.RemotePort
+	memPortMapper              mem.AddressToPortMapper
+	memPortMapperType          string
+	memRemotePorts             []sim.RemotePort
+	translationPortMapper      mem.AddressToPortMapper
+	translationPortMapperType  string
+	translationRemotePorts     []sim.RemotePort
+	physicalAddressPassthrough bool // sbin_codex: explicit mixed-address boundary mode.
 }
 
 // MakeBuilder creates a new builder
@@ -61,6 +62,12 @@ func (b Builder) WithLog2PageSize(n uint64) Builder {
 // WithDeviceID sets the GPU ID that the address translator belongs to
 func (b Builder) WithDeviceID(n uint64) Builder {
 	b.deviceID = n
+	return b
+}
+
+// WithPhysicalAddressPassthrough forwards PID zero requests without GMMU.
+func (b Builder) WithPhysicalAddressPassthrough() Builder { // sbin_codex
+	b.physicalAddressPassthrough = true
 	return b
 }
 
@@ -164,6 +171,7 @@ func (b Builder) Build(name string) *Comp {
 	t.numReqPerCycle = b.numReqPerCycle
 	t.log2PageSize = b.log2PageSize
 	t.deviceID = b.deviceID
+	t.physicalAddressPassthrough = b.physicalAddressPassthrough // sbin_codex
 
 	middleware := &middleware{Comp: t}
 	t.AddMiddleware(middleware)
