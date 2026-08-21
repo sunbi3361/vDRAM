@@ -19,6 +19,9 @@ type Builder struct {
 	useMagicMemoryCopy  bool
 	middlewareD2HCycles int
 	middlewareH2DCycles int
+
+	// sbin_codex: UVM demand-paging configuration.
+	uvmConfig UVMConfig
 }
 
 // MakeBuilder creates a driver builder with some default configuration
@@ -82,6 +85,12 @@ func (b Builder) WithH2DCycles(h2dCycles int) Builder {
 	return b
 }
 
+// WithUVM enables UVM demand-paged managed memory on the built driver.
+func (b Builder) WithUVM(config UVMConfig) Builder {
+	b.uvmConfig = config
+	return b
+}
+
 // Build creates a driver.
 func (b Builder) Build(name string) *Driver {
 	driver := new(Driver)
@@ -121,6 +130,26 @@ func (b Builder) Build(name string) *Driver {
 	driver.AddPort("GPU", driver.gpuPort)
 	driver.mmuPort = sim.NewPort(driver, 1, 1, "Driver.ToMMU")
 	driver.AddPort("MMU", driver.mmuPort)
+
+	// sbin_codex: construct the UVM manager and its fault port when enabled.
+	if b.uvmConfig.Enabled {
+		config := b.uvmConfig
+		config.Log2PageSize = b.log2PageSize
+		config.GPUCoreFrequency = b.freq
+		config.PageSize = uint64(1) << b.log2PageSize
+		if config.RegionSize == 0 {
+			config.RegionSize = 64 * 1024
+		}
+		if config.VABlockSize == 0 {
+			config.VABlockSize = 2 * 1024 * 1024
+		}
+		if config.TBNMaxFetchSize == 0 {
+			config.TBNMaxFetchSize = config.VABlockSize
+		}
+		driver.uvm = newUVMManager(driver, config)
+		driver.uvmPort = sim.NewPort(driver, 4096, 4096, "Driver.UVM")
+		driver.AddPort("UVM", driver.uvmPort)
+	}
 
 	driver.enqueueSignal = make(chan bool)
 	driver.driverStopped = make(chan bool)

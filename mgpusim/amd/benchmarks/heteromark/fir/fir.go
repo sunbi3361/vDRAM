@@ -71,6 +71,7 @@ type Benchmark struct {
 	gOutputData  driver.Ptr
 
 	useUnifiedMemory bool
+	useManagedMemory bool
 }
 
 //go:embed kernels.hsaco
@@ -111,6 +112,11 @@ func (b *Benchmark) SelectGPU(gpus []int) {
 // SetUnifiedMemory uses Unified Memory
 func (b *Benchmark) SetUnifiedMemory() {
 	b.useUnifiedMemory = true
+}
+
+// SetManagedMemory switches allocations to UVM managed memory.
+func (b *Benchmark) SetManagedMemory() {
+	b.useManagedMemory = true
 }
 
 // Run runs
@@ -165,7 +171,18 @@ func (b *Benchmark) initMem() {
 
 	for i, gpu := range b.gpus {
 		b.driver.SelectGPU(b.context, gpu)
-		if b.useUnifiedMemory {
+if b.useManagedMemory {
+		b.gFilterData = make([]driver.Ptr, len(b.gpus))
+		b.gHistoryData = b.driver.AllocateManaged(
+			b.context, uint64(b.numTaps*4))
+		b.gInputData = b.driver.AllocateManaged(
+			b.context, uint64(b.Length*4))
+		b.gOutputData = b.driver.AllocateManaged(
+			b.context, uint64(b.Length*4))
+	} else if b.useManagedMemory {
+			b.gFilterData[i] = b.driver.AllocateManaged(
+				b.context, uint64(b.numTaps*4))
+		} else if b.useUnifiedMemory {
 			b.gFilterData[i] = b.driver.AllocateUnifiedMemory(
 				b.context, uint64(b.numTaps*4))
 		} else {

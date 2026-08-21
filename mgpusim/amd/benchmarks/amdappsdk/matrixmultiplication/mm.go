@@ -26,6 +26,7 @@ type GPUMatrixMultiplier struct {
 	kernel           *insts.KernelCodeObject
 	Arch             arch.Type
 	useUnifiedMemory bool
+	useManagedMemory bool
 	blockABuf        driver.Ptr
 }
 
@@ -176,6 +177,15 @@ func (m *GPUMatrixMultiplier) launchKernel( //nolint:funlen
 func (m *GPUMatrixMultiplier) initMemory(
 	mA, mB, mC *Matrix,
 ) (driver.Ptr, driver.Ptr, driver.Ptr) {
+	if m.useManagedMemory {
+		gA := m.driver.AllocateManaged(m.context, uint64(mA.Width*mA.Height*4))
+		gB := m.driver.AllocateManaged(m.context, uint64(mB.Width*mB.Height*4))
+		gC := m.driver.AllocateManaged(m.context, uint64(mC.Width*mC.Height*4))
+		m.driver.MemCopyH2D(m.context, gA, mA.Data)
+		m.driver.MemCopyH2D(m.context, gB, mB.Data)
+
+		return gA, gB, gC
+	}
 	if m.useUnifiedMemory {
 		gA := m.driver.AllocateUnifiedMemory(m.context, uint64(mA.Width*mA.Height*4))
 		gB := m.driver.AllocateUnifiedMemory(m.context, uint64(mB.Width*mB.Height*4))

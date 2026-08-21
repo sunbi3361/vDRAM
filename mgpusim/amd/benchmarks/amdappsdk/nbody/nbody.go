@@ -63,6 +63,7 @@ type Benchmark struct {
 	gpus             []int
 	queues           []*driver.CommandQueue
 	useUnifiedMemory bool
+	useManagedMemory bool
 	nbodyKernel      *insts.KernelCodeObject
 
 	Arch         arch.Type
@@ -113,6 +114,11 @@ func (b *Benchmark) SetUnifiedMemory() {
 	b.useUnifiedMemory = true
 }
 
+// SetManagedMemory switches allocations to UVM managed memory.
+func (b *Benchmark) SetManagedMemory() {
+	b.useManagedMemory = true
+}
+
 //go:embed nbody.hsaco
 var gcn3HSACOBytes []byte
 
@@ -160,7 +166,16 @@ func (b *Benchmark) initMem() {
 
 	b.fill()
 
-	if b.useUnifiedMemory {
+	if b.useManagedMemory {
+		b.currPos = b.driver.AllocateManaged(b.context,
+			uint64(b.numBodies*4*4))
+		b.newPos = b.driver.AllocateManaged(b.context,
+			uint64(b.numBodies*4*4))
+		b.currVel = b.driver.AllocateManaged(b.context,
+			uint64(b.numBodies*4*4))
+		b.newVel = b.driver.AllocateManaged(b.context,
+			uint64(b.numBodies*4*4))
+	} else if b.useUnifiedMemory {
 		b.currPos = b.driver.AllocateUnifiedMemory(b.context,
 			uint64(b.numBodies*4*4))
 		b.newPos = b.driver.AllocateUnifiedMemory(b.context,

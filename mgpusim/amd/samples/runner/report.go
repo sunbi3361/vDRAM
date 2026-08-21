@@ -94,6 +94,8 @@ type reporter struct {
 	ReportDRAMTransactionCount bool
 	ReportSIMDBusyTime         bool
 	ReportCPIStack             bool
+
+	driver *driver.Driver // sbin_codex: UVM statistics source.
 }
 
 func newReporter(s *simulation.Simulation) *reporter {
@@ -105,6 +107,10 @@ func newReporter(s *simulation.Simulation) *reporter {
 	r.injectTracers(s)
 
 	r.dataRecorder.CreateTable(tableName, metric{})
+
+	if c := s.GetComponentByName("Driver"); c != nil { // sbin_codex: UVM stats source.
+		r.driver = c.(*driver.Driver)
+	}
 
 	return r
 }
@@ -397,6 +403,61 @@ func (r *reporter) report() {
 	r.reportDRAMTransactionCount()
 	r.extended.report(r) // sbin_codex: emit summary metrics without page-fault detail rows.
 	r.reportL2TLBMPKI()  // sbin_codex: L2 TLB MPKI from the shared tracers.
+	r.reportUVM()        // sbin_codex: UVM demand-paging statistics.
+}
+
+func (r *reporter) reportUVM() {
+	if r.driver == nil || !r.driver.UVMEnabled() {
+		return
+	}
+	stats := r.driver.UVMStats()
+	rows := []struct {
+		what string
+		val  float64
+		unit string
+	}{
+		{"uvm_enabled", boolToFloat(stats.Enabled), ""},
+		{"uvm_ideal", boolToFloat(stats.Ideal), ""},
+		{"uvm_fault_requests", float64(stats.PageFaultRequests), ""},
+		{"uvm_unique_page_faults", float64(stats.UniquePageFaults), ""},
+		{"uvm_coalesced_fault_requests", float64(stats.CoalescedFaultReqs), ""},
+		{"uvm_tbn_fetches", float64(stats.TBNFetches), ""},
+		{"uvm_tbn_64kb_fetches", float64(stats.TBN64KBFetches), ""},
+		{"uvm_tbn_larger_fetches", float64(stats.TBNLargerFetches), ""},
+		{"uvm_demand_migrated_pages", float64(stats.DemandMigPages), ""},
+		{"uvm_prefetched_pages", float64(stats.PrefetchPages), ""},
+		{"uvm_cpu_to_gpu_migrations", float64(stats.CPUToGPUMigrations), ""},
+		{"uvm_gpu_to_cpu_migrations", float64(stats.GPUToCPUMigrations), ""},
+		{"uvm_migrated_pages", float64(stats.MigratedPages), ""},
+		{"uvm_migrated_bytes", float64(stats.MigratedBytes), ""},
+		{"uvm_evictions", float64(stats.Evictions), ""},
+		{"uvm_evicted_pages", float64(stats.EvictedPages), ""},
+		{"uvm_evicted_bytes", float64(stats.EvictedBytes), ""},
+		{"uvm_repeated_migrations", float64(stats.RepeatedMigrations), ""},
+		{"uvm_remote_accesses", float64(stats.RemoteAccesses), ""},
+		{"uvm_access_counter_notifications", float64(stats.AccessCounterNotif), ""},
+		{"uvm_access_counter_triggered_migrations", float64(stats.AccessCounterMigr), ""},
+		{"uvm_gpu_resident_pages_peak", float64(stats.GPUResidentPagesPeak), ""},
+		{"uvm_gpu_resident_bytes_peak", float64(stats.GPUResidentBytesPeak), ""},
+		{"uvm_fault_handling_time", float64(stats.FaultHandlingTime), "second"},
+		{"uvm_migration_time", float64(stats.MigrationTime), "second"},
+		{"uvm_eviction_time", float64(stats.EvictionTime), "second"},
+	}
+	for _, row := range rows {
+		r.dataRecorder.InsertData(tableName, metric{
+			Location: "UVM",
+			What:     row.what,
+			Value:    row.val,
+			Unit:     row.unit,
+		})
+	}
+}
+
+func boolToFloat(b bool) float64 {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 func (r *reporter) reportKernelTime() {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 
+	"github.com/sarchlab/akita/v4/mem/vm"
 	"github.com/sarchlab/akita/v4/sim"
 	"github.com/sarchlab/mgpusim/v4/amd/protocol"
 )
@@ -18,6 +19,21 @@ type defaultMemoryCopyMiddleware struct {
 	cyclesLeft   int
 
 	awaitingReqs []sim.Msg
+
+	// sbin_codex: deferred managed D2H state. The data read is delayed until
+	// the GPU flush completes and all UVM faults/migrations in the copied
+	// range drain, so CPU-resident pages written by the kernel are migrated
+	// before their data is read back.
+	pendingD2H        *deferredD2H
+	pendingD2HFlushed bool
+}
+
+type deferredD2H struct {
+	cmd   *MemCopyD2HCommand
+	queue *CommandQueue
+	pid   vm.PID
+	start uint64
+	size  uint64
 }
 
 func (m *defaultMemoryCopyMiddleware) ProcessCommand(
@@ -65,6 +81,16 @@ func (m *defaultMemoryCopyMiddleware) processMemCopyH2DCommand(
 			sizeToCopy = sizeLeft
 		}
 
+		// sbin_codex: managed CPU-resident pages copy straight into the host
+		// backing frame in globalStorage instead of DMA to a GPU.
+		if page.Managed && page.DeviceID == 0 {
+			m.driver.globalStorage.Write(pAddr, rawBytes[offset:offset+sizeToCopy])
+			sizeLeft -= sizeToCopy
+			addr += sizeToCopy
+			offset += sizeToCopy
+			continue
+		}
+
 		gpuID := m.driver.memAllocator.GetDeviceIDByPAddr(pAddr)
 		req := protocol.NewMemCopyH2DReq(
 			m.driver.gpuPort, m.driver.GPUs[gpuID-1],
@@ -83,6 +109,15 @@ func (m *defaultMemoryCopyMiddleware) processMemCopyH2DCommand(
 
 	m.cyclesLeft = m.cyclesPerH2D
 
+	// sbin_codex: a fully managed CPU-resident copy created no DMA requests;
+	// complete the command immediately instead of waiting for responses.
+	if len(cmd.Reqs) == 0 && len(m.awaitingReqs) == 0 {
+		queue.IsRunning = false
+		queue.Dequeue()
+		m.driver.logCmdComplete(cmd)
+		return true
+	}
+
 	queue.IsRunning = true
 
 	return true
@@ -92,11 +127,45 @@ func (m *defaultMemoryCopyMiddleware) processMemCopyD2HCommand(
 	cmd *MemCopyD2HCommand,
 	queue *CommandQueue,
 ) bool {
-	if m.needFlushing(queue.Context, cmd.Src, uint64(binary.Size(cmd.Dst))) {
+	size := uint64(binary.Size(cmd.Dst))
+	needsFlush := m.needFlushing(queue.Context, cmd.Src, size)
+	hasManaged := m.rangeHasManagedPages(queue.Context.pid, uint64(cmd.Src), size)
+
+	// sbin_codex: for a managed range that may hold dirty GPU-cache data,
+	// defer the read until the flush completes and the UVM manager drains the
+	// faults triggered by the flush write-backs.
+	if needsFlush && hasManaged && m.driver.uvm != nil {
+		m.sendFlushRequest(cmd)
+		queue.Context.removeFreedBuffers()
+		cmd.RawData = make([]byte, size)
+		m.pendingD2H = &deferredD2H{
+			cmd:   cmd,
+			queue: queue,
+			pid:   queue.Context.pid,
+			start: uint64(cmd.Src),
+			size:  size,
+		}
+		m.pendingD2HFlushed = false
+		queue.IsRunning = true
+		return true
+	}
+
+	if needsFlush {
 		m.sendFlushRequest(cmd)
 		queue.Context.removeFreedBuffers()
 	}
 
+	m.readManagedD2H(cmd, queue)
+	return true
+}
+
+// readManagedD2H performs the byte-level D2H read for a copy command, reading
+// CPU-resident managed pages from the host backing and GPU-resident pages via
+// DMA from the GPU.
+func (m *defaultMemoryCopyMiddleware) readManagedD2H(
+	cmd *MemCopyD2HCommand,
+	queue *CommandQueue,
+) {
 	cmd.RawData = make([]byte, binary.Size(cmd.Dst))
 
 	offset := uint64(0)
@@ -115,13 +184,23 @@ func (m *defaultMemoryCopyMiddleware) processMemCopyD2HCommand(
 			sizeToCopy = sizeLeft
 		}
 
+		// sbin_codex: managed CPU-resident pages copy straight out of the host
+		// backing frame in globalStorage instead of DMA from a GPU.
+		if page.Managed && page.DeviceID == 0 {
+			data, _ := m.driver.globalStorage.Read(pAddr, sizeToCopy)
+			copy(cmd.RawData[offset:offset+sizeToCopy], data)
+			sizeLeft -= sizeToCopy
+			addr += sizeToCopy
+			offset += sizeToCopy
+			continue
+		}
+
 		gpuID := m.driver.memAllocator.GetDeviceIDByPAddr(pAddr)
 		req := protocol.NewMemCopyD2HReq(
 			m.driver.gpuPort, m.driver.GPUs[gpuID-1],
 			pAddr, cmd.RawData[offset:offset+sizeToCopy])
 		cmd.Reqs = append(cmd.Reqs, req)
 		m.awaitingReqs = append(m.awaitingReqs, req)
-		// m.driver.requestsToSend = append(m.driver.requestsToSend, req)
 
 		sizeLeft -= sizeToCopy
 		addr += sizeToCopy
@@ -130,10 +209,23 @@ func (m *defaultMemoryCopyMiddleware) processMemCopyD2HCommand(
 		m.driver.logTaskToGPUInitiate(cmd, req)
 	}
 
+	// sbin_codex: a fully managed CPU-resident copy created no DMA requests;
+	// complete the command immediately.
+	if len(cmd.Reqs) == 0 && len(m.awaitingReqs) == 0 {
+		queue.IsRunning = false
+		buf := bytes.NewReader(cmd.RawData)
+		err := binary.Read(buf, binary.LittleEndian, cmd.Dst)
+		if err != nil {
+			panic(err)
+		}
+		queue.Dequeue()
+		m.driver.logCmdComplete(cmd)
+		return
+	}
+
 	m.cyclesLeft = m.cyclesPerD2H
 
 	queue.IsRunning = true
-	return true
 }
 
 func (m *defaultMemoryCopyMiddleware) needFlushing(
@@ -184,6 +276,10 @@ func (m *defaultMemoryCopyMiddleware) sendFlushRequest(
 
 func (m *defaultMemoryCopyMiddleware) Tick() (madeProgress bool) {
 	madeProgress = false
+
+	if m.pendingD2H != nil && m.pendingD2HFlushed {
+		madeProgress = m.processDeferredD2H() || madeProgress
+	}
 
 	if m.cyclesLeft > 0 {
 		m.cyclesLeft--
@@ -293,7 +389,52 @@ func (m *defaultMemoryCopyMiddleware) processFlushReturn(
 
 	cmd.RemoveReq(req)
 
+	// sbin_codex: a deferred managed D2H becomes readable once every flush
+	// request of its command has returned.
+	if m.pendingD2H != nil && cmd == m.pendingD2H.cmd && len(cmd.GetReqs()) == 0 {
+		m.pendingD2HFlushed = true
+	}
+
 	m.driver.logTaskToGPUClear(req)
 
 	return true
+}
+
+// processDeferredD2H performs the data read of a deferred managed D2H once the
+// flush completed and no UVM fault or migration remains outstanding in the
+// copied range.
+func (m *defaultMemoryCopyMiddleware) processDeferredD2H() bool {
+	d := m.pendingD2H
+	if m.driver.uvm.hasPendingWorkInRange(d.pid, d.start, d.size) {
+		return false
+	}
+	m.pendingD2H = nil
+	m.pendingD2HFlushed = false
+	m.readManagedD2H(d.cmd, d.queue)
+	return true
+}
+
+// rangeHasManagedPages reports whether any page in [start, start+size) belongs
+// to a managed allocation.
+func (m *defaultMemoryCopyMiddleware) rangeHasManagedPages(
+	pid vm.PID,
+	start, size uint64,
+) bool {
+	addr := start
+	end := start + size
+	for addr < end {
+		page, found := m.driver.pageTable.Find(pid, addr)
+		if !found {
+			panic("page not found")
+		}
+		if page.Managed {
+			return true
+		}
+		next := page.VAddr + page.PageSize
+		if next <= addr {
+			return false
+		}
+		addr = next
+	}
+	return false
 }

@@ -38,6 +38,14 @@ type Builder struct {
 	rdmaAddressMapper *mem.BankedAddressPortMapper
 	cpuPageTable      vm.PageTable   // sbin_codex: authoritative CPU-side page table.
 	gpuPageTables     []vm.PageTable // sbin_codex: one isolated page table per GPU GMMU.
+
+	// sbin_codex: UVM demand-paging configuration.
+	uvmEnabled    bool
+	uvmIdeal      bool
+	uvmFaultUS    float64
+	uvmACThresh   uint64
+	uvmTBNExpand  uint64
+	uvmTBNMaxSize uint64
 }
 
 // MakeBuilder creates a new Builder with default parameters.
@@ -79,6 +87,24 @@ func (b Builder) WithMagicMemoryCopy() Builder {
 // ideal-l1tlb, or virtual-caching). // sbin_codex
 func (b Builder) WithGPUType(gpuType string) Builder {
 	b.gpuType = gpuType
+	return b
+}
+
+// WithUVM enables UVM demand-paged managed memory on the timing platform.
+func (b Builder) WithUVM(
+	enabled bool,
+	ideal bool,
+	faultLatencyUS float64,
+	acThreshold uint64,
+	tbnExpand uint64,
+	tbnMaxSize uint64,
+) Builder {
+	b.uvmEnabled = enabled
+	b.uvmIdeal = ideal
+	b.uvmFaultUS = faultLatencyUS
+	b.uvmACThresh = acThreshold
+	b.uvmTBNExpand = tbnExpand
+	b.uvmTBNMaxSize = tbnMaxSize
 	return b
 }
 
@@ -164,15 +190,29 @@ func (b *Builder) buildGPUDriver(
 		gpuDriverBuilder = gpuDriverBuilder.WithMagicMemoryCopyMiddleware()
 	}
 
-	gpuDriver := gpuDriverBuilder.
+	gpuDriverBuilder = gpuDriverBuilder.
 		WithEngine(b.simulation.GetEngine()).
 		WithPageTable(cpuPageTable).
 		WithGPUPageTables(gpuPageTables). // sbin_codex: driver registers GPU tables with its allocator.
 		WithLog2PageSize(b.log2PageSize).
 		WithGlobalStorage(b.globalStorage).
 		WithD2HCycles(b.d2hCycles).
-		WithH2DCycles(b.h2dCycles).
-		Build("Driver")
+		WithH2DCycles(b.h2dCycles)
+
+	// sbin_codex: UVM demand-paging configuration.
+	if b.uvmEnabled {
+		gpuDriverBuilder = gpuDriverBuilder.WithUVM(driver.UVMConfig{
+			Enabled:                true,
+			Ideal:                  b.uvmIdeal,
+			FaultLatencyUS:         b.uvmFaultUS,
+			AccessCounterThreshold: b.uvmACThresh,
+			TBNExpandThreshold:     b.uvmTBNExpand,
+			TBNMaxFetchSize:        b.uvmTBNMaxSize,
+			GPUCapacityBytes:       b.gpuMemSize,
+		})
+	}
+
+	gpuDriver := gpuDriverBuilder.Build("Driver")
 
 	b.simulation.RegisterComponent(gpuDriver)
 
@@ -251,13 +291,16 @@ func (b *Builder) createConnection(
 		WithSwitchLatency(b.switchLatency)
 
 	pcieConnector.CreateNetwork("PCIe")
-	rootComplexID := pcieConnector.AddRootComplex(
-		[]sim.Port{
-			gpuDriver.GetPortByName("GPU"),
-			gpuDriver.GetPortByName("MMU"),
-			mmuComponent.GetPortByName("Migration"),
-			mmuComponent.GetPortByName("Top"),
-		})
+	rootComplexPorts := []sim.Port{
+		gpuDriver.GetPortByName("GPU"),
+		gpuDriver.GetPortByName("MMU"),
+		mmuComponent.GetPortByName("Migration"),
+		mmuComponent.GetPortByName("Top"),
+	}
+	if b.uvmEnabled { // sbin_codex: route UVM faults between GMMUs and the driver.
+		rootComplexPorts = append(rootComplexPorts, gpuDriver.GetPortByName("UVM"))
+	}
+	rootComplexID := pcieConnector.AddRootComplex(rootComplexPorts)
 
 	return pcieConnector, rootComplexID
 }
@@ -279,12 +322,16 @@ func (b *Builder) createGPU(
 ) *sim.Domain {
 	name := fmt.Sprintf("GPU[%d]", index)
 	memAddrOffset := uint64(index) * b.gpuMemSize
-	gpu := gpuBuilder.
+	builder := gpuBuilder.
 		WithGPUID(uint64(index)).
 		WithMemAddrOffset(memAddrOffset).
 		WithRDMAAddressMapper(b.rdmaAddressMapper).
-		WithPageTable(b.gpuPageTables[index-1]). // sbin_codex: bind GPU N to its driver-managed table.
-		Build(name)
+		WithPageTable(b.gpuPageTables[index-1]) // sbin_codex: bind GPU N to its driver-managed table.
+	if b.uvmEnabled { // sbin_codex: GMMU faults route to the driver UVM manager.
+		builder = builder.WithUVMServiceProvider(
+			gpuDriver.GetPortByName("UVM").AsRemote())
+	}
+	gpu := builder.Build(name)
 
 	gpuDriver.RegisterGPU(
 		gpu.GetPortByName("CommandProcessor"),

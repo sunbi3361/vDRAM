@@ -45,6 +45,11 @@ func (d *Device) SetTotalMemSize(size uint64) {
 	d.MemState.setStorageSize(size)
 }
 
+// GetStorageSize returns the total memory size of the device in bytes.
+func (d *Device) GetStorageSize() uint64 {
+	return d.MemState.getStorageSize()
+}
+
 func (d *Device) allocatePage() (pAddr uint64) {
 	if d.Type == DeviceTypeUnifiedGPU {
 		return d.allocateUnifiedGPUPage()

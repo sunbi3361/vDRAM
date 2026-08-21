@@ -26,6 +26,7 @@ type Benchmark struct {
 	hsaco *insts.KernelCodeObject
 
 	useUnifiedMemory bool
+	useManagedMemory bool
 }
 
 // SelectGPU selects GPU
@@ -47,6 +48,11 @@ func (Benchmark) Verify() {
 // SetUnifiedMemory uses Unified Memory
 func (b *Benchmark) SetUnifiedMemory() {
 	b.useUnifiedMemory = true
+}
+
+// SetManagedMemory switches allocations to UVM managed memory.
+func (b *Benchmark) SetManagedMemory() {
+	b.useManagedMemory = true
 }
 
 func (b *Benchmark) loadProgram() {

@@ -41,6 +41,9 @@ type transaction struct {
 	fillLevel int // sbin_codex: next cacheable level to install.
 	msgID     string
 	state     transactionState
+
+	// sbin_codex: set when the transaction is parked on a UVM page fault.
+	waitingOnUVM bool
 }
 
 // Comp is the default gmmu implementation. It is also an akita Component.
@@ -56,6 +59,12 @@ type Comp struct {
 	controlPort      sim.Port // sbin_gmmu
 	commandProcessor sim.Port // sbin_gmmu
 	LowModule        sim.Port
+
+	// sbin_codex: UVM demand-paging fault port. The GMMU forwards managed-page
+	// faults to the driver UVM manager and parks the translation until the
+	// driver replies with PageFaultRsp.
+	uvmPort            sim.Port
+	UVMServiceProvider sim.RemotePort
 
 	pageWalkCachePort sim.Port // sbin_gmmu
 	pageWalkCache     sim.Port // sbin_gmmu

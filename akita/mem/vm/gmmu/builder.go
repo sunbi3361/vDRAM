@@ -25,6 +25,7 @@ type Builder struct {
 	rpcacheNumWays      uint64
 	rpcacheLineSize     uint64
 	rpcacheBytesPerChip uint64
+	uvmServiceProvider  sim.RemotePort // sbin_codex: UVM fault service provider.
 }
 
 // MakeBuilder creates a new builder
@@ -99,6 +100,13 @@ func (b Builder) WithAddressToPortMapper(f mem.AddressToPortMapper) Builder {
 	return b
 }
 
+// WithUVMServiceProvider sets the driver UVM manager port that services
+// managed-page demand faults. When nil, managed-page gating is disabled.
+func (b Builder) WithUVMServiceProvider(provider sim.RemotePort) Builder {
+	b.uvmServiceProvider = provider
+	return b
+}
+
 func (b Builder) Build(name string) *Comp {
 	// sbin_codex: reject a latency that cannot represent a cycle countdown.
 	if b.pageWalkingLatency < 0 {
@@ -132,6 +140,7 @@ func (b Builder) configureInternalStates(c *Comp) {
 	c.log2PageSize = b.log2PageSize               // sbin_codex
 	c.state = gmmuStateEnable                     // sbin_codex
 	c.addressToPortMapper = b.addressToPortMapper // sbin_gmmu
+	c.UVMServiceProvider = b.uvmServiceProvider   // sbin_codex
 }
 
 func (b Builder) createPageWalkCache(name string, c *Comp) {
@@ -182,4 +191,9 @@ func (b Builder) createPorts(name string, c *Comp) {
 		4096, 4096,
 		name+".ControlPort")
 	c.AddPort("Control", c.controlPort)
+
+	if b.uvmServiceProvider != "" {
+		c.uvmPort = sim.NewPort(c, 4096, 4096, name+".UVMPort")
+		c.AddPort("UVM", c.uvmPort)
+	}
 }

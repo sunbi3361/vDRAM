@@ -38,6 +38,7 @@ type Driver struct {
 
 	mmuPort sim.Port
 	gpuPort sim.Port
+	uvmPort sim.Port // sbin_codex: UVM fault port from GPU GMMUs (nil when disabled).
 
 	driverStopped      chan bool
 	enqueueSignal      chan bool
@@ -61,6 +62,8 @@ type Driver struct {
 	isCurrentlyMigratingOnePage     bool
 
 	RemotePMCPorts []sim.Port
+
+	uvm *UVMManager // sbin_codex: UVM demand-paging manager (nil when disabled).
 
 	codeObjGPUAddrs map[*insts.KernelCodeObject]Ptr
 }
@@ -179,8 +182,30 @@ func (d *Driver) Tick() bool {
 	madeProgress = d.processReturnReq() || madeProgress
 	madeProgress = d.processNewCommand() || madeProgress
 	madeProgress = d.parseFromMMU() || madeProgress
+	madeProgress = d.parseFromUVM() || madeProgress
 
 	return madeProgress
+}
+
+// parseFromUVM retrieves managed-page fault requests from GPU GMMUs and feeds
+// them into the UVM manager.
+func (d *Driver) parseFromUVM() bool {
+	if d.uvmPort == nil || d.uvm == nil {
+		return false
+	}
+	req := d.uvmPort.RetrieveIncoming()
+	if req == nil {
+		return false
+	}
+	switch req := req.(type) {
+	case *vm.PageFaultReq:
+		d.processUVMFaultReq(req)
+		return true
+	default:
+		log.Panicf("Driver cannot handle UVM request of type %s",
+			reflect.TypeOf(req))
+	}
+	return false
 }
 
 func (d *Driver) sendToGPUs() bool {

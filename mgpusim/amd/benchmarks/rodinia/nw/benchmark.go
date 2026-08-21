@@ -80,6 +80,7 @@ type Benchmark struct {
 	context          *driver.Context
 	gpuIDs           []int
 	useUnifiedMemory bool
+	useManagedMemory bool
 	kernel1, kernel2 *insts.KernelCodeObject
 	queue            *driver.CommandQueue
 
@@ -171,6 +172,11 @@ func (b *Benchmark) SetUnifiedMemory() {
 	b.useUnifiedMemory = true
 }
 
+// SetManagedMemory switches allocations to UVM managed memory.
+func (b *Benchmark) SetManagedMemory() {
+	b.useManagedMemory = true
+}
+
 func (b *Benchmark) initMem() {
 	b.initData()
 	b.allocateGPUMem()
@@ -216,6 +222,9 @@ func (b *Benchmark) allocateGPUMem() {
 }
 
 func (b *Benchmark) allocate(byteSize uint64) driver.Ptr {
+	if b.useManagedMemory {
+		return b.driver.AllocateManaged(b.context, byteSize)
+	}
 	if b.useUnifiedMemory {
 		return b.driver.AllocateUnifiedMemory(b.context, byteSize)
 	}

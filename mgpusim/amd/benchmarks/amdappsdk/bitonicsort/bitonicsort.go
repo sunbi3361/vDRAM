@@ -75,6 +75,7 @@ type Benchmark struct {
 	perPassIn, perPassOut []uint32
 
 	useUnifiedMemory bool
+	useManagedMemory bool
 }
 
 // NewBenchmark creates a new bitonic sort benchmark.
@@ -116,6 +117,11 @@ func (b *Benchmark) SetUnifiedMemory() {
 	b.useUnifiedMemory = true
 }
 
+// SetManagedMemory switches allocations to UVM managed memory.
+func (b *Benchmark) SetManagedMemory() {
+	b.useManagedMemory = true
+}
+
 // Run runs the benchmark on simulated GPU platform
 func (b *Benchmark) Run() {
 	b.loadProgram()
@@ -138,7 +144,9 @@ func (b *Benchmark) initMem() {
 		b.perPassOut = make([]uint32, b.Length)
 	}
 
-	if b.useUnifiedMemory {
+	if b.useManagedMemory {
+		b.gInputData = b.driver.AllocateManaged(b.context, uint64(b.Length*4))
+	} else if b.useUnifiedMemory {
 		b.gInputData = b.driver.AllocateUnifiedMemory(b.context, uint64(b.Length*4))
 	} else {
 		b.gInputData = b.driver.AllocateMemory(b.context, uint64(b.Length*4))

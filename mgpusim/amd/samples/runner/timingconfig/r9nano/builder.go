@@ -65,6 +65,7 @@ type Builder struct {
 	l1TLBAddressMapper   *mem.SinglePortMapper
 	l1tlbFactory         func(name string, engine sim.Engine, freq sim.Freq, pageTable vm.PageTable, mapper mem.AddressToPortMapper, numReqPerCycle int) sim.Component //nolint:lll // sbin_codex: ideal-L1-TLB factory injection (todo 5).
 	pmcAddressMapper     mem.AddressToPortMapper
+	uvmServiceProvider   sim.RemotePort // sbin_codex: driver UVM fault service provider.
 }
 
 // MakeBuilder creates a new builder.
@@ -170,6 +171,13 @@ func (b Builder) WithPageTable(pageTable vm.PageTable) gpubuilder.GPUBuilder {
 	return b
 }
 
+// WithUVMServiceProvider sets the driver UVM fault service provider for the
+// GMMU. When empty, UVM demand-fault gating is disabled. // sbin_codex
+func (b Builder) WithUVMServiceProvider(provider sim.RemotePort) gpubuilder.GPUBuilder {
+	b.uvmServiceProvider = provider
+	return b
+}
+
 // WithL1TLBFactory sets the factory that builds L1 TLBs for this GPU.
 // When nil, the default tlb.MakeBuilder is used. // sbin_codex
 func (b Builder) WithL1TLBFactory(
@@ -261,6 +269,10 @@ func (b *Builder) populateExternalPorts() {
 	// The GMMU bottom port replaces the L2 TLB bottom port as the GPU's
 	// external translation endpoint. // sbin_codex
 	b.gpu.AddPort("Translation", b.gmmu.GetPortByName("Bottom"))
+
+	if b.uvmServiceProvider != "" { // sbin_codex: expose the GMMU UVM fault port.
+		b.gpu.AddPort("UVM", b.gmmu.GetPortByName("UVM"))
+	}
 }
 
 func (b *Builder) connectCP() {
@@ -613,7 +625,7 @@ func (b *Builder) buildCP() {
 // against this GPU's page table and keeps the CPU MMU as the downstream
 // external translation endpoint for the v4 platform topology. // sbin_codex
 func (b *Builder) buildGMMU() {
-	b.gmmu = gmmu.MakeBuilder().
+	gmmuBuilder := gmmu.MakeBuilder().
 		WithEngine(b.simulation.GetEngine()).
 		WithFreq(b.freq).
 		WithLog2PageSize(b.log2PageSize).
@@ -621,8 +633,13 @@ func (b *Builder) buildGMMU() {
 		WithPageTable(b.pageTable).
 		WithDeviceID(b.gpuID).
 		WithMemAddrOffset(b.memAddrOffset).
-		WithMemoryPerChiplet(b.dramSize).
-		Build(b.name + ".GMMU")
+		WithMemoryPerChiplet(b.dramSize)
+
+	if b.uvmServiceProvider != "" { // sbin_codex
+		gmmuBuilder = gmmuBuilder.WithUVMServiceProvider(b.uvmServiceProvider)
+	}
+
+	b.gmmu = gmmuBuilder.Build(b.name + ".GMMU")
 
 	b.simulation.RegisterComponent(b.gmmu)
 }

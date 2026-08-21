@@ -62,6 +62,7 @@ type Benchmark struct {
 	gpus             []int
 	queues           []*driver.CommandQueue
 	useUnifiedMemory bool
+	useManagedMemory bool
 	spmvKernel       *insts.KernelCodeObject
 
 	Arch      arch.Type
@@ -96,6 +97,11 @@ func (b *Benchmark) SelectGPU(gpus []int) {
 // SetUnifiedMemory uses Unified Memory
 func (b *Benchmark) SetUnifiedMemory() {
 	b.useUnifiedMemory = true
+}
+
+// SetManagedMemory switches allocations to UVM managed memory.
+func (b *Benchmark) SetManagedMemory() {
+	b.useManagedMemory = true
 }
 
 //go:embed spmv.hsaco
@@ -146,11 +152,26 @@ func (b *Benchmark) initMem() {
 		b.vec[j] = (rand.Float32() * b.maxval)
 	}
 
-	if b.useUnifiedMemory {
+	if b.useManagedMemory {
+		b.allocateManagedMemory()
+	} else if b.useUnifiedMemory {
 		b.allocateUnifiedMemory()
 	} else {
 		b.allocateMemory()
 	}
+}
+
+func (b *Benchmark) allocateManagedMemory() {
+	b.dValData = b.driver.AllocateManaged(b.context,
+		uint64(b.nItems*4))
+	b.dVecData = b.driver.AllocateManaged(b.context,
+		uint64(b.Dim*4))
+	b.dColsData = b.driver.AllocateManaged(b.context,
+		uint64(b.nItems*4))
+	b.dRowDData = b.driver.AllocateManaged(b.context,
+		uint64((b.Dim+1)*4))
+	b.dOutData = b.driver.AllocateManaged(b.context,
+		uint64(b.Dim*4))
 }
 
 func (b *Benchmark) allocateUnifiedMemory() {

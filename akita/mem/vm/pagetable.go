@@ -20,6 +20,14 @@ type Page struct {
 	Unified     bool
 	IsMigrating bool
 	IsPinned    bool
+	// sbin_codex: UVM demand-paging fields.
+	// Managed marks a page owned by a managed allocation that participates in
+	// UVM demand paging. Managed pages use Unified=false so the legacy MMU
+	// GPU-to-GPU migration path never claims them.
+	Managed bool
+	// RemoteAccessible marks a CPU-resident managed page whose mapping may be
+	// returned to the GPU for a remote access instead of a page fault.
+	RemoteAccessible bool
 }
 
 // A PageTable holds the a list of pages.

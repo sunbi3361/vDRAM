@@ -15,6 +15,7 @@ type Benchmark struct {
 	context          *driver.Context
 	gpus             []int
 	useUnifiedMemory bool
+	useManagedMemory bool
 
 	Arch arch.Type
 
@@ -62,6 +63,11 @@ func (b *Benchmark) SelectGPU(gpus []int) {
 // SetUnifiedMemory configures the benchmark to use unified memory.
 func (b *Benchmark) SetUnifiedMemory() {
 	b.useUnifiedMemory = true
+}
+
+// SetManagedMemory switches allocations to UVM managed memory.
+func (b *Benchmark) SetManagedMemory() {
+	b.useManagedMemory = true
 }
 
 // Run runs the benchmark.

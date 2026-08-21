@@ -263,3 +263,74 @@ func NewPageMigrationRspFromDriver(
 
 	return cmd
 }
+
+// PageFaultReq is a request from a GPU GMMU to the driver UVM manager asking
+// to service a demand page fault for a managed page. The GMMU keeps the
+// originating translation pending until it receives the PageFaultRsp.
+type PageFaultReq struct {
+	sim.MsgMeta
+
+	PID      PID
+	VAddr    uint64
+	DeviceID uint64
+	// WaitRequestID is the ID of the original TranslationReq being serviced.
+	WaitRequestID string
+}
+
+// Meta returns the meta data associated with the message.
+func (r *PageFaultReq) Meta() *sim.MsgMeta {
+	return &r.MsgMeta
+}
+
+// Clone returns a clone of the PageFaultReq with a different ID.
+func (r *PageFaultReq) Clone() sim.Msg {
+	cloneMsg := *r
+	cloneMsg.ID = sim.GetIDGenerator().Generate()
+	return &cloneMsg
+}
+
+// NewPageFaultReq creates a new PageFaultReq.
+func NewPageFaultReq(src, dst sim.RemotePort) *PageFaultReq {
+	cmd := new(PageFaultReq)
+	cmd.Src = src
+	cmd.Dst = dst
+	cmd.TrafficClass = reflect.TypeOf(PageFaultReq{}).String()
+	return cmd
+}
+
+// PageFaultRsp notifies a GMMU that a demand page fault has been serviced.
+// The GMMU re-reads the page table and completes the pending translation.
+type PageFaultRsp struct {
+	sim.MsgMeta
+
+	RespondTo string
+	PID       PID
+	VAddr     uint64
+}
+
+// Meta returns the meta data associated with the message.
+func (r *PageFaultRsp) Meta() *sim.MsgMeta {
+	return &r.MsgMeta
+}
+
+// Clone returns a clone of the PageFaultRsp with a different ID.
+func (r *PageFaultRsp) Clone() sim.Msg {
+	cloneMsg := *r
+	cloneMsg.ID = sim.GetIDGenerator().Generate()
+	return &cloneMsg
+}
+
+// GetRspTo returns the request ID that the response replies to.
+func (r *PageFaultRsp) GetRspTo() string {
+	return r.RespondTo
+}
+
+// NewPageFaultRsp creates a new PageFaultRsp.
+func NewPageFaultRsp(src, dst sim.RemotePort, respondTo string) *PageFaultRsp {
+	cmd := new(PageFaultRsp)
+	cmd.Src = src
+	cmd.Dst = dst
+	cmd.RespondTo = respondTo
+	cmd.TrafficClass = reflect.TypeOf(PageFaultRsp{}).String()
+	return cmd
+}

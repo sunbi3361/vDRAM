@@ -7,4 +7,5 @@ type Benchmark interface {
 	Run()
 	Verify()
 	SetUnifiedMemory()
+	SetManagedMemory() // sbin_codex: switch allocations to AllocateManaged for UVM.
 }

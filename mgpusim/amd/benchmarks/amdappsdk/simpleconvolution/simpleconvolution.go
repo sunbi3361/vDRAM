@@ -72,6 +72,7 @@ type Benchmark struct {
 	dMasks      []driver.Ptr
 
 	useUnifiedMemory bool
+	useManagedMemory bool
 }
 
 // NewBenchmark returns a benchmark
@@ -90,6 +91,11 @@ func (b *Benchmark) SelectGPU(gpus []int) {
 // SetUnifiedMemory uses Unified Memory
 func (b *Benchmark) SetUnifiedMemory() {
 	b.useUnifiedMemory = true
+}
+
+// SetManagedMemory switches allocations to UVM managed memory.
+func (b *Benchmark) SetManagedMemory() {
+	b.useManagedMemory = true
 }
 
 //go:embed kernels.hsaco
@@ -145,7 +151,12 @@ func (b *Benchmark) initMem() {
 		b.hMask[i] = float32(1)
 	}
 
-	if b.useUnifiedMemory {
+	if b.useManagedMemory {
+		b.dInputData = b.driver.AllocateManaged(b.context,
+			uint64(numInputData*4))
+		b.dOutputData = b.driver.AllocateManaged(b.context,
+			uint64(numOutputData*4))
+	} else if b.useUnifiedMemory {
 		b.dInputData = b.driver.AllocateUnifiedMemory(b.context,
 			uint64(numInputData*4))
 		b.dOutputData = b.driver.AllocateUnifiedMemory(b.context,
@@ -164,7 +175,11 @@ func (b *Benchmark) initMem() {
 	b.dMasks = make([]driver.Ptr, len(b.gpus))
 	for i, gpu := range b.gpus {
 		b.driver.SelectGPU(b.context, gpu)
-		if b.useUnifiedMemory {
+		if b.useManagedMemory {
+			b.dMasks[i] = b.driver.AllocateManaged(
+				b.context,
+				uint64(b.maskSize*b.maskSize*4))
+		} else if b.useUnifiedMemory {
 			b.dMasks[i] = b.driver.AllocateUnifiedMemory(
 				b.context,
 				uint64(b.maskSize*b.maskSize*4))

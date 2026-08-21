@@ -122,6 +122,7 @@ type Benchmark struct {
 	gpuRMSE float64
 
 	useUnifiedMemory bool
+	useManagedMemory bool
 }
 
 // NewBenchmark makes a new benchmark
@@ -169,6 +170,11 @@ func (b *Benchmark) SetUnifiedMemory() {
 	b.useUnifiedMemory = true
 }
 
+// SetManagedMemory switches allocations to UVM managed memory.
+func (b *Benchmark) SetManagedMemory() {
+	b.useManagedMemory = true
+}
+
 // Run runs
 func (b *Benchmark) Run() {
 	b.loadKernels()
@@ -208,7 +214,18 @@ func (b *Benchmark) initMem() {
 	b.dClusters = make([]driver.Ptr, len(b.gpus))
 	for i, gpu := range b.gpus {
 		b.driver.SelectGPU(b.context, gpu)
-		if b.useUnifiedMemory {
+if b.useManagedMemory {
+		b.dFeatures = b.driver.AllocateManaged(
+			b.context,
+			uint64(b.NumPoints*b.NumFeatures*4))
+		b.dFeaturesSwap = b.driver.AllocateManaged(
+			b.context, uint64(b.NumPoints*b.NumFeatures*4))
+		b.dMembership = b.driver.AllocateManaged(
+			b.context, uint64(b.NumPoints*4))
+	} else if b.useManagedMemory {
+			b.dClusters[i] = b.driver.AllocateManaged(
+				b.context, uint64(b.NumClusters*b.NumFeatures*4))
+		} else if b.useUnifiedMemory {
 			b.dClusters[i] = b.driver.AllocateUnifiedMemory(
 				b.context, uint64(b.NumClusters*b.NumFeatures*4))
 		} else {

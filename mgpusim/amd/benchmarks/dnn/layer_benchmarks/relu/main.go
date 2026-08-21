@@ -62,6 +62,7 @@ type Benchmark struct {
 	gOutputData driver.Ptr
 
 	useUnifiedMemory bool
+	useManagedMemory bool
 }
 
 //go:embed kernels.hsaco
@@ -103,6 +104,11 @@ func (b *Benchmark) SetUnifiedMemory() {
 	b.useUnifiedMemory = true
 }
 
+// SetManagedMemory switches allocations to UVM managed memory.
+func (b *Benchmark) SetManagedMemory() {
+	b.useManagedMemory = true
+}
+
 // Run runs
 func (b *Benchmark) Run() {
 	b.loadProgram()
@@ -112,7 +118,12 @@ func (b *Benchmark) Run() {
 }
 
 func (b *Benchmark) initMem() {
-	if b.useUnifiedMemory {
+	if b.useManagedMemory {
+		b.gInputData = b.driver.AllocateManaged(b.context,
+			uint64(b.Length*4))
+		b.gOutputData = b.driver.AllocateManaged(b.context,
+			uint64(b.Length*4))
+	} else if b.useUnifiedMemory {
 		b.gInputData = b.driver.AllocateUnifiedMemory(b.context,
 			uint64(b.Length*4))
 		b.gOutputData = b.driver.AllocateUnifiedMemory(b.context,

@@ -25,6 +25,7 @@ func (m *middleware) Tick() bool {
 
 	madeProgress = m.walkPageTable() || madeProgress
 	madeProgress = m.parseFromPageWalkCache() || madeProgress
+	madeProgress = m.processUVMFaultRsp() || madeProgress
 	if m.state == gmmuStateEnable { // sbin_codex: drain retires work without admitting more.
 		madeProgress = m.parseFromTop() || madeProgress
 	}
@@ -40,6 +41,10 @@ func (m *middleware) walkPageTable() bool {
 
 	for i := 0; i < numActiveTranslations; i++ {
 		trans := &m.walkingTranslations[i]
+		if trans.waitingOnUVM { // sbin_codex: skip translations parked on a UVM fault.
+			tmp = append(tmp, *trans)
+			continue
+		}
 		switch trans.state {
 		case newTransaction:
 			madeProgress = m.sendToPageWalkCache(i) || madeProgress
@@ -195,7 +200,86 @@ func (m *middleware) finalizePageWalk(
 
 	m.walkingTranslations[walkingIndex].page = page
 
+	// sbin_codex: UVM demand-fault gating for managed pages.
+	if page.Managed && m.needsUVMFault(page) {
+		return m.sendUVMFault(walkingIndex)
+	}
+
 	return m.doPageWalkHit(walkingIndex)
+}
+
+// needsUVMFault reports whether a managed page translation must be gated on a
+// UVM page fault instead of being returned.
+func (m *middleware) needsUVMFault(page vm.Page) bool {
+	if page.IsMigrating {
+		return true
+	}
+	// CPU-resident managed page not yet remotely accessible: fault.
+	if page.DeviceID == 0 && !page.RemoteAccessible {
+		return true
+	}
+	// CPU-resident but remotely accessible: remote access, no fault.
+	return false
+}
+
+// sendUVMFault forwards a managed-page fault to the driver UVM manager and
+// parks the translation transaction.
+func (m *middleware) sendUVMFault(walkingIndex int) bool {
+	if m.uvmPort == nil || m.UVMServiceProvider == "" {
+		panic("GMMU encountered a managed-page fault without a UVM service provider")
+	}
+	if !m.uvmPort.CanSend() {
+		return false
+	}
+
+	trans := &m.walkingTranslations[walkingIndex]
+	req := vm.NewPageFaultReq(m.uvmPort.AsRemote(), m.UVMServiceProvider)
+	req.PID = trans.req.PID
+	req.VAddr = trans.req.VAddr
+	req.DeviceID = trans.req.DeviceID
+	req.WaitRequestID = trans.req.ID
+
+	if err := m.uvmPort.Send(req); err != nil {
+		return false
+	}
+	trans.waitingOnUVM = true
+	return true
+}
+
+// processUVMFaultRsp completes translations parked on a UVM page fault once
+// the driver reports the fault serviced.
+func (m *middleware) processUVMFaultRsp() bool {
+	if m.uvmPort == nil {
+		return false
+	}
+	rsp := m.uvmPort.PeekIncoming()
+	if rsp == nil {
+		return false
+	}
+	uvmRsp, ok := rsp.(*vm.PageFaultRsp)
+	if !ok {
+		return false
+	}
+
+	for i := range m.walkingTranslations {
+		trans := &m.walkingTranslations[i]
+		if !trans.waitingOnUVM || trans.req.ID != uvmRsp.RespondTo {
+			continue
+		}
+		if !m.topPort.CanSend() {
+			return false
+		}
+		page, found := m.pageTable.Find(trans.req.PID, trans.req.VAddr)
+		if !found {
+			panic("page not found after UVM fault")
+		}
+		trans.page = page
+		m.uvmPort.RetrieveIncoming()
+		trans.waitingOnUVM = false
+		m.doPageWalkHit(i)
+		return true
+	}
+	return false
 }
 
 func (m *middleware) doPageWalkHit(

@@ -2,6 +2,7 @@ package runner
 
 import (
 	"flag"
+	"log"
 	"strconv"
 	"strings"
 
@@ -46,6 +47,20 @@ var unifiedGPUFlag = flag.String("unified-gpus", "",
 Use a format like 1,2,3,4. Cannot coexist with -gpus.`)
 var useUnifiedMemoryFlag = flag.Bool("use-unified-memory", false,
 	"Run benchmark with Unified Memory or not")
+
+// sbin_codex: UVM (Unified Virtual Memory) demand-paging flags.
+var uvmFlag = flag.Bool("uvm", false,
+	"Enable UVM demand-paged managed memory. Managed allocations must use AllocateManaged.")
+var idealUVMFlag = flag.Bool("uvm-ideal", false,
+	"Run UVM with zero fault-handling and zero migration timing. Valid only with -uvm=true.")
+var uvmFaultLatencyUSFlag = flag.Float64("uvm-fault-latency-us", 20,
+	"Fixed host/driver page-fault handling latency in microseconds (UVM).")
+var uvmAccessCounterThresholdFlag = flag.Uint64("uvm-access-counter-threshold", 64,
+	"Access Counter threshold that triggers a 64KB CPU->GPU migration (UVM).")
+var uvmTBNExpandThresholdFlag = flag.Uint64("uvm-tbn-expand-threshold", 1,
+	"Minimum sibling-subtree 64KB activity to expand the TBN neighborhood (UVM).")
+var uvmTBNMaxFetchSizeFlag = flag.Uint64("uvm-tbn-max-fetch-size", 1<<21,
+	"Maximum TBN neighborhood fetch size in bytes (UVM). Default 2MB.")
 var reportAll = flag.Bool("report-all", false, "Report all metrics to .csv file.")
 var filenameFlag = flag.String("metric-file-name", "metrics",
 	"Modify the name of the output csv file.")
@@ -136,8 +151,42 @@ func (r *Runner) parseSimulationFlags() {
 		r.UseUnifiedMemory = true
 	}
 
+	// sbin_codex: UVM demand-paging flags.
+	if *uvmFlag {
+		r.UVM = true
+	}
+	if *idealUVMFlag {
+		r.IdealUVM = true
+	}
+	r.UVMFaultLatencyUS = *uvmFaultLatencyUSFlag
+	r.UVMACThreshold = *uvmAccessCounterThresholdFlag
+	r.UVMExpandThreshold = *uvmTBNExpandThresholdFlag
+	r.UVMmaxFetchSize = *uvmTBNMaxFetchSizeFlag
+
+	r.validateUVMFlags()
+
 	r.ArchType = parseArchFlag()
 	r.GPUType = parseGPUTypeFlag()
+}
+
+// validateUVMFlags rejects invalid UVM flag combinations per the UVM spec
+// mode table. // sbin_codex
+func (r *Runner) validateUVMFlags() {
+	if r.IdealUVM && !r.UVM {
+		log.Panic("-ideal-uvm requires -uvm=true")
+	}
+	if r.UVM && !r.Timing {
+		log.Panic("-uvm requires -timing")
+	}
+	if r.UVM && r.UseUnifiedMemory {
+		log.Panic("-uvm and -use-unified-memory cannot be combined")
+	}
+	if r.UVM && len(r.GPUIDs) > 1 {
+		log.Panic("-uvm currently supports a single GPU")
+	}
+	if r.UVM && r.ArchType == arch.CDNA3 {
+		log.Panic("-uvm currently supports GCN3 only")
+	}
 }
 
 func (r *Runner) parseGPUFlag() {

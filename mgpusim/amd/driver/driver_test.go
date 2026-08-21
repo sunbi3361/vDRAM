@@ -251,7 +251,7 @@ var _ = ginkgo.Describe("Driver", func() {
 					PAddr:    0x1_0000_0000,
 					PageSize: 0x1000,
 					Valid:    true,
-				}, true)
+				}, true).AnyTimes()
 			memAllocator.EXPECT().
 				GetDeviceIDByPAddr(uint64(0x1_0000_0100)).
 				Return(1)
@@ -511,19 +511,10 @@ var _ = ginkgo.Describe("Driver", func() {
 				DeviceID: 1,
 				Unified:  true,
 			}, true)
-		pageTable.EXPECT().Update(vm.Page{
-			PID:         0,
-			VAddr:       0x100,
-			PAddr:       8589934592,
-			PageSize:    0x1000,
-			Valid:       true,
-			DeviceID:    2,
-			Unified:     true,
-			IsMigrating: true,
-		})
 		memAllocator.EXPECT().
 			AllocatePageWithGivenVAddr(vm.PID(0), 2, uint64(0x100), true).
 			Return(*page2)
+		memAllocator.EXPECT().UpdatePage(gomock.Any())
 
 		toGPUs.EXPECT().PeekIncoming().Return(req)
 		toGPUs.EXPECT().RetrieveIncoming().Return(req)

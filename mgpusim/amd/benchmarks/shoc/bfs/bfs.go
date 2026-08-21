@@ -78,6 +78,7 @@ type Benchmark struct {
 	dFlag         driver.Ptr
 
 	useUnifiedMemory bool
+	useManagedMemory bool
 }
 
 // NewBenchmark creates a new BFS benchmark
@@ -99,6 +100,11 @@ func (b *Benchmark) SelectGPU(gpus []int) {
 // SetUnifiedMemory uses Unified Memory
 func (b *Benchmark) SetUnifiedMemory() {
 	b.useUnifiedMemory = true
+}
+
+// SetManagedMemory switches allocations to UVM managed memory.
+func (b *Benchmark) SetManagedMemory() {
+	b.useManagedMemory = true
 }
 
 //go:embed kernels.hsaco
@@ -153,7 +159,15 @@ func (b *Benchmark) initMem() {
 	b.hFrontier[b.sourceNode] = 0
 	b.hCost[b.sourceNode] = 0
 
-	if b.useUnifiedMemory {
+	if b.useManagedMemory {
+		b.dFrontier = b.driver.AllocateManaged(b.context,
+			uint64(b.NumNode*4))
+		b.dEdgeArray = b.driver.AllocateManaged(b.context,
+			uint64((b.NumNode+1)*4))
+		b.dEdgeArrayAux = b.driver.AllocateManaged(b.context,
+			uint64(len(b.hEdgeList)*4))
+		b.dFlag = b.driver.AllocateManaged(b.context, 4)
+	} else if b.useUnifiedMemory {
 		b.dFrontier = b.driver.AllocateUnifiedMemory(b.context,
 			uint64(b.NumNode*4))
 		b.dEdgeArray = b.driver.AllocateUnifiedMemory(b.context,

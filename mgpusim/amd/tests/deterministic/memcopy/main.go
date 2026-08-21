@@ -21,6 +21,7 @@ type Benchmark struct {
 	retData  []byte
 
 	useUnifiedMemory bool
+	useManagedMemory bool
 }
 
 // NewBenchmark returns a benchmark
@@ -44,6 +45,11 @@ func (b *Benchmark) SetUnifiedMemory() {
 	b.useUnifiedMemory = true
 }
 
+// SetManagedMemory switches allocations to UVM managed memory.
+func (b *Benchmark) SetManagedMemory() {
+	b.useManagedMemory = true
+}
+
 // Run runs
 func (b *Benchmark) Run() {
 	b.driver.SelectGPU(b.context, b.gpu)
@@ -55,7 +61,9 @@ func (b *Benchmark) Run() {
 	}
 	gpuData := b.driver.AllocateMemory(b.context, b.ByteSize)
 
-	if b.useUnifiedMemory {
+	if b.useManagedMemory {
+		gpuData = b.driver.AllocateManaged(b.context, b.ByteSize)
+	} else if b.useUnifiedMemory {
 		gpuData = b.driver.AllocateUnifiedMemory(b.context, b.ByteSize)
 	}
 	b.driver.MemCopyH2D(b.context, gpuData, b.data)

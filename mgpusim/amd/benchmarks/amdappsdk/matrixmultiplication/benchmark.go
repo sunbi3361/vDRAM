@@ -21,6 +21,7 @@ type Benchmark struct {
 	X, Y, Z                   uint32
 	MatrixA, MatrixB, MatrixC *Matrix
 	useUnifiedMemory          bool
+	useManagedMemory          bool
 }
 
 // NewBenchmark makes a new benchmark
@@ -48,6 +49,11 @@ func (b *Benchmark) SetUnifiedMemory() {
 	b.useUnifiedMemory = true
 }
 
+// SetManagedMemory switches allocations to UVM managed memory.
+func (b *Benchmark) SetManagedMemory() {
+	b.useManagedMemory = true
+}
+
 func (b *Benchmark) initMem() {
 	rand.Seed(0)
 
@@ -73,6 +79,7 @@ func (b *Benchmark) exec() {
 	m.SelectGPU(b.gpus)
 	m.Arch = b.Arch
 	m.useUnifiedMemory = b.useUnifiedMemory
+	m.useManagedMemory = b.useManagedMemory
 	b.MatrixC = m.Multiply(b.MatrixA, b.MatrixB)
 }
 

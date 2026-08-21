@@ -14,5 +14,7 @@ type GPUBuilder interface {
 	WithMemAddrOffset(offset uint64) GPUBuilder
 	WithRDMAAddressMapper(mapper mem.AddressToPortMapper) GPUBuilder
 	WithPageTable(pageTable vm.PageTable) GPUBuilder // sbin_codex: bind each GPU to its own page table.
+	// sbin_codex: UVM demand-fault service provider (driver UVM port).
+	WithUVMServiceProvider(provider sim.RemotePort) GPUBuilder
 	Build(name string) *sim.Domain
 }

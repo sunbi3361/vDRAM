@@ -195,3 +195,8 @@ func (b *Benchmark) Verify() {
 func (b *Benchmark) SetUnifiedMemory() {
 	panic("unified memory is not supported by dnn workloads")
 }
+
+// SetManagedMemory switches allocations to UVM managed memory.
+func (b *Benchmark) SetManagedMemory() {
+	panic("managed memory is not supported by dnn workloads")
+}

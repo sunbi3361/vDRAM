@@ -24,6 +24,15 @@ type MemoryAllocator interface {
 		vAddr uint64,
 		unified bool,
 	) vm.Page
+
+	// sbin_codex: UVM demand-paging allocator APIs.
+	// AllocateManaged reserves a managed virtual range backed by CPU frames and
+	// inserts Managed PTEs with DeviceID=0. No GPU frames are allocated.
+	AllocateManaged(pid vm.PID, byteSize uint64) ManagedAllocationResult
+	// TryAllocatePhysicalPage allocates one physical frame on a device.
+	TryAllocatePhysicalPage(deviceID int) (uint64, bool)
+	// FreePhysicalPage returns a physical frame to a device.
+	FreePhysicalPage(deviceID int, pAddr uint64)
 }
 
 // NewMemoryAllocator creates a new memory allocator.
@@ -46,6 +55,18 @@ func NewMemoryAllocator(
 type processMemoryState struct {
 	pid       vm.PID
 	nextVAddr uint64
+}
+
+// ManagedAllocationResult describes a managed allocation created by
+// AllocateManaged. It carries the virtual range and per-page CPU backing
+// frames so the driver UVM manager can register residency metadata.
+type ManagedAllocationResult struct {
+	Base            uint64
+	Size            uint64
+	PageCount       uint64
+	PageSize        uint64
+	CPUBackingPages []uint64
+	PIDs            []vm.PID
 }
 
 // A memoryAllocatorImpl provides the default implementation for
@@ -346,4 +367,98 @@ func (a *memoryAllocatorImpl) Free(ptr uint64) {
 	defer a.Unlock()
 
 	a.removePage(ptr)
+}
+
+// sbin_codex: UVM demand-paging allocator implementations.
+func (a *memoryAllocatorImpl) AllocateManaged(
+	pid vm.PID,
+	byteSize uint64,
+) ManagedAllocationResult {
+	if byteSize == 0 {
+		panic("Allocating 0 bytes.")
+	}
+
+	a.Lock()
+	defer a.Unlock()
+
+	pageSize := uint64(1 << a.log2PageSize)
+	numPages := int((byteSize-1)/pageSize + 1)
+
+	pState, found := a.processMemoryStates[pid]
+	if !found {
+		a.processMemoryStates[pid] = &processMemoryState{
+			pid:       pid,
+			nextVAddr: uint64(1 << a.log2PageSize),
+		}
+		pState = a.processMemoryStates[pid]
+	}
+	nextVAddr := pState.nextVAddr
+
+	result := ManagedAllocationResult{
+		Base:            nextVAddr,
+		Size:            byteSize,
+		PageCount:       uint64(numPages),
+		PageSize:        pageSize,
+		CPUBackingPages: make([]uint64, 0, numPages),
+		PIDs:            make([]vm.PID, 0, numPages),
+	}
+
+	cpuDevice := a.devices[0]
+	for i := 0; i < numPages; i++ {
+		vAddr := nextVAddr + uint64(i)*pageSize
+		cpuPAddr := cpuDevice.allocatePage()
+
+		page := vm.Page{
+			PID:         pid,
+			VAddr:       vAddr,
+			PAddr:       cpuPAddr,
+			PageSize:    pageSize,
+			Valid:       true,
+			DeviceID:    0,
+			Unified:     false,
+			Managed:     true,
+			IsPinned:    false,
+			IsMigrating: false,
+		}
+		a.insertPage(page)
+		a.vAddrToPageMapping[page.VAddr] = page
+		result.CPUBackingPages = append(result.CPUBackingPages, cpuPAddr)
+		result.PIDs = append(result.PIDs, pid)
+	}
+	a.recordAllocation(numPages)
+
+	pState.nextVAddr += pageSize * uint64(numPages)
+
+	return result
+}
+
+func (a *memoryAllocatorImpl) TryAllocatePhysicalPage(
+	deviceID int,
+) (uint64, bool) {
+	a.Lock()
+	defer a.Unlock()
+
+	device, found := a.devices[deviceID]
+	if !found {
+		return 0, false
+	}
+	if device.MemState.noAvailablePAddrs() {
+		return 0, false
+	}
+	return device.allocatePage(), true
+}
+
+func (a *memoryAllocatorImpl) FreePhysicalPage(
+	deviceID int,
+	pAddr uint64,
+) {
+	a.Lock()
+	defer a.Unlock()
+
+	device, found := a.devices[deviceID]
+	if !found {
+		panic("device not found")
+	}
+	device.MemState.addSinglePAddr(pAddr)
+	a.recordFree()
 }

@@ -38,6 +38,14 @@ type Runner struct {
 	ArchType         arch.Type
 	GPUType          string
 
+	// sbin_codex: UVM demand-paging configuration.
+	UVM                bool
+	IdealUVM           bool
+	UVMFaultLatencyUS  float64
+	UVMACThreshold     uint64
+	UVMExpandThreshold uint64
+	UVMmaxFetchSize    uint64
+
 	GPUIDs     []int
 	benchmarks []benchmarks.Benchmark
 
@@ -109,6 +117,11 @@ func (r *Runner) buildTimingPlatform() {
 		WithNumGPUs(r.GPUIDs[len(r.GPUIDs)-1]).
 		WithGPUType(r.GPUType)
 
+	if r.UVM {
+		b = b.WithUVM(r.UVM, r.IdealUVM, r.UVMFaultLatencyUS,
+			r.UVMACThreshold, r.UVMExpandThreshold, r.UVMmaxFetchSize)
+	}
+
 	if *magicMemoryCopy {
 		b = b.WithMagicMemoryCopy()
 	}
@@ -133,6 +146,9 @@ func (r *Runner) AddBenchmark(b benchmarks.Benchmark) {
 	if r.UseUnifiedMemory {
 		b.SetUnifiedMemory()
 	}
+	if r.UVM {
+		b.SetManagedMemory()
+	}
 
 	r.benchmarks = append(r.benchmarks, b)
 }
@@ -142,6 +158,9 @@ func (r *Runner) AddBenchmark(b benchmarks.Benchmark) {
 func (r *Runner) AddBenchmarkWithoutSettingGPUsToUse(b benchmarks.Benchmark) {
 	if r.UseUnifiedMemory {
 		b.SetUnifiedMemory()
+	}
+	if r.UVM {
+		b.SetManagedMemory()
 	}
 
 	r.benchmarks = append(r.benchmarks, b)

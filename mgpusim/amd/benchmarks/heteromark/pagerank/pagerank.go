@@ -84,6 +84,7 @@ type Benchmark struct {
 	dLocalValues   driver.LocalPtr
 
 	useUnifiedMemory bool
+	useManagedMemory bool
 }
 
 // NewBenchmark returns a benchmark
@@ -102,6 +103,11 @@ func (b *Benchmark) SelectGPU(gpus []int) {
 // SetUnifiedMemory uses Unified Memory
 func (b *Benchmark) SetUnifiedMemory() {
 	b.useUnifiedMemory = true
+}
+
+// SetManagedMemory switches allocations to UVM managed memory.
+func (b *Benchmark) SetManagedMemory() {
+	b.useManagedMemory = true
 }
 
 //go:embed kernels.hsaco
@@ -150,7 +156,18 @@ func (b *Benchmark) initMem() {
 		b.verPageRank[i] = initData
 	}
 
-	if b.useUnifiedMemory {
+	if b.useManagedMemory {
+		b.dPageRank = b.driver.AllocateManaged(
+			b.context, uint64(b.NumNodes*4))
+		b.dPageRankTemp = b.driver.AllocateManaged(
+			b.context, uint64(b.NumNodes*4))
+		b.dRowOffsets = b.driver.AllocateManaged(
+			b.context, uint64((b.NumNodes+1)*4))
+		b.dColumnNumbers = b.driver.AllocateManaged(
+			b.context, uint64(b.NumConnections*4))
+		b.dValues = b.driver.AllocateManaged(
+			b.context, uint64(b.NumConnections*4))
+	} else if b.useUnifiedMemory {
 		b.dPageRank = b.driver.AllocateUnifiedMemory(
 			b.context, uint64(b.NumNodes*4))
 		b.dPageRankTemp = b.driver.AllocateUnifiedMemory(
