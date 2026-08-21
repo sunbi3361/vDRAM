@@ -14,8 +14,8 @@ var onMaxInstReached = func() { atexit.Exit(0) } // sbin_codex
 
 // instTracer can trace the number of instruction completed.
 type instTracer struct {
-	count     uint64
-	simdInst  bool
+	count uint64
+	// simdInst bool // sbin_codex: removed - EndTask reads the original task's What instead.
 	simdCount uint64
 	maxCount  uint64
 
@@ -45,11 +45,11 @@ func (t *instTracer) StartTask(task tracing.Task) {
 		return
 	}
 
-	if task.What == "VALU" {
-		t.simdInst = true
-	} else {
-		t.simdInst = false
-	}
+	// if task.What == "VALU" { // sbin_codex: removed - a single stateful
+	// 	t.simdInst = true // sbin_codex: simdInst field was clobbered by
+	// } else { // sbin_codex: interleaved StartTask calls; EndTask now reads
+	// 	t.simdInst = false // sbin_codex: the original task's What field.
+	// } // sbin_codex
 
 	t.inflightInst[task.ID] = task
 }
@@ -63,12 +63,15 @@ func (t *instTracer) AddMilestone(milestone tracing.Milestone) {
 }
 
 func (t *instTracer) EndTask(task tracing.Task) {
-	_, found := t.inflightInst[task.ID]
+	orgTask, found := t.inflightInst[task.ID]
 	if !found {
 		return
 	}
 
-	if t.simdInst {
+	// sbin_codex: original: if t.simdInst { t.simdCount++ }
+	// sbin_codex: check the original task's What instead of a stateful bool,
+	// so interleaved StartTask calls cannot misattribute the VALU count.
+	if orgTask.What == "VALU" {
 		t.simdCount++
 	}
 

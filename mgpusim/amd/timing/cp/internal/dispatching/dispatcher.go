@@ -3,8 +3,8 @@ package dispatching
 import (
 	"fmt"
 	"log"
-	"os" // sbin_codex
 
+	// sbin_codex
 	"github.com/sarchlab/akita/v4/monitoring"
 	"github.com/sarchlab/akita/v4/sim"
 	"github.com/sarchlab/akita/v4/tracing"
@@ -89,16 +89,16 @@ func (d *DispatcherImpl) StartDispatching(req *protocol.LaunchKernelReq) {
 	// sbin_codex
 	if req.CodeObject != nil && req.CodeObject.Symbol != nil &&
 		req.Packet != nil {
-		// fmt.Printf("[kernel-info] %s grid=%dx%dx%d wg=%dx%dx%d totalWGs=%d\n",
-		// 	req.CodeObject.Symbol.Name,
-		// 	req.Packet.GridSizeX, req.Packet.GridSizeY, req.Packet.GridSizeZ,
-		// 	req.Packet.WorkgroupSizeX, req.Packet.WorkgroupSizeY,
-		// 	req.Packet.WorkgroupSizeZ, totalWGs)
-		fmt.Fprintf(os.Stderr, "[kernel-info] %s grid=%dx%dx%d wg=%dx%dx%d totalWGs=%d\n", // sbin_codex
+		fmt.Printf("[kernel-info] %s grid=%dx%dx%d wg=%dx%dx%d totalWGs=%d\n",
 			req.CodeObject.Symbol.Name,
 			req.Packet.GridSizeX, req.Packet.GridSizeY, req.Packet.GridSizeZ,
 			req.Packet.WorkgroupSizeX, req.Packet.WorkgroupSizeY,
 			req.Packet.WorkgroupSizeZ, totalWGs)
+		// fmt.Fprintf(os.Stderr, "[kernel-info] %s grid=%dx%dx%d wg=%dx%dx%d totalWGs=%d\n", // sbin_codex
+		// 	req.CodeObject.Symbol.Name,
+		// 	req.Packet.GridSizeX, req.Packet.GridSizeY, req.Packet.GridSizeZ,
+		// 	req.Packet.WorkgroupSizeX, req.Packet.WorkgroupSizeY,
+		// 	req.Packet.WorkgroupSizeZ, totalWGs)
 	}
 	if !d.firstKernelLaunched {
 		d.cycleLeft = d.constantKernelLaunchOverhead
@@ -250,10 +250,10 @@ func (d *DispatcherImpl) printWGProgress() {
 	}
 	totalWaves := (total + capacity - 1) / capacity
 	curWave := (d.numCompletedWGs + capacity - 1) / capacity
-	// fmt.Printf("[kernel-progress] %s wave %d/%d (%d%%) [cap=%d WGs]\n",
-	// 	d.kernelName(), curWave, totalWaves, curWave*100/totalWaves, capacity)
-	fmt.Fprintf(os.Stderr, "[kernel-progress] %s wave %d/%d (%d%%) [cap=%d WGs]\n", // sbin_codex
+	fmt.Printf("[kernel-progress] %s wave %d/%d (%d%%) [cap=%d WGs]\n",
 		d.kernelName(), curWave, totalWaves, curWave*100/totalWaves, capacity)
+	// fmt.Fprintf(os.Stderr, "[kernel-progress] %s wave %d/%d (%d%%) [cap=%d WGs]\n", // sbin_codex
+	// 	d.kernelName(), curWave, totalWaves, curWave*100/totalWaves, capacity)
 }
 
 // sbin_codex

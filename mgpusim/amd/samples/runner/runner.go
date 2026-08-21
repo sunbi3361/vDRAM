@@ -147,14 +147,21 @@ func (r *Runner) AddBenchmarkWithoutSettingGPUsToUse(b benchmarks.Benchmark) {
 	r.benchmarks = append(r.benchmarks, b)
 }
 
+// sbin_codex: maxInstOnce ensures the -max-inst stop (flush + exit) runs
+// exactly once, even though every CU's stopper tracer can cross the limit
+// in the same parallel engine round.
+var maxInstOnce sync.Once
+
 // Run runs the benchmark
 func (r *Runner) Run() {
 	// sbin_codex: max_inst
 	progressInterval = *progressIntervalFlag
 	if *maxInstCount > 0 {
 		onMaxInstReached = func() {
-			r.flushReport()
-			atexit.Exit(0)
+			maxInstOnce.Do(func() {
+				r.flushReport()
+				atexit.Exit(0)
+			})
 		}
 	}
 	atexit.Register(func() {

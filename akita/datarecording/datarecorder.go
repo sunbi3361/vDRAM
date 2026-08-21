@@ -374,6 +374,14 @@ func (t *sqliteWriter) ListTables() []string {
 }
 
 func (t *sqliteWriter) Flush() {
+	// sbin_codex: hold the writer lock for the whole flush. The BEGIN/COMMIT
+	// previously ran outside t.mu, so two concurrent Flush calls (for example
+	// the -max-inst flush racing a batch-triggered flush) could open nested
+	// SQLite transactions on the same pooled connection and panic with
+	// "cannot start a transaction within a transaction".
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
 	if t.entryCount == 0 {
 		return
 	}
@@ -406,9 +414,8 @@ func (t *sqliteWriter) insertEntryForTable(
 	task any,
 	table *table,
 ) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
+	// t.mu.Lock()      // sbin_codex: removed. Flush holds t.mu across the
+	// defer t.mu.Unlock() // sbin_codex: whole flush; Mutex is not reentrant.
 	v := []any{}
 
 	value := reflect.ValueOf(task)

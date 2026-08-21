@@ -3,11 +3,13 @@ package runner
 import (
 	"sort"
 	"strings"
+	// "sync" // sbin_codex: removed - instructionCountTracer no longer exists.
 
 	"github.com/sarchlab/akita/v4/datarecording"
 	"github.com/sarchlab/akita/v4/sim"
 	"github.com/sarchlab/akita/v4/simulation"
 	"github.com/sarchlab/akita/v4/tracing"
+	"github.com/sarchlab/mgpusim/v4/amd/driver" // sbin_codex: integrated from extendedreport.go.
 	"github.com/sarchlab/mgpusim/v4/amd/timing/cu"
 	"github.com/sarchlab/mgpusim/v4/amd/timing/rdma"
 )
@@ -118,6 +120,26 @@ func (r *reporter) injectTracers(s *simulation.Simulation) {
 	r.injectDRAMTracer(s)
 	r.injectSIMDBusyTimeTracer(s)
 	r.extended.injectTracers(s) // sbin_codex: install extended tracers.
+	r.injectInstStopper(s)      // sbin_codex: -max-inst stops after N retired instructions.
+}
+
+// injectInstStopper attaches a -max-inst limiter to every CU so the
+// simulation terminates after the given number of retired instructions.
+// sbin_codex: newInstStopper was dead code; this call wires the -max-inst
+// flag (runner.flag.go) into the tracer that actually enforces the limit.
+func (r *reporter) injectInstStopper(s *simulation.Simulation) {
+	// sbin_codex: the reporting tracers already carry maxCount when -max-inst
+	// is set; this fallback only covers -max-inst without any reporting flag,
+	// where instCountTracers is empty.
+	if *maxInstCount == 0 || len(r.instCountTracers) > 0 {
+		return
+	}
+	for _, comp := range s.Components() {
+		if strings.Contains(comp.Name(), "CU") {
+			tracing.CollectTrace(comp.(tracing.NamedHookable),
+				newInstStopper(*maxInstCount))
+		}
+	}
 }
 
 func (r *reporter) injectKernelTimeTracer(s *simulation.Simulation) {
@@ -170,13 +192,20 @@ func (r *reporter) injectKernelTimeTracer(s *simulation.Simulation) {
 }
 
 func (r *reporter) injectInstCountTracer(s *simulation.Simulation) {
-	if !*reportAll && !*instCountReportFlag {
+	// sbin_codex: l2TLBMPKIReportFlag also needs per-CU instruction counts.
+	if !*reportAll && !*instCountReportFlag && !*l2TLBMPKIReportFlag {
 		return
 	}
 
 	for _, comp := range s.Components() {
 		if strings.Contains(comp.Name(), "CU") {
 			tracer := newInstTracer()
+			if *maxInstCount > 0 {
+				// sbin_codex: count and stop in one tracer per CU so the
+				// global retired count is not double-counted by a second
+				// attached tracer.
+				tracer = newInstStopper(*maxInstCount)
+			}
 			r.instCountTracers = append(r.instCountTracers,
 				&instCountTracer{
 					tracer: tracer,
@@ -249,7 +278,8 @@ func (r *reporter) injectCacheHitRateTracer(s *simulation.Simulation) {
 }
 
 func (r *reporter) injectTLBHitRateTracer(s *simulation.Simulation) {
-	if !*reportAll && !*tlbHitRateReportFlag {
+	// sbin_codex: l2TLBMPKIReportFlag also needs L2TLB miss counts.
+	if !*reportAll && !*tlbHitRateReportFlag && !*l2TLBMPKIReportFlag {
 		return
 	}
 
@@ -366,6 +396,7 @@ func (r *reporter) report() {
 	r.reportRDMATransactionCount()
 	r.reportDRAMTransactionCount()
 	r.extended.report(r) // sbin_codex: emit summary metrics without page-fault detail rows.
+	r.reportL2TLBMPKI()  // sbin_codex: L2 TLB MPKI from the shared tracers.
 }
 
 func (r *reporter) reportKernelTime() {
@@ -697,3 +728,431 @@ func (r *reporter) reportDRAMTransactionCount() {
 		)
 	}
 }
+
+// sbin_codex: the following types and methods were integrated from
+// extendedreport.go (summary-only extended memory-system reporting for the
+// GMMU/MMU, working set, migration, and memory footprint).
+
+type componentGMMUTracer struct {
+	component tracing.NamedHookable
+	tracer    *gmmuTracer
+}
+
+type componentWorkingSetTracer struct {
+	component tracing.NamedHookable
+	tracer    *workingSetTracer
+}
+
+type extendedReporter struct {
+	driver *driver.Driver
+
+	gmmuTracers []*componentGMMUTracer
+	mmuTracers  []*componentGMMUTracer
+	workingSet  *componentWorkingSetTracer
+	migration   *migrationTracer
+	// l2TLBMPKI *l2TLBMPKIReporter // sbin_codex: removed - MPKI reuses the main reporter's tracers.
+}
+
+func newExtendedReporter(s *simulation.Simulation) *extendedReporter {
+	d, _ := s.GetComponentByName("Driver").(*driver.Driver)
+	return &extendedReporter{driver: d}
+}
+
+func (r *extendedReporter) injectTracers(s *simulation.Simulation) {
+	if *reportAll || *gmmuReportFlag {
+		r.injectTranslationTracers(s)
+	}
+	if *reportAll || *workingSetReportFlag {
+		r.injectWorkingSetTracer(s)
+	}
+	if *reportAll || *pageMigrationReportFlag {
+		r.injectMigrationTracer(s)
+	}
+	// r.injectL2TLBMPKITracer(s) // sbin_codex: removed - MPKI reuses the main reporter's tracers.
+}
+
+func (r *extendedReporter) injectTranslationTracers(s *simulation.Simulation) {
+	for _, comp := range s.Components() {
+		hookable, ok := comp.(tracing.NamedHookable)
+		if !ok {
+			continue
+		}
+
+		switch {
+		case strings.HasSuffix(comp.Name(), ".GMMU"):
+			tracer := newGMMUTracer(s.GetEngine())
+			tracing.CollectTrace(hookable, tracer)
+			r.gmmuTracers = append(r.gmmuTracers, &componentGMMUTracer{
+				component: hookable,
+				tracer:    tracer,
+			})
+		case comp.Name() == "MMU":
+			tracer := newGMMUTracer(s.GetEngine())
+			tracing.CollectTrace(hookable, tracer)
+			r.mmuTracers = append(r.mmuTracers, &componentGMMUTracer{
+				component: hookable,
+				tracer:    tracer,
+			})
+		}
+	}
+}
+
+func (r *extendedReporter) injectWorkingSetTracer(s *simulation.Simulation) {
+	pageSize := uint64(1 << 12)
+	if r.driver != nil && r.driver.Log2PageSize < 64 {
+		pageSize = uint64(1 << r.driver.Log2PageSize)
+	}
+
+	tracer := newWorkingSetTracer(pageSize)
+	for _, comp := range s.Components() {
+		if !isL1TLB(comp.Name()) {
+			continue
+		}
+		hookable, ok := comp.(tracing.NamedHookable)
+		if !ok {
+			continue
+		}
+		tracing.CollectTrace(hookable, tracer)
+	}
+	r.workingSet = &componentWorkingSetTracer{tracer: tracer}
+}
+
+func (r *extendedReporter) injectMigrationTracer(s *simulation.Simulation) {
+	driverComp, ok := s.GetComponentByName("Driver").(tracing.NamedHookable)
+	if !ok {
+		return
+	}
+
+	tracer := newMigrationTracer(s.GetEngine())
+	tracing.CollectTrace(driverComp, tracer)
+	r.migration = tracer
+}
+
+func isL1TLB(name string) bool {
+	return strings.Contains(name, ".L1VTLB[") ||
+		strings.HasSuffix(name, ".L1STLB") ||
+		strings.HasSuffix(name, ".L1ITLB")
+}
+
+func (r *extendedReporter) report(base *reporter) {
+	if *reportAll || *gmmuReportFlag {
+		r.reportTranslationMetrics(base)
+	}
+	if *reportAll || *workingSetReportFlag {
+		r.reportWorkingSetMetrics(base)
+	}
+	if *reportAll || *memoryFootprintReportFlag {
+		r.reportMemoryMetrics(base)
+	}
+	if *reportAll || *pageMigrationReportFlag {
+		r.reportMigrationMetrics(base)
+	}
+	// r.reportL2TLBMPKI(base) // sbin_codex: removed - now reported by the main reporter.
+}
+
+func (r *extendedReporter) reportTranslationMetrics(base *reporter) {
+	for _, item := range r.gmmuTracers {
+		reportTranslation(base, item.component.Name(), item.tracer, "gmmu")
+	}
+	for _, item := range r.mmuTracers {
+		reportTranslation(base, item.component.Name(), item.tracer, "mmu")
+	}
+}
+
+func reportTranslation(
+	base *reporter,
+	location string,
+	tracer *gmmuTracer,
+	prefix string,
+) {
+	insertMetric(base, location, prefix+"_translation_count",
+		float64(tracer.TotalCount()), "count")
+	insertMetric(base, location, prefix+"_translation_avg_latency",
+		float64(tracer.AverageLatency()), "second")
+	insertMetric(base, location, prefix+"_max_inflight",
+		float64(tracer.MaxInflight()), "count")
+	insertMetric(base, location, prefix+"_avg_inflight",
+		float64(tracer.AverageInflight()), "count")
+
+	counts := tracer.PageWalkCounts()
+	keys := make([]string, 0, len(counts))
+	for key := range counts {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		kind, level, ok := pageWalkLevel(key)
+		if !ok {
+			continue
+		}
+		if !shouldReportPageWalkMetric(kind, level) {
+			continue
+		}
+		kind = strings.ReplaceAll(kind, "-", "_")
+		insertMetric(base, location,
+			prefix+"_"+kind+"_"+itoa(level),
+			float64(counts[key]), "count")
+	}
+}
+
+func shouldReportPageWalkMetric(kind string, level int) bool {
+	return kind != "pwc-miss" || level != 0
+}
+
+func (r *extendedReporter) reportWorkingSetMetrics(base *reporter) {
+	if r.workingSet == nil {
+		return
+	}
+
+	tracer := r.workingSet.tracer
+	pageSize := uint64(1 << 12)
+	if r.driver != nil && r.driver.Log2PageSize < 64 {
+		pageSize = uint64(1 << r.driver.Log2PageSize)
+	}
+	pages := tracer.TotalPages()
+	insertMetric(base, "WorkingSet", "working_set_pages",
+		float64(pages), "count")
+	insertMetric(base, "WorkingSet", "working_set_bytes",
+		float64(pages*pageSize), "bytes")
+
+	counts := tracer.PerGPUPageCounts()
+	keys := make([]string, 0, len(counts))
+	for key := range counts {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		insertMetric(base, key, "working_set_pages",
+			float64(counts[key]), "count")
+		insertMetric(base, key, "working_set_bytes",
+			float64(counts[key]*pageSize), "bytes")
+	}
+}
+
+func (r *extendedReporter) reportMemoryMetrics(base *reporter) {
+	if r.driver == nil {
+		return
+	}
+
+	stats := r.driver.MemoryStats()
+	location := "Driver"
+	insertMetric(base, location, "memory_page_size",
+		float64(stats.PageSize), "bytes")
+	insertMetric(base, location, "memory_footprint_live_pages",
+		float64(stats.LivePageCount), "count")
+	insertMetric(base, location, "memory_footprint_peak_pages",
+		float64(stats.PeakPageCount), "count")
+	insertMetric(base, location, "memory_footprint_total_pages",
+		float64(stats.TotalPageCount), "count")
+	insertMetric(base, location, "memory_footprint_live_bytes",
+		float64(stats.LiveBytes), "bytes")
+	insertMetric(base, location, "memory_footprint_peak_bytes",
+		float64(stats.PeakBytes), "bytes")
+	insertMetric(base, location, "memory_footprint_total_bytes",
+		float64(stats.TotalBytes), "bytes")
+}
+
+func (r *extendedReporter) reportMigrationMetrics(base *reporter) {
+	if r.migration == nil {
+		return
+	}
+
+	location := "Driver"
+	insertMetric(base, location, "page_migration_count",
+		float64(r.migration.Count()), "count")
+	insertMetric(base, location, "page_migration_pages",
+		float64(r.migration.Pages()), "count")
+	insertMetric(base, location, "page_migration_bytes",
+		float64(r.migration.Bytes()), "bytes")
+	insertMetric(base, location, "page_migration_avg_latency",
+		float64(r.migration.AverageLatency()), "second")
+	insertMetric(base, "PCIe", "pcie_page_migration_payload_bytes",
+		float64(r.migration.Bytes()), "bytes")
+}
+
+func insertMetric(base *reporter, location, what string, value float64, unit string) {
+	base.dataRecorder.InsertData(tableName, metric{
+		Location: location,
+		What:     what,
+		Value:    value,
+		Unit:     unit,
+	})
+}
+
+func itoa(value int) string {
+	if value == 0 {
+		return "0"
+	}
+
+	negative := value < 0
+	if negative {
+		value = -value
+	}
+	buf := [20]byte{}
+	i := len(buf)
+	for value > 0 {
+		i--
+		buf[i] = byte('0' + value%10)
+		value /= 10
+	}
+	if negative {
+		i--
+		buf[i] = '-'
+	}
+	return string(buf[i:])
+}
+
+// sbin_codex: L2 TLB MPKI reporting now reuses the main reporter's
+// tlbHitRateTracers (L2TLB misses) and instCountTracers (retired
+// instructions) instead of instrumenting every CU and L2TLB a second time.
+// The removed per-GPU instrumentation is preserved below as comments.
+
+/*
+type instructionCountTracer struct {
+	lock     sync.Mutex
+	inflight map[string]struct{}
+	count    uint64
+}
+
+func newInstructionCountTracer() *instructionCountTracer {
+	return &instructionCountTracer{inflight: make(map[string]struct{})}
+}
+
+func (t *instructionCountTracer) StartTask(task tracing.Task) {
+	if task.Kind != "inst" {
+		return
+	}
+	t.lock.Lock()
+	t.inflight[task.ID] = struct{}{}
+	t.lock.Unlock()
+}
+
+func (t *instructionCountTracer) StepTask(_ tracing.Task) {}
+
+func (t *instructionCountTracer) AddMilestone(_ tracing.Milestone) {}
+
+func (t *instructionCountTracer) EndTask(task tracing.Task) {
+	t.lock.Lock()
+	defer t.lock.Unlock()
+	if _, ok := t.inflight[task.ID]; !ok {
+		return
+	}
+	delete(t.inflight, task.ID)
+	t.count++
+}
+
+func (t *instructionCountTracer) Count() uint64 {
+	t.lock.Lock()
+	defer t.lock.Unlock()
+	return t.count
+}
+
+type l2TLBMPKITracer struct {
+	component tracing.NamedHookable
+	gpu       string
+	miss      *tracing.StepCountTracer
+}
+
+type l2TLBMPKIReporter struct {
+	tracers      []*l2TLBMPKITracer
+	instructions map[string]*instructionCountTracer
+}
+
+func (r *extendedReporter) injectL2TLBMPKITracer(s *simulation.Simulation) {
+	if !*reportAll && !*tlbHitRateReportFlag && !*l2TLBMPKIReportFlag {
+		return
+	}
+
+	reporter := &l2TLBMPKIReporter{
+		instructions: make(map[string]*instructionCountTracer),
+	}
+	for _, comp := range s.Components() {
+		hookable, ok := comp.(tracing.NamedHookable)
+		if !ok {
+			continue
+		}
+
+		if strings.Contains(comp.Name(), ".CU[") {
+			gpu := gpuName(comp.Name())
+			instructionTracer, found := reporter.instructions[gpu]
+			if !found {
+				instructionTracer = newInstructionCountTracer()
+				reporter.instructions[gpu] = instructionTracer
+			}
+			tracing.CollectTrace(hookable, instructionTracer)
+		}
+
+		if strings.HasSuffix(comp.Name(), ".L2TLB") {
+			missTracer := tracing.NewStepCountTracer(
+				func(task tracing.Task) bool { return true })
+			tracing.CollectTrace(hookable, missTracer)
+			reporter.tracers = append(reporter.tracers, &l2TLBMPKITracer{
+				component: hookable,
+				gpu:       gpuName(comp.Name()),
+				miss:      missTracer,
+			})
+		}
+	}
+	r.l2TLBMPKI = reporter
+}
+*/
+
+func calculateL2TLBMPKI(misses, instructions uint64) float64 {
+	if instructions == 0 {
+		return 0
+	}
+	return float64(misses) * 1000 / float64(instructions)
+}
+
+// reportL2TLBMPKI reports the L2 TLB miss rate per 1000 retired
+// instructions: (L2TLB miss count / total CU instruction count) * 1000.
+// sbin_codex: this reporter method reuses the tlbHitRateTracers and
+// instCountTracers already injected by the main reporter, replacing the
+// extendedReporter variant that carried its own second instrumentation.
+func (r *reporter) reportL2TLBMPKI() {
+	if len(r.tlbHitRateTracers) == 0 || len(r.instCountTracers) == 0 {
+		return
+	}
+
+	var l2Miss uint64
+	for _, tracer := range r.tlbHitRateTracers {
+		if !strings.HasSuffix(tracer.tlb.Name(), ".L2TLB") {
+			continue
+		}
+		l2Miss += tracer.tracer.GetStepCount("miss")
+	}
+
+	var instCount uint64
+	for _, tracer := range r.instCountTracers {
+		instCount += tracer.tracer.count
+	}
+
+	insertMetric(r, "GPU.L2TLB", "l2_tlb_mpki",
+		calculateL2TLBMPKI(l2Miss, instCount),
+		"miss/kilo-inst")
+}
+
+/*
+func (r *extendedReporter) reportL2TLBMPKI(base *reporter) {
+	if r.l2TLBMPKI == nil {
+		return
+	}
+
+	for _, tracer := range r.l2TLBMPKI.tracers {
+		instructionTracer := r.l2TLBMPKI.instructions[tracer.gpu]
+		if instructionTracer == nil {
+			continue
+		}
+		insertMetric(
+			base,
+			tracer.component.Name(),
+			"l2_tlb_mpki",
+			calculateL2TLBMPKI(
+				tracer.miss.GetStepCount("miss"),
+				instructionTracer.Count(),
+			),
+			"misses/1000 instructions",
+		)
+	}
+}
+*/
