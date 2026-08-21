@@ -16,5 +16,7 @@ type GPUBuilder interface {
 	WithPageTable(pageTable vm.PageTable) GPUBuilder // sbin_codex: bind each GPU to its own page table.
 	// sbin_codex: UVM demand-fault service provider (driver UVM port).
 	WithUVMServiceProvider(provider sim.RemotePort) GPUBuilder
+	// sbin_codex: GPU-side 64KB remote-access counter threshold.
+	WithAccessCounterThreshold(thresh uint64) GPUBuilder
 	Build(name string) *sim.Domain
 }

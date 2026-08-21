@@ -11,8 +11,9 @@ type tbnSelection struct {
 
 // selectTBNRegion selects the neighborhood to migrate for a demand fault.
 // The demanded 4KB page is always included. The minimum fetch is the aligned
-// 64KB leaf; the neighborhood expands up to TBNMaxFetchSize when sibling
-// activity reaches the expand threshold.
+// 64KB leaf. Within the 2MB VA block, the selection expands up the hierarchy:
+// when at least TBNExpandRatio (default 51%) of the pages inside a node are
+// already GPU-resident, the whole node is migrated. // sbin_codex
 func (m *UVMManager) selectTBNRegion(faultKey PageKey, block *VABlock) tbnSelection {
 	cfg := m.config
 	regionBase := cfg.alignDown(faultKey.VAddr, cfg.RegionSize)
@@ -27,33 +28,25 @@ func (m *UVMManager) selectTBNRegion(faultKey PageKey, block *VABlock) tbnSelect
 	selectedBases := []uint64{regionBase}
 	sel.pageKeys = append(sel.pageKeys, m.regionPageKeys(block, regionIndex)...)
 
-	// Hierarchical expansion: 64KB -> 128KB -> 256KB -> ... up to the max.
+	// Hierarchical expansion: 64KB -> 128KB -> ... -> up to the max fetch.
 	curBase := regionBase
 	curSize := cfg.RegionSize
 	for curSize < cfg.TBNMaxFetchSize {
 		nextSize := curSize * 2
-		// The "sibling subtree" of the current neighborhood covers the other
-		// half of the next-larger neighborhood. Its base is either the
-		// next-larger base or the current base offset by curSize.
-		largerBase := cfg.alignDown(curBase, nextSize)
-		siblingBase := largerBase
-		if siblingBase == curBase {
-			siblingBase = curBase + curSize
-		}
-		// Sibling is within the same 2MB block.
-		if siblingBase+curSize > block.Key.Base+cfg.VABlockSize {
+		nodeBase := cfg.alignDown(curBase, nextSize)
+		if nodeBase+nextSize > block.Key.Base+cfg.VABlockSize {
 			break
 		}
-		if m.subtreeActivity(block, siblingBase, curSize) < cfg.TBNExpandThreshold {
+		if !m.nodeResidentRatio(block, nodeBase, nextSize) {
 			break
 		}
-		// Expand: include the sibling subtree.
-		for b := siblingBase; b < siblingBase+curSize; b += cfg.RegionSize {
+		// Migrate the whole node: add every leaf under it.
+		for b := nodeBase; b < nodeBase+nextSize; b += cfg.RegionSize {
 			idx := (b - block.Key.Base) / cfg.RegionSize
 			selectedBases = append(selectedBases, b)
 			sel.pageKeys = append(sel.pageKeys, m.regionPageKeys(block, idx)...)
 		}
-		curBase = largerBase
+		curBase = nodeBase
 		curSize = nextSize
 	}
 
@@ -98,16 +91,33 @@ func (m *UVMManager) regionPageKeys(block *VABlock, regionIndex uint64) []PageKe
 	return region.Pages
 }
 
-// subtreeActivity sums the per-region activity counters in the range
-// [base, base+size) within the block.
-func (m *UVMManager) subtreeActivity(block *VABlock, base, size uint64) uint64 {
+// nodeResidentRatio reports whether at least TBNExpandRatio of the pages
+// inside the node [base, base+size) are GPU-resident. If the ratio is 51% or
+// more, the whole node becomes a migration candidate. // sbin_codex
+func (m *UVMManager) nodeResidentRatio(block *VABlock, base, size uint64) bool {
 	cfg := m.config
-	var activity uint64
-	for b := base; b < base+size; b += cfg.RegionSize {
-		idx := (b - block.Key.Base) / cfg.RegionSize
-		if idx < uint64(len(block.Activity)) {
-			activity += uint64(block.Activity[idx])
+	ratio := cfg.TBNExpandRatio
+	if ratio <= 0 {
+		return false
+	}
+	if ratio >= 1 {
+		return true
+	}
+
+	var total, resident uint64
+	for b := base; b < base+size; b += cfg.PageSize {
+		pk := PageKey{PID: block.Key.PID, VAddr: b}
+		mp := m.pages[pk]
+		if mp == nil {
+			continue
+		}
+		total++
+		if mp.GPUFrameValid && mp.State == GPUResident {
+			resident++
 		}
 	}
-	return activity
+	if total == 0 {
+		return false
+	}
+	return float64(resident)/float64(total) >= ratio
 }

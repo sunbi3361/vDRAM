@@ -66,6 +66,13 @@ type Comp struct {
 	uvmPort            sim.Port
 	UVMServiceProvider sim.RemotePort
 
+	// sbin_codex: GPU-side remote-access counters at 64KB granularity. The
+	// GMMU counts translations of remotely-accessible (CPU-resident) pages
+	// and notifies the driver at the threshold, which drives migrations.
+	accessCounters         map[uint64]uint64
+	accessCounterNotified  map[uint64]bool
+	accessCounterThreshold uint64
+
 	pageWalkCachePort sim.Port // sbin_gmmu
 	pageWalkCache     sim.Port // sbin_gmmu
 

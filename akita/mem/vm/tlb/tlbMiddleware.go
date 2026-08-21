@@ -288,6 +288,7 @@ func (m *tlbMiddleware) fetchBottom(req *vm.TranslationReq) bool {
 		WithPID(req.PID).
 		WithVAddr(req.VAddr).
 		WithDeviceID(req.DeviceID).
+		WithIsWrite(req.IsWrite). // sbin_codex: propagate write intent to the GMMU.
 		Build()
 
 	err := m.bottomPort.Send(fetchBottom)

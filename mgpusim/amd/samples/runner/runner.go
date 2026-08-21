@@ -39,12 +39,12 @@ type Runner struct {
 	GPUType          string
 
 	// sbin_codex: UVM demand-paging configuration.
-	UVM                bool
-	IdealUVM           bool
-	UVMFaultLatencyUS  float64
-	UVMACThreshold     uint64
-	UVMExpandThreshold uint64
-	UVMmaxFetchSize    uint64
+	UVM               bool
+	IdealUVM          bool
+	UVMFaultLatencyUS float64
+	UVMACThreshold    uint64
+	UVMExpandRatio    float64
+	UVMmaxFetchSize   uint64
 
 	GPUIDs     []int
 	benchmarks []benchmarks.Benchmark
@@ -119,7 +119,7 @@ func (r *Runner) buildTimingPlatform() {
 
 	if r.UVM {
 		b = b.WithUVM(r.UVM, r.IdealUVM, r.UVMFaultLatencyUS,
-			r.UVMACThreshold, r.UVMExpandThreshold, r.UVMmaxFetchSize)
+			r.UVMACThreshold, r.UVMExpandRatio, r.UVMmaxFetchSize)
 	}
 
 	if *magicMemoryCopy {

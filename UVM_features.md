@@ -1,7 +1,16 @@
 # MGPUSim UVM / Demand-Paging 구현 정리
 
-> branch: main | 작업 완료일: 2026-08-21
+> branch: main | 작업 완료일: 2026-08-21 (v2 수정 반영)
 > 기반 문서: `UVM.md` (구현 스펙) | 모든 수정 코드는 AGENTS.md 관례에 따라 `sbin_codex` 마커 사용
+>
+> **v2 수정 (2026-08-21)**:
+> 1. `-uvm-ideal`에서 폴트 제어 평면 PCIe 레이턴시도 0 (directconnection 배선)
+> 2. TBN 확장 기준을 "하위 노드(리프) 51% 이상 마이그레이션 시 해당 노드 전체 선택"으로 변경
+> 3. Access Counter를 GPU단(GMMU)으로 이동 — PCIe(원격) 트래픽 감지, 드라이버와 알림/리셋으로 동기화
+> 4. Eviction은 드라이버 LRU 리스트 기반 (Access Counter와 무관)
+> 5. RemoteAccessible 페이지에 대한 Write 트래픽은 카운터와 무관하게 즉시 GPU 마이그레이션 요청
+> 6. **Eviction 시 TLB shootdown**: 퇴출 victim 예약 → ShootDownCommand(GPU TLB flush) →
+>    ACK 수신 후 PTE/프레임 확정 — stale 번역 사용 방지
 
 ---
 
@@ -14,7 +23,7 @@ MGPUSim에 통합 가상 메모리(UVM, Unified Virtual Memory) demand-paging �
 2. TBN(Tree-Based Neighborhood) 프리페처 — 4KB 기본 페이지, 64KB 최소 마이그레이션/프리페치 단위, 2MB VA 블록
 3. 고정 **20us 페이지 폴트 처리 레이턴시**
 4. **Access Counter** — 64KB 단위
-5. `-ideal-uvm` 모드 — 폴트/마이그레이션 타이밍 0, 기능적 상태 머신은 동일하게 실행·집계
+5. `-uvm-ideal` 모드 — 폴트/마이그레이션 타이밍 0, 기능적 상태 머신은 동일하게 실행·집계
 6. GPU 메모리 **oversubscription** — 페이지 퇴출(eviction) 및 재마이그레이션
 
 핵심 설계 원칙(스펙 §24): UVM은 TLB 미스에 붙는 단순 레이턴시가 아니라 **상태 저장형 메모리 관리
@@ -66,7 +75,7 @@ MGPUSim에 통합 가상 메모리(UVM, Unified Virtual Memory) demand-paging �
 
 | 파일 | 변경 |
 |---|---|
-| `samples/runner/flag.go` | `-uvm`, `-ideal-uvm`, `-uvm-fault-latency-us`, `-uvm-access-counter-threshold`, `-uvm-tbn-expand-threshold`, `-uvm-tbn-max-fetch-size` + 조합 검증 |
+| `samples/runner/flag.go` | `-uvm`, `-uvm-ideal`, `-uvm-fault-latency-us`, `-uvm-access-counter-threshold`, `-uvm-tbn-expand-ratio`, `-uvm-tbn-max-fetch-size` + 조합 검증 |
 | `samples/runner/runner.go` | UVM 필드, `SetManagedMemory` 라우팅 |
 | `samples/runner/report.go` | UVM 통계 블록 (26개 행, `Location="UVM"`) |
 | `samples/runner/timingconfig/builder.go` | UVM 설정 배선, GMMU↔드라이버 UVM 포트 연결 (PCIe 루트 콤플렉스) |
@@ -88,27 +97,34 @@ MGPUSim에 통합 가상 메모리(UVM, Unified Virtual Memory) demand-paging �
 
 ```text
 GPU translation (GMMU)
-  → managed 비상주 페이지 감지 (IsMigrating 또는 DeviceID=0 && !RemoteAccessible)
-  → sendUVMFault (PageFaultReq) → 트랜잭션 park
-  → Driver.parseFromUVM → UVMManager.onManagedAccess
-      ├─ GPU-resident  → 즉시 응답 (다른 폴트의 TBN이 이미 마이그레이션한 경우)
-      ├─ remote-accessible → 64KB Access Counter++ (임계값 도달 시 마이그레이션)
-      └─ CPU-resident  → coalesceFault (4KB 페이지 단위)
-          → faultHandlingCompleteEvent 스케줄 (20us 또는 ideal=0)
-          → handleFaultReady: TBN 선택 → 용량 검사 → LRU 퇴출 → CPU→GPU 마이그레이션
-          → migrateData: 바이트 복사 + 완료 이벤트 (size/bandwidth 또는 ideal=0)
-          → completeMigration: PTE 갱신, AC 리셋, 대기자 replay
-          → PageFaultRsp → GMMU가 PTE 재조회 → TranslationRsp를 L2TLB로
+  → managed 페이지 판정 (TranslationReq.IsWrite 전파)
+  ├─ IsMigrating                          → 폴트
+  ├─ CPU-resident && !RemoteAccessible    → 폴트 (첫 접근)
+  ├─ RemoteAccessible && Write            → 즉시 폴트 (AC와 무관)
+  └─ RemoteAccessible && Read             → 원격 접근 (GPU단 AC++)
+      → sendUVMFault (PageFaultReq) → 트랜잭션 park  [비-이상: PCIe / ideal: directconnection]
+      → Driver.parseFromUVM → UVMManager.onManagedAccess
+          └─ CPUResident → coalesceFault (4KB 페이지 단위)
+              → faultHandlingCompleteEvent 스케줄 (20us 또는 ideal=0)
+              → handleFaultReady: TBN 선택(51% 규칙) → 용량 검사 → 드라이버 LRU 퇴출 → CPU→GPU 마이그레이션
+              → migrateData: 바이트 복사 + 완료 이벤트 (size/bandwidth 또는 ideal=0)
+              → completeMigration: PTE 갱신, GMMU AC 리셋, 대기자 replay
+              → PageFaultRsp → GMMU가 PTE 재조회 → TranslationRsp를 L2TLB로
+
+GPU단 Access Counter (GMMU)
+  → 원격 read 접근마다 64KB 카운터++
+  → 임계값 도달 → AccessCounterNotifyReq → 드라이버 triggerAccessCounterMigration
+  → 드라이버가 마이그레이션 완료 시 AccessCounterResetReq로 GMMU 카운터 초기화 (동기화)
 ```
 
 ---
 
 ## 5. 플래그 의미론
 
-| `-uvm` | `-ideal-uvm` | 동작 |
+| `-uvm` | `-uvm-ideal` | 동작 |
 |---:|---:|---|
 | 0 | 0 | 기존 비-UVM 동작 (회귀 검증 완료) |
-| 0 | 1 | 거부 (`-ideal-uvm requires -uvm`) |
+| 0 | 1 | 거부 (`-uvm-ideal requires -uvm`) |
 | 1 | 0 | 전체 UVM 타이밍: 20us 폴트 + 마이그레이션 레이턴시 |
 | 1 | 1 | 기능적 상태 머신 동일, 타이밍 0 |
 
@@ -118,8 +134,8 @@ GPU translation (GMMU)
 
 ```text
 -uvm-fault-latency-us=20            # 고정 폴트 처리 레이턴시 (us)
--uvm-access-counter-threshold=64    # 원격 접근 임계값
--uvm-tbn-expand-threshold=1         # 형제 서브트리 활동 임계값
+-uvm-access-counter-threshold=64    # GPU단 원격 접근 카운터 임계값
+-uvm-tbn-expand-ratio=0.51          # TBN 노드 확장 비율 (하위 리프 51% 이상)
 -uvm-tbn-max-fetch-size=2097152     # TBN 최대 페치 크기 (2MB)
 ```
 
@@ -138,18 +154,25 @@ GPU translation (GMMU)
 
 - 2MB VA 블록 = 32 × 64KB 영역(리프), 512 × 4KB 페이지.
 - 폴트 주소를 64KB로 align-down → **최소 64KB 리프 항상 선택** (요구 페이지 포함 보장).
-- 계층 확장 64KB → 128KB → … → 2MB: 현재 노드의 형제 서브트리 활동합 ≥ `TBNExpandThreshold`(기본 1)이면 확장, `TBNMaxFetchSize`에서 중단.
+- **51% 규칙 (v2)**: 계층 확장 64KB → 128KB → … → 2MB. 각 상위 노드에 대해
+  노드 내 페이지 중 GPU-resident 비율 ≥ `-uvm-tbn-expand-ratio`(기본 0.51)이면
+  **해당 노드 전체(하위 리프 모두)를 마이그레이션 대상으로 선택**. `TBNMaxFetchSize`에서 중단.
 - 이미 GPU-resident인 페이지는 전송/회계에서 제외.
 - 통계: `uvm_tbn_fetches`, `uvm_tbn_64kb_fetches`, `uvm_tbn_larger_fetches`, `uvm_demand_migrated_pages`, `uvm_prefetched_pages`.
 
 ---
 
-## 8. Access Counter 알고리즘
+## 8. Access Counter 알고리즘 (GPU단, v2)
 
-- 키: `AccessCounterKey{PID, RegionBase(64KB 정렬), DeviceID}`.
-- GPU-resident 페이지 접근은 카운트하지 않음. 원격(CPU-resident·remote-accessible) 접근만 증가.
-- 카운터 ≥ `-uvm-access-counter-threshold`(기본 64) → `AccessCounterNotifications++`, 64KB 영역 CPU→GPU 마이그레이션 트리거 (`TriggerAccessCounter`, 20us 미부과).
-- 리셋: 영역이 GPU로 마이그레이션될 때 / 퇴출로 CPU 상주 epoch 시작 시 카운터·epoch 초기화.
+- **위치**: Access Counter는 GPU단(GMMU)에 존재. GMMU가 원격(RemoteAccessible) 페이지에 대한
+  **Read 번역(PCIe 트래픽)을 감지**하여 64KB 영역 카운터를 증가시킨다.
+- **드라이버 동기화**: 카운터 ≥ `-uvm-access-counter-threshold`(기본 64) →
+  GMMU가 `AccessCounterNotifyReq`를 드라이버로 전송 → 드라이버가
+  `triggerAccessCounterMigration` 실행 (20us 미부과). 드라이버는 마이그레이션 완료 시
+  `AccessCounterResetReq`로 GMMU 카운터를 초기화(epoch 동기화).
+- GPU-resident 페이지 접근은 카운트하지 않음.
+- **Write는 카운터와 무관** (v2): RemoteAccessible 페이지에 대한 Write 번역은
+  GMMU가 즉시 폴트로 처리 → 즉각 GPU 마이그레이션 요청.
 - 통계: `uvm_remote_accesses`, `uvm_access_counter_notifications`, `uvm_access_counter_triggered_migrations`, `uvm_access_counter_resets`.
 
 ---
@@ -157,7 +180,16 @@ GPU translation (GMMU)
 ## 9. Oversubscription / 퇴출 정책
 
 - **하드 용량**: `GPUCapacityBytes`(= GPU DRAM 크기) 예산 `freeGPUFrames`로 강제. 관리형 가상 할당은 GPU 물리 메모리를 초과 가능.
-- **희생자 선택**: 64KB 영역 단위 결정적 LRU — `(LastAccess, PID, RegionBase)` 정렬. 요구 프레임 수만큼 퇴출.
+- **희생자 선택 (v2)**: 드라이버 LRU 리스트(`container/list`) — GPU-resident 영역만 리스트에 존재하고
+  GPU 접근 시 MRU로 이동, 퇴출은 LRU 끝부터. **Access Counter와 무관** (별도 구조). 요구 프레임 수만큼 퇴출.
+- **TLB shootdown (v2)**: 퇴출은 비동기 3단계로 수행 — ① victim 예약 ② `ShootDownCommand`를 GPU로 전송
+  (CP가 TLB flush, `ShootDownCompleteRsp` 반환) ③ ACK 수신 후에만 PTE 갱신·GPU 프레임 해제·LRU 제거를
+  확정하고 대기 중이던 마이그레이션을 재개. 퇴출 후 GPU 접근은 항상 TLB 미스 → GMMU →
+  RemoteAccessible 판정(Read: 원격 접근 / Write: 폴트)으로 이어져 stale 매핑 사용이 불가능하다.
+- **D2H (GPU 메모리 읽기)**: GPU-resident 페이지는 기존 DMA 경로(`MemCopyD2HReq` → CP → DMA engine →
+  GPU DRAM)로 읽고, CPU-resident 페이지는 `globalStorage` 직접 읽기. managed 버퍼는 flush
+  (L1V/L2D dirty write-back) + UVM 폴트/마이그레이션 드레인(`hasPendingWorkInRange`) 후 재조회하여
+  정합성을 보장한다 (deferred D2H).
 - **비적격 영역**: 마이그레이션 중(`MigrationID != ""`), 미해결 폭트 대기(`ActiveFaults > 0`), eviction-locked, 활성 마이그레이션 대상 영역.
 - **퇴출 전이**: GPUResident → (보수적 GPU→CPU 데이터 복사 — 더티 추적 미구현이므로 모든 퇴출이 전송 트래픽 발생) → CPUResident(`RemoteAccessible=true`).
 - **재마이그레이션**: 퇴출된 페이지는 remote-accessible이 되어 Access Counter 경로로 재마이그레이션 → `uvm_repeated_migrations` 증가 (스래싱 감지).
@@ -170,6 +202,10 @@ GPU translation (GMMU)
 - 20us 폴트 레이턴시와 분리. `migration latency = transfer size / 16GB/s` (효과적 CPU-GPU 대역폭 참조, 별도 PCIe 모델 중복 없음).
 - 데이터 평면은 `globalStorage` 바이트 복사 (CPU 백킹 ↔ GPU 프레임) — 마이그레이션 카운트/바이트는 유지.
 - ideal 모드: 동일한 복사·카운트 수행, 완료 이벤트를 현재 시간에 스케줄.
+- **uvm-ideal PCIe 0 (v2)**: uvm-ideal 모드에서는 GMMU↔드라이버 UVM 폴트 채널을 PCIe 대신
+  **directconnection(제로 레이턴시)**으로 배선. 폴트 요청/응답/AC 알림/리셋 메시지의
+  제어 평면 레이턴시가 제거되어 baseline에 근접한 상한 성능 측정이 가능.
+  (측정: vectoradd 1024 ideal kernel_time 2.10e-04 → 2.78e-05, 약 7.5배 개선)
 
 ---
 
@@ -205,7 +241,7 @@ ideal 모드에서 `FaultHandlingTime == 0`, `MigrationTime == 0`이며 카운�
 ### 엔드-투-엔드 검증 (vectoradd, virtual-caching)
 | 모드 | 크기 | 결과 |
 |---|---|---|
-| `-uvm -ideal-uvm` | 128/256/512/1024 | 모두 Passed, 타이밍 0 |
+| `-uvm -uvm-ideal` | 128/256/512/1024 | 모두 Passed, 타이밍 0 |
 | `-uvm` (비-이상) | 256 | Passed — 97 폴트 × 20us = 1.94ms 폴트 시간, 마이그레이션 0.457ms |
 | `-uvm` (비-이상) | 1024 | 진행 확인 (wave 71%+) — 시뮬레이션 레이턴시로 느리지만 정상 동작 |
 | `-uvm=false` (레거시) | 1024 | Passed, UVM 통계 0행 |
@@ -219,6 +255,9 @@ ideal 모드에서 `FaultHandlingTime == 0`, `MigrationTime == 0`이며 카운�
 3. **퇴출 copy-back은 보수적**: 더티 페이지 추적 미구현 → 모든 퇴출이 전송 트래픽을 발생 (스펙 §12.5에 명시된 허용).
 4. **마이그레이션 타이밍은 해석적**: `size/16GB/s` 지연 사용. 기존 PMC/`RemotePMCPorts` GPU-간 경로는 기준선과 동일하게 미사용 — UVM은 CP DMA/globalStorage 데이터 평면 사용.
 5. **Access Counter 히스토그램 미출력** (스펙 §10.5 "If feasible" 항목).
+6. **GMMU 원격 접근 카운터는 첫 요청 기준**: TLB MSHR 병합으로 write 요청이 read와
+   병합되면 GMMU 폴트 판정이 첫 요청의 IsWrite를 따름. 병합된 write는 카운터 임계값
+   경로로 보완됨 (즉시성은 페이지 단위 첫 요청 기준).
 
 ---
 
@@ -238,7 +277,7 @@ ideal 모드에서 `FaultHandlingTime == 0`, `MigrationTime == 0`이며 카운�
 - [x] 관리형 할당이 GPU 물리 메모리 초과 가능 — 192MB 할당 성공
 - [x] 퇴출로 신규 마이그레이션 공간 확보 — eviction 카운트 검증
 - [x] 퇴출 페이지의 GPU 재마이그레이션 — 스래싱 테스트 `RepeatedMigrations > 0`
-- [x] `-ideal-uvm` 폴트/마이그레이션 타이밍 0 — 통계 검증
+- [x] `-uvm-ideal` 폴트/마이그레이션 타이밍 0 — 통계 검증
 - [x] ideal 모드에서도 폴트/마이그레이션/프리페치/퇴출 보고 — 동일 상태 머신
 - [x] 실행 종료 시 UVM 통계 출력 — SQLite `mgpusim_metrics` 26행
 - [x] 비-UVM 회귀 테스트 통과 — 전체 스위트 (기존 Dispatcher 2건 제외)

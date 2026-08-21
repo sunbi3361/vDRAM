@@ -14,6 +14,10 @@ type TranslationReq struct {
 	VAddr    uint64
 	PID      PID
 	DeviceID uint64
+	// IsWrite marks a translation for a write access. UVM uses it to migrate
+	// remotely-accessible pages on write immediately instead of counting the
+	// remote access. // sbin_codex
+	IsWrite bool
 }
 
 // Meta returns the meta data associated with the message.
@@ -47,6 +51,7 @@ type TranslationReqBuilder struct {
 	vAddr    uint64
 	pid      PID
 	deviceID uint64
+	isWrite  bool // sbin_codex
 }
 
 // WithSrc sets the source of the request to build.
@@ -85,6 +90,12 @@ func (b TranslationReqBuilder) WithDeviceID(
 	return b
 }
 
+// WithIsWrite marks the translation as serving a write access. // sbin_codex
+func (b TranslationReqBuilder) WithIsWrite(isWrite bool) TranslationReqBuilder {
+	b.isWrite = isWrite
+	return b
+}
+
 // Build creates a new TranslationReq
 func (b TranslationReqBuilder) Build() *TranslationReq {
 	r := &TranslationReq{}
@@ -94,6 +105,7 @@ func (b TranslationReqBuilder) Build() *TranslationReq {
 	r.VAddr = b.vAddr
 	r.PID = b.pid
 	r.DeviceID = b.deviceID
+	r.IsWrite = b.isWrite
 	r.TrafficClass = reflect.TypeOf(TranslationReq{}).String()
 
 	return r
@@ -332,5 +344,69 @@ func NewPageFaultRsp(src, dst sim.RemotePort, respondTo string) *PageFaultRsp {
 	cmd.Dst = dst
 	cmd.RespondTo = respondTo
 	cmd.TrafficClass = reflect.TypeOf(PageFaultRsp{}).String()
+	return cmd
+}
+
+// AccessCounterNotifyReq is sent by a GPU GMMU to the driver when a 64KB
+// remote-access counter reaches its threshold, requesting a CPU->GPU
+// migration of that region. // sbin_codex
+type AccessCounterNotifyReq struct {
+	sim.MsgMeta
+
+	PID        PID
+	RegionBase uint64
+	DeviceID   uint64
+}
+
+// Meta returns the meta data associated with the message.
+func (r *AccessCounterNotifyReq) Meta() *sim.MsgMeta {
+	return &r.MsgMeta
+}
+
+// Clone returns a clone of the AccessCounterNotifyReq with a different ID.
+func (r *AccessCounterNotifyReq) Clone() sim.Msg {
+	cloneMsg := *r
+	cloneMsg.ID = sim.GetIDGenerator().Generate()
+	return &cloneMsg
+}
+
+// NewAccessCounterNotifyReq creates a new AccessCounterNotifyReq.
+func NewAccessCounterNotifyReq(src, dst sim.RemotePort) *AccessCounterNotifyReq {
+	cmd := new(AccessCounterNotifyReq)
+	cmd.Src = src
+	cmd.Dst = dst
+	cmd.TrafficClass = reflect.TypeOf(AccessCounterNotifyReq{}).String()
+	return cmd
+}
+
+// AccessCounterResetReq is sent by the driver to a GPU GMMU after a
+// 64KB region migrates to the GPU, resetting its remote-access counter for
+// the new residency epoch. // sbin_codex
+type AccessCounterResetReq struct {
+	sim.MsgMeta
+
+	PID        PID
+	RegionBase uint64
+	DeviceID   uint64
+}
+
+// Meta returns the meta data associated with the message.
+func (r *AccessCounterResetReq) Meta() *sim.MsgMeta {
+	return &r.MsgMeta
+}
+
+// Clone returns a clone of the AccessCounterResetReq with a different ID.
+func (r *AccessCounterResetReq) Clone() sim.Msg {
+	cloneMsg := *r
+	cloneMsg.ID = sim.GetIDGenerator().Generate()
+	return &cloneMsg
+}
+
+// NewAccessCounterResetReq creates a new AccessCounterResetReq.
+func NewAccessCounterResetReq(src, dst sim.RemotePort) *AccessCounterResetReq {
+	cmd := new(AccessCounterResetReq)
+	cmd.Src = src
+	cmd.Dst = dst
+	cmd.TrafficClass = reflect.TypeOf(AccessCounterResetReq{}).String()
 	return cmd
 }

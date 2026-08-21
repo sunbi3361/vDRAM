@@ -1,5 +1,9 @@
 package driver
 
+import (
+	"container/list"
+)
+
 // UVMManager owns the functional UVM demand-paging state machine: residency,
 // faults, coalescing, TBN selection, capacity enforcement, eviction,
 // migration, access counters, and statistics. It is owned by the Driver and
@@ -19,6 +23,18 @@ type UVMManager struct {
 	migrations   map[string]*Migration
 	pageToMig    map[PageKey]string
 	accessCounts map[AccessCounterKey]*AccessCounterState
+
+	// sbin_codex: driver-side LRU list of GPU-resident 64KB regions for
+	// eviction victim selection. The access counter is independent of it.
+	lru    *list.List
+	lruMap map[RegionKey]*list.Element
+
+	// sbin_codex: pending TLB-shootdown eviction. Victim regions are reserved,
+	// a ShootDownCommand flushes the GPU TLB, and only after the ACK are the
+	// PTEs/frames finalized so stale translations can never be used.
+	evicting    []*RegionState
+	evictACK    uint64
+	evictOnDone func()
 
 	stats  UVMStats
 	nextID uint64
@@ -55,6 +71,8 @@ func newUVMManager(d *Driver, config UVMConfig) *UVMManager {
 		migrations:   make(map[string]*Migration),
 		pageToMig:    make(map[PageKey]string),
 		accessCounts: make(map[AccessCounterKey]*AccessCounterState),
+		lru:          list.New(),
+		lruMap:       make(map[RegionKey]*list.Element),
 		nextID:       1,
 	}
 	return m

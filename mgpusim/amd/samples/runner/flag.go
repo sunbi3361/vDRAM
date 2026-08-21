@@ -57,8 +57,8 @@ var uvmFaultLatencyUSFlag = flag.Float64("uvm-fault-latency-us", 20,
 	"Fixed host/driver page-fault handling latency in microseconds (UVM).")
 var uvmAccessCounterThresholdFlag = flag.Uint64("uvm-access-counter-threshold", 64,
 	"Access Counter threshold that triggers a 64KB CPU->GPU migration (UVM).")
-var uvmTBNExpandThresholdFlag = flag.Uint64("uvm-tbn-expand-threshold", 1,
-	"Minimum sibling-subtree 64KB activity to expand the TBN neighborhood (UVM).")
+var uvmTBNExpandRatioFlag = flag.Float64("uvm-tbn-expand-ratio", 0.51,
+	"Minimum GPU-resident page ratio inside a TBN node to migrate the whole node (UVM).")
 var uvmTBNMaxFetchSizeFlag = flag.Uint64("uvm-tbn-max-fetch-size", 1<<21,
 	"Maximum TBN neighborhood fetch size in bytes (UVM). Default 2MB.")
 var reportAll = flag.Bool("report-all", false, "Report all metrics to .csv file.")
@@ -160,7 +160,7 @@ func (r *Runner) parseSimulationFlags() {
 	}
 	r.UVMFaultLatencyUS = *uvmFaultLatencyUSFlag
 	r.UVMACThreshold = *uvmAccessCounterThresholdFlag
-	r.UVMExpandThreshold = *uvmTBNExpandThresholdFlag
+	r.UVMExpandRatio = *uvmTBNExpandRatioFlag
 	r.UVMmaxFetchSize = *uvmTBNMaxFetchSizeFlag
 
 	r.validateUVMFlags()
@@ -173,7 +173,7 @@ func (r *Runner) parseSimulationFlags() {
 // mode table. // sbin_codex
 func (r *Runner) validateUVMFlags() {
 	if r.IdealUVM && !r.UVM {
-		log.Panic("-ideal-uvm requires -uvm=true")
+		log.Panic("-uvm-ideal requires -uvm=true")
 	}
 	if r.UVM && !r.Timing {
 		log.Panic("-uvm requires -timing")

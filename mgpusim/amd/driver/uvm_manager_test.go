@@ -6,6 +6,7 @@ import (
 	"github.com/sarchlab/akita/v4/mem/mem"
 	"github.com/sarchlab/akita/v4/mem/vm"
 	"github.com/sarchlab/akita/v4/sim"
+	"github.com/sarchlab/akita/v4/sim/directconnection"
 )
 
 var _ = ginkgo.Describe("UVMManager", func() {
@@ -31,7 +32,7 @@ var _ = ginkgo.Describe("UVMManager", func() {
 				Ideal:                  true,
 				FaultLatencyUS:         20,
 				AccessCounterThreshold: 64,
-				TBNExpandThreshold:     1,
+				TBNExpandRatio:         0.51,
 				TBNMaxFetchSize:        2 * 1024 * 1024,
 				GPUCapacityBytes:       128 * 1024 * 1024,
 			}).
@@ -40,6 +41,14 @@ var _ = ginkgo.Describe("UVMManager", func() {
 			sim.NewPort(driver, 8, 8, "TestGPU.CP"),
 			DeviceProperties{CUCount: 4, DRAMSize: 4 * 1024 * 1024 * 1024},
 		)
+		// Wire the driver GPU port and the registered GPU through a direct
+		// connection so eviction shootdown sends resolve without a platform.
+		conn := directconnection.MakeBuilder().
+			WithEngine(engine).
+			WithFreq(1 * sim.GHz).
+			Build("TestGPU.Conn")
+		conn.PlugIn(driver.gpuPort)
+		conn.PlugIn(driver.GPUs[0])
 		ctx = driver.Init()
 	})
 
@@ -115,6 +124,12 @@ var _ = ginkgo.Describe("UVMManager", func() {
 		for off := uint64(0); off < 192*1024*1024; off += 64 * 1024 {
 			driver.uvm.onManagedAccess(pid, base+off, 1, "req", "")
 			engine.Run()
+			// sbin_codex: simulate the GPU TLB-shootdown ACK so the reserved
+			// eviction finalizes and the pending migration resumes.
+			if driver.uvm.hasPendingEvictions() {
+				driver.uvm.finalizeEviction()
+				engine.Run()
+			}
 		}
 
 		gomega.Expect(driver.uvm.stats.Evictions).To(gomega.BeNumerically(">", 0))
@@ -122,24 +137,23 @@ var _ = ginkgo.Describe("UVMManager", func() {
 		gomega.Expect(residentBytes).To(gomega.BeNumerically("<=", 128*1024*1024))
 	})
 
-	ginkgo.It("should increment the access counter for remote accesses", func() {
+	ginkgo.It("should migrate a region on access-counter notification", func() {
 		ptr := driver.AllocateManaged(ctx, 128*1024)
 		base := uint64(ptr)
 		pid := ctx.pid
 		regionBase := base &^ (64*1024 - 1)
 
-		mp := driver.uvm.pages[PageKey{PID: pid, VAddr: base}]
-		mp.TimesMigrated = 1 // make it remotely accessible
+		// Simulate the GPU GMMU reaching its counter threshold and notifying
+		// the driver.
+		driver.uvm.onAccessCounterNotify(pid, regionBase, 1)
+		engine.Run()
 
-		for i := uint64(0); i < driver.uvm.config.AccessCounterThreshold; i++ {
-			driver.uvm.recordRemoteAccess(pid, regionBase, 1, sim.VTimeInSec(0))
-		}
-
-		cs := driver.uvm.accessCounts[AccessCounterKey{PID: pid, RegionBase: regionBase, DeviceID: 1}]
-		gomega.Expect(cs).NotTo(gomega.BeNil())
-		gomega.Expect(cs.Count).To(gomega.BeNumerically(">=", driver.uvm.config.AccessCounterThreshold))
 		gomega.Expect(driver.uvm.stats.AccessCounterNotif).To(gomega.Equal(uint64(1)))
 		gomega.Expect(driver.uvm.stats.AccessCounterMigr).To(gomega.Equal(uint64(1)))
+		gomega.Expect(driver.uvm.stats.CPUToGPUMigrations).To(gomega.Equal(uint64(1)))
+
+		mp := driver.uvm.pages[PageKey{PID: pid, VAddr: base}]
+		gomega.Expect(mp.State).To(gomega.Equal(GPUResident))
 	})
 
 	ginkgo.It("should keep ideal-uvm timing zero", func() {
@@ -162,12 +176,20 @@ var _ = ginkgo.Describe("UVMManager", func() {
 					driver.uvm.onManagedAccess(pid, base+off, 1, "req", "")
 				}
 				engine.Run()
+				if driver.uvm.hasPendingEvictions() {
+					driver.uvm.finalizeEviction()
+					engine.Run()
+				}
 			}
 			for off := uint64(96 * 1024 * 1024); off < 192*1024*1024; off += 64 * 1024 {
 				for i := uint64(0); i < thresh; i++ {
 					driver.uvm.onManagedAccess(pid, base+off, 1, "req", "")
 				}
 				engine.Run()
+				if driver.uvm.hasPendingEvictions() {
+					driver.uvm.finalizeEviction()
+					engine.Run()
+				}
 			}
 		}
 

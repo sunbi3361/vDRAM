@@ -201,6 +201,11 @@ func (d *Driver) parseFromUVM() bool {
 	case *vm.PageFaultReq:
 		d.processUVMFaultReq(req)
 		return true
+	case *vm.AccessCounterNotifyReq: // sbin_codex: GPU-side counter threshold.
+		if d.uvm != nil {
+			d.uvm.onAccessCounterNotify(req.PID, req.RegionBase, req.DeviceID)
+		}
+		return true
 	default:
 		log.Panicf("Driver cannot handle UVM request of type %s",
 			reflect.TypeOf(req))
@@ -646,6 +651,14 @@ func (d *Driver) sendShootDownReqs() bool {
 func (d *Driver) processShootdownCompleteRsp(
 	req *protocol.ShootDownCompleteRsp,
 ) bool {
+	// sbin_codex: UVM eviction shootdown ACK: finalize the reserved evictions
+	// and resume the pending migration.
+	if d.uvm != nil && d.uvm.hasPendingEvictions() {
+		d.gpuPort.RetrieveIncoming()
+		d.uvm.finalizeEviction()
+		return true
+	}
+
 	d.numShootDownACK--
 
 	if d.numShootDownACK == 0 {

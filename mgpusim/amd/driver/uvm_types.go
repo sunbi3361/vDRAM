@@ -135,6 +135,9 @@ type Migration struct {
 	DataStartedAt  sim.VTimeInSec
 	DataFinishedAt sim.VTimeInSec
 	FaultIDs       []string
+	// GMMUPort is the UVM port of the GMMU that requested the migration,
+	// used to send access-counter reset requests. // sbin_codex
+	GMMUPort sim.RemotePort
 }
 
 // RegionState tracks the 64KB UVM region for residency and LRU.

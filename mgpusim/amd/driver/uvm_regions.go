@@ -2,7 +2,6 @@ package driver
 
 import (
 	"github.com/sarchlab/akita/v4/mem/vm"
-	"github.com/sarchlab/akita/v4/sim"
 )
 
 // RemoteAccessible reports whether a CPU-resident managed page may be returned
@@ -21,41 +20,22 @@ func (m *UVMManager) blockForKey(key BlockKey) *VABlock {
 	return m.blocks[key]
 }
 
-// recordRemoteAccess increments the 64KB access counter for a remotely
-// accessed CPU-resident region and triggers a migration at the threshold.
-func (m *UVMManager) recordRemoteAccess(pid vm.PID, regionBase uint64, deviceID uint64, now sim.VTimeInSec) {
-	cfg := m.config
-	key := AccessCounterKey{PID: pid, RegionBase: regionBase, DeviceID: deviceID}
-
-	cs := m.accessCounts[key]
-	if cs == nil {
-		cs = &AccessCounterState{}
-		m.accessCounts[key] = cs
-	}
-	cs.Count++
-	cs.LastAccess = now
-	m.stats.RemoteAccesses++
-
-	// Touch LRU recency for the remote region.
-	region := m.regions[RegionKey{PID: pid, Base: regionBase, DeviceID: deviceID}]
-	if region != nil {
-		region.LastAccess = now
-	}
-
-	if cs.Notification {
-		return
-	}
-	if cs.Count >= cfg.AccessCounterThreshold {
-		cs.Notification = true
-		m.stats.AccessCounterNotif++
-		m.triggerAccessCounterMigration(key)
-	}
+// onAccessCounterNotify handles a GPU-side 64KB access-counter threshold
+// notification. The GPU GMMU counts remote (PCIe) accesses to a
+// CPU-resident region; at the threshold it asks the driver to migrate the
+// region to the GPU. // sbin_codex
+func (m *UVMManager) onAccessCounterNotify(pid vm.PID, regionBase uint64, deviceID uint64) {
+	m.stats.AccessCounterNotif++
+	m.triggerAccessCounterMigration(AccessCounterKey{
+		PID:        pid,
+		RegionBase: regionBase,
+		DeviceID:   deviceID,
+	})
 }
 
 // triggerAccessCounterMigration migrates a hot 64KB CPU-resident region to the
 // GPU without charging the fixed fault latency.
 func (m *UVMManager) triggerAccessCounterMigration(key AccessCounterKey) {
-	cfg := m.config
 	region := m.regions[RegionKey{PID: key.PID, Base: key.RegionBase, DeviceID: key.DeviceID}]
 	if region == nil {
 		return
@@ -84,10 +64,19 @@ func (m *UVMManager) triggerAccessCounterMigration(key AccessCounterKey) {
 		exclude[pk] = true
 	}
 	victims := m.selectLRUVictims(required, exclude)
-	for _, v := range victims {
-		m.evictRegion(v)
+	if len(victims) > 0 { // sbin_codex: TLB shootdown before finalizing eviction.
+		m.beginEviction(victims, func() {
+			m.finishAccessCounterMigration(key, pages)
+		})
+		return
 	}
+	m.finishAccessCounterMigration(key, pages)
+}
 
+// finishAccessCounterMigration runs the access-counter-triggered migration
+// after capacity has been ensured. // sbin_codex
+func (m *UVMManager) finishAccessCounterMigration(key AccessCounterKey, pages []PageKey) {
+	cfg := m.config
 	mig := &Migration{
 		ID:            m.newID("acmig"),
 		Direction:     CPUToGPU,

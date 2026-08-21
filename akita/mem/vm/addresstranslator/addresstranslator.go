@@ -116,12 +116,14 @@ func (m *middleware) translate() bool {
 	vAddr := req.GetAddress()
 	vPageID := m.addrToPageID(vAddr)
 
+	_, isWrite := req.(*mem.WriteReq) // sbin_codex: UVM write-immediate migration.
 	transReq := vm.TranslationReqBuilder{}.
 		WithSrc(m.translationPort.AsRemote()).
 		WithDst(m.translationPortMapper.Find(vAddr)).
 		WithPID(req.GetPID()).
 		WithVAddr(vPageID).
 		WithDeviceID(m.deviceID).
+		WithIsWrite(isWrite).
 		Build()
 
 	err := m.translationPort.Send(transReq)

@@ -66,6 +66,7 @@ type Builder struct {
 	l1tlbFactory         func(name string, engine sim.Engine, freq sim.Freq, pageTable vm.PageTable, mapper mem.AddressToPortMapper, numReqPerCycle int) sim.Component //nolint:lll // sbin_codex: ideal-L1-TLB factory injection (todo 5).
 	pmcAddressMapper     mem.AddressToPortMapper
 	uvmServiceProvider   sim.RemotePort // sbin_codex: driver UVM fault service provider.
+	accessCounterThresh  uint64         // sbin_codex: GPU-side remote-access counter threshold.
 }
 
 // MakeBuilder creates a new builder.
@@ -175,6 +176,13 @@ func (b Builder) WithPageTable(pageTable vm.PageTable) gpubuilder.GPUBuilder {
 // GMMU. When empty, UVM demand-fault gating is disabled. // sbin_codex
 func (b Builder) WithUVMServiceProvider(provider sim.RemotePort) gpubuilder.GPUBuilder {
 	b.uvmServiceProvider = provider
+	return b
+}
+
+// WithAccessCounterThreshold sets the GPU-side 64KB remote-access counter
+// threshold on the GMMU. // sbin_codex
+func (b Builder) WithAccessCounterThreshold(thresh uint64) gpubuilder.GPUBuilder {
+	b.accessCounterThresh = thresh
 	return b
 }
 
@@ -637,6 +645,9 @@ func (b *Builder) buildGMMU() {
 
 	if b.uvmServiceProvider != "" { // sbin_codex
 		gmmuBuilder = gmmuBuilder.WithUVMServiceProvider(b.uvmServiceProvider)
+		if b.accessCounterThresh > 0 {
+			gmmuBuilder = gmmuBuilder.WithAccessCounterThreshold(b.accessCounterThresh)
+		}
 	}
 
 	b.gmmu = gmmuBuilder.Build(b.name + ".GMMU")

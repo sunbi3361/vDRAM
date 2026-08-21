@@ -104,6 +104,8 @@ func (m *UVMManager) onManagedAccess(
 	case GPUResident:
 		// The page is already GPU-resident (e.g. migrated by another fault's
 		// TBN region). Reply to the waiting GMMU translation immediately.
+		// sbin_codex: a GPU-local access refreshes the driver LRU recency.
+		m.touchLRU(RegionKey{PID: pid, Base: regionBase, DeviceID: deviceID})
 		if requestID != "" {
 			m.replyFaultWaiter(FaultWaiter{
 				RequestID: requestID,
@@ -119,10 +121,9 @@ func (m *UVMManager) onManagedAccess(
 		m.coalesceFault(pageKey, deviceID, requestID, replyTo)
 		return
 	case CPUResident:
-		if mp.RemoteAccessible() {
-			m.recordRemoteAccess(pid, regionBase, deviceID, now)
-			return
-		}
+		// The GMMU decides read vs write: writes to remotely-accessible pages
+		// fault immediately; reads are counted GPU-side. Every fault that
+		// reaches the driver is a migration request.
 		m.stats.PageFaultRequests++
 		m.coalesceFault(pageKey, deviceID, requestID, replyTo)
 	}
@@ -220,10 +221,12 @@ func (m *UVMManager) handleFaultReady(faultID string) {
 		exclude[pk] = true
 	}
 	victims := m.selectLRUVictims(required, exclude)
-	for _, v := range victims {
-		m.evictRegion(v)
+	if len(victims) > 0 { // sbin_codex: TLB shootdown before finalizing eviction.
+		m.beginEviction(victims, func() {
+			m.startCPUGPUMigration(fault, sel)
+		})
+		return
 	}
-
 	m.startCPUGPUMigration(fault, sel)
 }
 
@@ -245,6 +248,10 @@ func (m *UVMManager) startCPUGPUMigration(fault *PageFault, sel tbnSelection) {
 	m.migrations[mig.ID] = mig
 	m.pageToMig[fault.Key.Page] = mig.ID
 	mig.FaultIDs = append(mig.FaultIDs, fault.ID)
+	// sbin_codex: remember the requesting GMMU for access-counter resets.
+	if len(fault.Waiters) > 0 {
+		mig.GMMUPort = fault.Waiters[0].ReplyTo
+	}
 
 	// Reserve GPU frames and set pages to MigratingToGPU.
 	for _, pk := range sel.pageKeys {
@@ -351,6 +358,9 @@ func (m *UVMManager) completeMigration(migID string) {
 		}
 		mp.State = GPUResident
 
+		// sbin_codex: the region joins the driver LRU list on GPU residency.
+		m.addLRU(RegionKey{PID: mp.Key.PID, Base: m.config.alignDown(mp.Key.VAddr, m.config.RegionSize), DeviceID: mig.DeviceID})
+
 		page := vm.Page{
 			PID:              mp.Key.PID,
 			VAddr:            mp.Key.VAddr,
@@ -375,6 +385,10 @@ func (m *UVMManager) completeMigration(migID string) {
 			m.stats.AccessCounterResets++
 		}
 	}
+
+	// sbin_codex: sync the GPU-side access counter with the driver: clear the
+	// counters of the migrated regions so the new residency epoch starts clean.
+	m.resetGPUAccessCounters(mig)
 
 	// Replay waiters.
 	for _, fid := range mig.FaultIDs {

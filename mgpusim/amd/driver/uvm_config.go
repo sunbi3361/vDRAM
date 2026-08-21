@@ -23,9 +23,9 @@ type UVMConfig struct {
 	FaultLatencyUS float64
 	// AccessCounterThreshold triggers a 64KB CPU->GPU migration.
 	AccessCounterThreshold uint64
-	// TBNExpandThreshold is the minimum sibling-subtree activity to expand the
-	// TBN neighborhood.
-	TBNExpandThreshold uint64
+	// TBNExpandRatio is the minimum GPU-resident page ratio inside a node
+	// (e.g. 0.51) that promotes migrating the whole node. // sbin_codex
+	TBNExpandRatio float64
 	// TBNMaxFetchSize caps the TBN neighborhood fetch in bytes (default 2MB).
 	TBNMaxFetchSize uint64
 

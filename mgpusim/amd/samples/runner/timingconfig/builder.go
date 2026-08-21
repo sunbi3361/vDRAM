@@ -3,12 +3,14 @@ package timingconfig
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/sarchlab/akita/v4/mem/mem"
 	"github.com/sarchlab/akita/v4/mem/vm"
 	"github.com/sarchlab/akita/v4/mem/vm/mmu"
 	"github.com/sarchlab/akita/v4/noc/networking/pcie"
 	"github.com/sarchlab/akita/v4/sim"
+	"github.com/sarchlab/akita/v4/sim/directconnection" // sbin_codex: zero-latency UVM fault channel in ideal mode.
 	"github.com/sarchlab/akita/v4/simulation"
 	"github.com/sarchlab/mgpusim/v4/amd/driver"
 	"github.com/sarchlab/mgpusim/v4/amd/samples/runner/timingconfig/gpubuilder"
@@ -44,7 +46,7 @@ type Builder struct {
 	uvmIdeal      bool
 	uvmFaultUS    float64
 	uvmACThresh   uint64
-	uvmTBNExpand  uint64
+	uvmTBNExpand  float64
 	uvmTBNMaxSize uint64
 }
 
@@ -96,14 +98,14 @@ func (b Builder) WithUVM(
 	ideal bool,
 	faultLatencyUS float64,
 	acThreshold uint64,
-	tbnExpand uint64,
+	tbnExpandRatio float64,
 	tbnMaxSize uint64,
 ) Builder {
 	b.uvmEnabled = enabled
 	b.uvmIdeal = ideal
 	b.uvmFaultUS = faultLatencyUS
 	b.uvmACThresh = acThreshold
-	b.uvmTBNExpand = tbnExpand
+	b.uvmTBNExpand = tbnExpandRatio
 	b.uvmTBNMaxSize = tbnMaxSize
 	return b
 }
@@ -206,7 +208,7 @@ func (b *Builder) buildGPUDriver(
 			Ideal:                  b.uvmIdeal,
 			FaultLatencyUS:         b.uvmFaultUS,
 			AccessCounterThreshold: b.uvmACThresh,
-			TBNExpandThreshold:     b.uvmTBNExpand,
+			TBNExpandRatio:         b.uvmTBNExpand,
 			TBNMaxFetchSize:        b.uvmTBNMaxSize,
 			GPUCapacityBytes:       b.gpuMemSize,
 		})
@@ -297,7 +299,7 @@ func (b *Builder) createConnection(
 		mmuComponent.GetPortByName("Migration"),
 		mmuComponent.GetPortByName("Top"),
 	}
-	if b.uvmEnabled { // sbin_codex: route UVM faults between GMMUs and the driver.
+	if b.uvmEnabled && !b.uvmIdeal { // sbin_codex: UVM faults over PCIe in normal mode.
 		rootComplexPorts = append(rootComplexPorts, gpuDriver.GetPortByName("UVM"))
 	}
 	rootComplexID := pcieConnector.AddRootComplex(rootComplexPorts)
@@ -330,6 +332,7 @@ func (b *Builder) createGPU(
 	if b.uvmEnabled { // sbin_codex: GMMU faults route to the driver UVM manager.
 		builder = builder.WithUVMServiceProvider(
 			gpuDriver.GetPortByName("UVM").AsRemote())
+		builder = builder.WithAccessCounterThreshold(b.uvmACThresh)
 	}
 	gpu := builder.Build(name)
 
@@ -345,7 +348,28 @@ func (b *Builder) createGPU(
 	b.configRDMAEngine(gpu)
 	// b.configPMC(gpu, gpuDriver, pmcAddressTable)
 
-	pcieConnector.PlugInDevice(pcieSwitchID, gpu.Ports())
+	ports := gpu.Ports()
+	if b.uvmEnabled && b.uvmIdeal { // sbin_codex: zero-latency UVM fault channel.
+		// Route UVM fault messages between the GMMU and the driver over a
+		// direct connection instead of PCIe, so ideal-uvm charges no
+		// interconnect latency on the control plane.
+		conn := directconnection.MakeBuilder().
+			WithEngine(b.simulation.GetEngine()).
+			WithFreq(1 * sim.GHz).
+			Build(name + ".UVMConn")
+		b.simulation.RegisterComponent(conn)
+		conn.PlugIn(gpuDriver.GetPortByName("UVM"))
+		conn.PlugIn(gpu.GetPortByName("UVM"))
+		filtered := make([]sim.Port, 0, len(ports))
+		for _, p := range ports {
+			if !strings.Contains(p.Name(), "UVM") {
+				filtered = append(filtered, p)
+			}
+		}
+		ports = filtered
+	}
+
+	pcieConnector.PlugInDevice(pcieSwitchID, ports)
 
 	// b.gpus = append(b.gpus, gpu)
 

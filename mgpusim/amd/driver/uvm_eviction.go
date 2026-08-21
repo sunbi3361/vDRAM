@@ -1,9 +1,8 @@
 package driver
 
 import (
-	"sort"
-
 	"github.com/sarchlab/akita/v4/mem/vm"
+	"github.com/sarchlab/mgpusim/v4/amd/protocol"
 )
 
 // regionGPUFrames returns the number of GPU-resident 4KB pages in a region.
@@ -16,6 +15,82 @@ func (m *UVMManager) regionGPUFrames(region *RegionState) uint64 {
 		}
 	}
 	return count
+}
+
+// touchLRU moves a GPU-resident region to the MRU end of the driver LRU list
+// on a GPU access. The access counter is independent of this list. // sbin_codex
+func (m *UVMManager) touchLRU(key RegionKey) {
+	if elem, ok := m.lruMap[key]; ok {
+		m.lru.MoveToFront(elem)
+	}
+}
+
+// addLRU inserts a region into the driver LRU list once it becomes
+// GPU-resident. // sbin_codex
+func (m *UVMManager) addLRU(key RegionKey) {
+	if _, ok := m.lruMap[key]; ok {
+		return
+	}
+	m.lruMap[key] = m.lru.PushFront(key)
+}
+
+// removeLRU removes a region from the driver LRU list when it leaves GPU
+// residency. // sbin_codex
+func (m *UVMManager) removeLRU(key RegionKey) {
+	if elem, ok := m.lruMap[key]; ok {
+		m.lru.Remove(elem)
+		delete(m.lruMap, key)
+	}
+}
+
+// hasPendingEvictions reports whether a TLB-shootdown eviction is awaiting its
+// GPU ACK. // sbin_codex
+func (m *UVMManager) hasPendingEvictions() bool {
+	return m.evictACK > 0
+}
+
+// beginEviction reserves the victim regions, sends a ShootDownCommand to the
+// GPU to flush its TLB, and defers the PTE/frame finalization until the ACK.
+// onDone resumes the migration that triggered the eviction. // sbin_codex
+func (m *UVMManager) beginEviction(victims []*RegionState, onDone func()) {
+	if len(victims) == 0 || m.evictACK > 0 {
+		return
+	}
+	m.evicting = victims
+	m.evictOnDone = onDone
+
+	var vAddrs []uint64
+	var pid vm.PID
+	for _, region := range victims {
+		for _, pk := range region.Pages {
+			vAddrs = append(vAddrs, pk.VAddr)
+			pid = pk.PID
+		}
+	}
+	if len(vAddrs) == 0 {
+		m.finalizeEviction()
+		return
+	}
+
+	req := protocol.NewShootdownCommand(
+		m.d.gpuPort, m.d.GPUs[0], vAddrs, pid)
+	m.d.requestsToSend = append(m.d.requestsToSend, req)
+	m.evictACK = 1
+}
+
+// finalizeEviction applies the reserved evictions after the GPU TLB has been
+// flushed, then resumes the pending migration. // sbin_codex
+func (m *UVMManager) finalizeEviction() {
+	for _, region := range m.evicting {
+		m.evictRegion(region)
+	}
+	m.evicting = nil
+	m.evictACK = 0
+	onDone := m.evictOnDone
+	m.evictOnDone = nil
+	if onDone != nil {
+		onDone()
+	}
 }
 
 // evictRegion migrates a GPU-resident 64KB region back to CPU. It returns the
@@ -60,6 +135,8 @@ func (m *UVMManager) evictRegion(region *RegionState) uint64 {
 		evicted++
 	}
 
+	m.removeLRU(region.Key)
+
 	ack := AccessCounterKey{
 		PID:        region.Key.PID,
 		RegionBase: region.Key.Base,
@@ -81,35 +158,23 @@ func (m *UVMManager) evictRegion(region *RegionState) uint64 {
 	return evicted
 }
 
-// selectLRUVictims selects regions until requiredFrames GPU frames are freed.
-// Ineligible regions are skipped. Victim selection is deterministic by
-// (LastAccess, PID, RegionBase).
+// selectLRUVictims walks the driver LRU list from the LRU end and selects
+// eligible regions until requiredFrames GPU frames are freed. The access
+// counter does not influence victim selection. // sbin_codex
 func (m *UVMManager) selectLRUVictims(requiredFrames uint64, exclude map[PageKey]bool) []*RegionState {
 	if requiredFrames == 0 || m.freeGPUFrames >= requiredFrames {
 		return nil
 	}
 	need := requiredFrames - m.freeGPUFrames
 
-	var candidates []*RegionState
-	for _, region := range m.regions {
-		if m.regionEligible(region, exclude) {
-			candidates = append(candidates, region)
-		}
-	}
-	sort.SliceStable(candidates, func(i, j int) bool {
-		ri, rj := candidates[i], candidates[j]
-		if ri.LastAccess != rj.LastAccess {
-			return ri.LastAccess < rj.LastAccess
-		}
-		if ri.Key.PID != rj.Key.PID {
-			return ri.Key.PID < rj.Key.PID
-		}
-		return ri.Key.Base < rj.Key.Base
-	})
-
 	var victims []*RegionState
 	freed := uint64(0)
-	for _, region := range candidates {
+	for elem := m.lru.Back(); elem != nil; elem = elem.Prev() {
+		key := elem.Value.(RegionKey)
+		region := m.regions[key]
+		if region == nil || !m.regionEligible(region, exclude) {
+			continue
+		}
 		frames := m.regionGPUFrames(region)
 		if frames == 0 {
 			continue

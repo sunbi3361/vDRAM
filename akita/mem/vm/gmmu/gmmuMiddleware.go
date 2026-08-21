@@ -201,16 +201,23 @@ func (m *middleware) finalizePageWalk(
 	m.walkingTranslations[walkingIndex].page = page
 
 	// sbin_codex: UVM demand-fault gating for managed pages.
-	if page.Managed && m.needsUVMFault(page) {
+	if page.Managed && m.needsUVMFault(page, req) {
 		return m.sendUVMFault(walkingIndex)
+	}
+
+	// sbin_codex: a remotely-accessible CPU-resident page served as a remote
+	// access counts toward the GPU-side 64KB access counter.
+	if page.Managed && page.DeviceID == 0 && page.RemoteAccessible {
+		m.countRemoteAccess(page, req)
 	}
 
 	return m.doPageWalkHit(walkingIndex)
 }
 
 // needsUVMFault reports whether a managed page translation must be gated on a
-// UVM page fault instead of being returned.
-func (m *middleware) needsUVMFault(page vm.Page) bool {
+// UVM page fault instead of being returned. Writes to remotely-accessible
+// pages fault immediately; reads are served as remote accesses. // sbin_codex
+func (m *middleware) needsUVMFault(page vm.Page, req *vm.TranslationReq) bool {
 	if page.IsMigrating {
 		return true
 	}
@@ -218,8 +225,49 @@ func (m *middleware) needsUVMFault(page vm.Page) bool {
 	if page.DeviceID == 0 && !page.RemoteAccessible {
 		return true
 	}
-	// CPU-resident but remotely accessible: remote access, no fault.
+	// CPU-resident but remotely accessible: write traffic migrates
+	// immediately regardless of the access counter.
+	if page.DeviceID == 0 && req.IsWrite {
+		return true
+	}
+	// CPU-resident and remotely accessible read: remote access, no fault.
 	return false
+}
+
+// countRemoteAccess increments the 64KB remote-access counter for a
+// remotely-accessible page and notifies the driver at the threshold. // sbin_codex
+func (m *middleware) countRemoteAccess(page vm.Page, req *vm.TranslationReq) {
+	if m.uvmPort == nil || m.UVMServiceProvider == "" || m.accessCounterThreshold == 0 {
+		return
+	}
+	regionBase := (req.VAddr >> m.log2PageSize) << m.log2PageSize
+	regionBase &= ^uint64(64*1024 - 1)
+	key := (uint64(page.PID) << 32) | (regionBase >> 16)
+	m.accessCounters[key]++
+	if m.accessCounterNotified[key] {
+		return
+	}
+	if m.accessCounters[key] < m.accessCounterThreshold {
+		return
+	}
+	if !m.uvmPort.CanSend() {
+		return
+	}
+	notify := vm.NewAccessCounterNotifyReq(m.uvmPort.AsRemote(), m.UVMServiceProvider)
+	notify.PID = page.PID
+	notify.RegionBase = regionBase
+	notify.DeviceID = req.DeviceID
+	if err := m.uvmPort.Send(notify); err == nil {
+		m.accessCounterNotified[key] = true
+	}
+}
+
+// resetAccessCounter clears the remote-access counter of a migrated 64KB
+// region on driver request. // sbin_codex
+func (m *middleware) resetAccessCounter(pid vm.PID, regionBase uint64) {
+	key := (uint64(pid) << 32) | (regionBase >> 16)
+	delete(m.accessCounters, key)
+	delete(m.accessCounterNotified, key)
 }
 
 // sendUVMFault forwards a managed-page fault to the driver UVM manager and
@@ -247,7 +295,8 @@ func (m *middleware) sendUVMFault(walkingIndex int) bool {
 }
 
 // processUVMFaultRsp completes translations parked on a UVM page fault once
-// the driver reports the fault serviced.
+// the driver reports the fault serviced, and handles access-counter resets
+// sent by the driver after a region migrates to the GPU.
 func (m *middleware) processUVMFaultRsp() bool {
 	if m.uvmPort == nil {
 		return false
@@ -255,6 +304,11 @@ func (m *middleware) processUVMFaultRsp() bool {
 	rsp := m.uvmPort.PeekIncoming()
 	if rsp == nil {
 		return false
+	}
+	if reset, ok := rsp.(*vm.AccessCounterResetReq); ok { // sbin_codex
+		m.resetAccessCounter(reset.PID, reset.RegionBase)
+		m.uvmPort.RetrieveIncoming()
+		return true
 	}
 	uvmRsp, ok := rsp.(*vm.PageFaultRsp)
 	if !ok {

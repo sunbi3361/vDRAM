@@ -145,7 +145,15 @@ func (b *Benchmark) initMem() {
 		b.inputData[i] = float32(i)
 	}
 
-	if b.useUnifiedMemory {
+	if b.useManagedMemory {
+		b.gFilterData = make([]driver.Ptr, len(b.gpus))
+		b.gHistoryData = b.driver.AllocateManaged(
+			b.context, uint64(b.numTaps*4))
+		b.gInputData = b.driver.AllocateManaged(
+			b.context, uint64(b.Length*4))
+		b.gOutputData = b.driver.AllocateManaged(
+			b.context, uint64(b.Length*4))
+	} else if b.useUnifiedMemory {
 		b.gFilterData = make([]driver.Ptr, len(b.gpus))
 		b.gHistoryData = b.driver.AllocateUnifiedMemory(
 			b.context, uint64(b.numTaps*4))
@@ -171,15 +179,7 @@ func (b *Benchmark) initMem() {
 
 	for i, gpu := range b.gpus {
 		b.driver.SelectGPU(b.context, gpu)
-if b.useManagedMemory {
-		b.gFilterData = make([]driver.Ptr, len(b.gpus))
-		b.gHistoryData = b.driver.AllocateManaged(
-			b.context, uint64(b.numTaps*4))
-		b.gInputData = b.driver.AllocateManaged(
-			b.context, uint64(b.Length*4))
-		b.gOutputData = b.driver.AllocateManaged(
-			b.context, uint64(b.Length*4))
-	} else if b.useManagedMemory {
+		if b.useManagedMemory {
 			b.gFilterData[i] = b.driver.AllocateManaged(
 				b.context, uint64(b.numTaps*4))
 		} else if b.useUnifiedMemory {
