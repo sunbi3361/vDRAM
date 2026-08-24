@@ -124,7 +124,8 @@ func (m *ctrlMiddleware) flushMsgMustBeValidInCurrentStage(req *FlushReq) {
 	case tlbStateFlush:
 		log.Panic("TLB is already flushing")
 	default:
-		log.Panicf("Unknown TLB state: %s, msg: %s", state, reflect.TypeOf(req))
+		// log.Panicf("Unknown TLB state: %s, msg: %s", state, reflect.TypeOf(req)) // sbin_codex: pre-edit (vet: %s on int state)
+		log.Panicf("Unknown TLB state: %d, msg: %s", state, reflect.TypeOf(req)) // sbin_codex: fix vet format mismatch
 	}
 }
 

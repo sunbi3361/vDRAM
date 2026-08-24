@@ -14,6 +14,11 @@ type TranslationReq struct {
 	VAddr    uint64
 	PID      PID
 	DeviceID uint64
+	// sbin_codex: UVM translation contract fields (todo 2)
+	AccessKind        AccessKind
+	Location          MemoryLocation
+	FaultPendingToken FaultPendingToken
+	WaiterDelta       WaiterDelta
 }
 
 // Meta returns the meta data associated with the message.
@@ -47,6 +52,11 @@ type TranslationReqBuilder struct {
 	vAddr    uint64
 	pid      PID
 	deviceID uint64
+	// sbin_codex: UVM contract builder fields (todo 2)
+	accessKind        AccessKind
+	location          MemoryLocation
+	faultPendingToken FaultPendingToken
+	waiterDelta       WaiterDelta
 }
 
 // WithSrc sets the source of the request to build.
@@ -85,6 +95,41 @@ func (b TranslationReqBuilder) WithDeviceID(
 	return b
 }
 
+// WithAccessKind sets the access kind of the request to build. // sbin_codex
+func (b TranslationReqBuilder) WithAccessKind(
+	accessKind AccessKind,
+) TranslationReqBuilder {
+	b.accessKind = accessKind
+	return b
+}
+
+// WithLocation sets the expected/current location of the request to build.
+// Unmanaged requests leave it UNMANAGED. // sbin_codex
+func (b TranslationReqBuilder) WithLocation(
+	location MemoryLocation,
+) TranslationReqBuilder {
+	b.location = location
+	return b
+}
+
+// WithFaultPendingToken sets the GMMU-assigned fault-pending token of the
+// request to build. // sbin_codex
+func (b TranslationReqBuilder) WithFaultPendingToken(
+	token FaultPendingToken,
+) TranslationReqBuilder {
+	b.faultPendingToken = token
+	return b
+}
+
+// WithWaiterDelta sets the original waiter counts of the request to build.
+// // sbin_codex
+func (b TranslationReqBuilder) WithWaiterDelta(
+	delta WaiterDelta,
+) TranslationReqBuilder {
+	b.waiterDelta = delta
+	return b
+}
+
 // Build creates a new TranslationReq
 func (b TranslationReqBuilder) Build() *TranslationReq {
 	r := &TranslationReq{}
@@ -94,6 +139,10 @@ func (b TranslationReqBuilder) Build() *TranslationReq {
 	r.VAddr = b.vAddr
 	r.PID = b.pid
 	r.DeviceID = b.deviceID
+	r.AccessKind = b.accessKind // sbin_codex
+	r.Location = b.location     // sbin_codex
+	r.FaultPendingToken = b.faultPendingToken // sbin_codex
+	r.WaiterDelta = b.waiterDelta             // sbin_codex
 	r.TrafficClass = reflect.TypeOf(TranslationReq{}).String()
 
 	return r
@@ -106,6 +155,17 @@ type TranslationRsp struct {
 
 	RespondTo string // The ID of the request it replies
 	Page      Page
+	// sbin_codex: UVM translation contract fields (todo 2)
+	Location          MemoryLocation
+	FaultPendingToken FaultPendingToken
+	WaiterDelta       WaiterDelta
+}
+
+// ConsumableAddress returns the physical address that the given endpoint may
+// consume from this response. remote is true for the remote (CPU) endpoint.
+// ok is false when the endpoint has no consumable address. // sbin_codex
+func (r *TranslationRsp) ConsumableAddress(remote bool) (uint64, bool) {
+	return ConsumableAddress(r.Location, r.Page.PAddr, remote)
 }
 
 // Meta returns the meta data associated with the message.
@@ -131,6 +191,10 @@ type TranslationRspBuilder struct {
 	src, dst sim.RemotePort
 	rspTo    string
 	page     Page
+	// sbin_codex: UVM contract builder fields (todo 2)
+	location          MemoryLocation
+	faultPendingToken FaultPendingToken
+	waiterDelta       WaiterDelta
 }
 
 // WithSrc sets the source of the respond to build.
@@ -161,6 +225,32 @@ func (b TranslationRspBuilder) WithPage(page Page) TranslationRspBuilder {
 	return b
 }
 
+// WithLocation sets the resolved location of the respond to build. // sbin_codex
+func (b TranslationRspBuilder) WithLocation(
+	location MemoryLocation,
+) TranslationRspBuilder {
+	b.location = location
+	return b
+}
+
+// WithFaultPendingToken sets the echoed fault-pending token of the respond to
+// build. // sbin_codex
+func (b TranslationRspBuilder) WithFaultPendingToken(
+	token FaultPendingToken,
+) TranslationRspBuilder {
+	b.faultPendingToken = token
+	return b
+}
+
+// WithWaiterDelta sets the reported waiter deltas of the respond to build.
+// // sbin_codex
+func (b TranslationRspBuilder) WithWaiterDelta(
+	delta WaiterDelta,
+) TranslationRspBuilder {
+	b.waiterDelta = delta
+	return b
+}
+
 // Build creates a new TranslationRsp
 func (b TranslationRspBuilder) Build() *TranslationRsp {
 	r := &TranslationRsp{}
@@ -169,6 +259,9 @@ func (b TranslationRspBuilder) Build() *TranslationRsp {
 	r.Dst = b.dst
 	r.RespondTo = b.rspTo
 	r.Page = b.page
+	r.Location = b.location             // sbin_codex
+	r.FaultPendingToken = b.faultPendingToken // sbin_codex
+	r.WaiterDelta = b.waiterDelta             // sbin_codex
 	r.TrafficClass = reflect.TypeOf(TranslationReq{}).String()
 
 	return r

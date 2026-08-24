@@ -211,3 +211,158 @@ func (b RestartRspBuilder) Build() *RestartRsp {
 
 	return r
 }
+
+// sbin_codex: UVM range TLB invalidation control (todo 2 of plan
+// mgpusim-uvm-manager). The GMMU is the invalidation coordinator: it
+// broadcasts the request to the shared L2 TLB and every private L1 TLB and
+// returns one aggregated response (uvm-manager.md §21.1).
+
+// UVMTLBInvalidateReq asks a TLB to invalidate every entry for the given
+// PID/ASID whose covered VA range overlaps the requested 64 KB region.
+// Unrelated entries and unrelated translation requests remain active; no
+// full-TLB flush is permitted for ordinary UVM migration.
+type UVMTLBInvalidateReq struct {
+	sim.MsgMeta
+
+	PID     vm.PID
+	StartVA uint64
+	Size    uint64
+}
+
+// Meta returns the meta data associated with the message.
+func (r *UVMTLBInvalidateReq) Meta() *sim.MsgMeta {
+	return &r.MsgMeta
+}
+
+// Clone returns cloned UVMTLBInvalidateReq with different ID
+func (r *UVMTLBInvalidateReq) Clone() sim.Msg {
+	cloneMsg := *r
+	cloneMsg.ID = sim.GetIDGenerator().Generate()
+
+	return &cloneMsg
+}
+
+// GenerateRsp creates a UVMTLBInvalidateRsp addressed back to the requester.
+func (r *UVMTLBInvalidateReq) GenerateRsp() sim.Rsp {
+	rsp := UVMTLBInvalidateRspBuilder{}.
+		WithSrc(r.Dst).
+		WithDst(r.Src).
+		WithRspTo(r.ID).
+		Build()
+
+	return rsp
+}
+
+// UVMTLBInvalidateReqBuilder can build UVM range TLB invalidation requests.
+type UVMTLBInvalidateReqBuilder struct {
+	src, dst sim.RemotePort
+	pid      vm.PID
+	startVA  uint64
+	size     uint64
+}
+
+// WithSrc sets the source of the request to build.
+func (b UVMTLBInvalidateReqBuilder) WithSrc(src sim.RemotePort) UVMTLBInvalidateReqBuilder {
+	b.src = src
+	return b
+}
+
+// WithDst sets the destination of the request to build.
+func (b UVMTLBInvalidateReqBuilder) WithDst(dst sim.RemotePort) UVMTLBInvalidateReqBuilder {
+	b.dst = dst
+	return b
+}
+
+// WithPID sets the PID/ASID whose entries are to be invalidated.
+func (b UVMTLBInvalidateReqBuilder) WithPID(pid vm.PID) UVMTLBInvalidateReqBuilder {
+	b.pid = pid
+	return b
+}
+
+// WithStartVA sets the start of the virtual range to invalidate.
+func (b UVMTLBInvalidateReqBuilder) WithStartVA(startVA uint64) UVMTLBInvalidateReqBuilder {
+	b.startVA = startVA
+	return b
+}
+
+// WithSize sets the size of the virtual range to invalidate (64 KB for UVM).
+func (b UVMTLBInvalidateReqBuilder) WithSize(size uint64) UVMTLBInvalidateReqBuilder {
+	b.size = size
+	return b
+}
+
+// Build creates a new UVMTLBInvalidateReq
+func (b UVMTLBInvalidateReqBuilder) Build() *UVMTLBInvalidateReq {
+	r := &UVMTLBInvalidateReq{}
+	r.ID = sim.GetIDGenerator().Generate()
+	r.Src = b.src
+	r.Dst = b.dst
+	r.PID = b.pid
+	r.StartVA = b.startVA
+	r.Size = b.size
+	r.TrafficClass = reflect.TypeOf(UVMTLBInvalidateReq{}).String()
+
+	return r
+}
+
+// UVMTLBInvalidateRsp is the aggregated completion response for a
+// UVMTLBInvalidateReq.
+type UVMTLBInvalidateRsp struct {
+	sim.MsgMeta
+
+	RspTo string
+}
+
+// Meta returns the meta data associated with the message.
+func (r *UVMTLBInvalidateRsp) Meta() *sim.MsgMeta {
+	return &r.MsgMeta
+}
+
+// Clone returns cloned UVMTLBInvalidateRsp with different ID
+func (r *UVMTLBInvalidateRsp) Clone() sim.Msg {
+	cloneMsg := *r
+	cloneMsg.ID = sim.GetIDGenerator().Generate()
+
+	return &cloneMsg
+}
+
+// GetRspTo returns the request ID that the response replies to.
+func (r *UVMTLBInvalidateRsp) GetRspTo() string {
+	return r.RspTo
+}
+
+// UVMTLBInvalidateRspBuilder can build UVM range TLB invalidation responses.
+type UVMTLBInvalidateRspBuilder struct {
+	src, dst sim.RemotePort
+	rspTo    string
+}
+
+// WithSrc sets the source of the response to build.
+func (b UVMTLBInvalidateRspBuilder) WithSrc(src sim.RemotePort) UVMTLBInvalidateRspBuilder {
+	b.src = src
+	return b
+}
+
+// WithDst sets the destination of the response to build.
+func (b UVMTLBInvalidateRspBuilder) WithDst(dst sim.RemotePort) UVMTLBInvalidateRspBuilder {
+	b.dst = dst
+	return b
+}
+
+// WithRspTo sets the request ID that the response replies to.
+func (b UVMTLBInvalidateRspBuilder) WithRspTo(rspTo string) UVMTLBInvalidateRspBuilder {
+	b.rspTo = rspTo
+	return b
+}
+
+// Build creates a new UVMTLBInvalidateRsp
+func (b UVMTLBInvalidateRspBuilder) Build() *UVMTLBInvalidateRsp {
+	r := &UVMTLBInvalidateRsp{}
+	r.ID = sim.GetIDGenerator().Generate()
+	r.Src = b.src
+	r.Dst = b.dst
+	r.RspTo = b.rspTo
+	r.TrafficClass = reflect.TypeOf(UVMTLBInvalidateReq{}).String()
+
+	return r
+}

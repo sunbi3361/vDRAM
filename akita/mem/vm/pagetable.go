@@ -19,6 +19,9 @@ type Page struct {
 	DeviceID    uint64
 	Unified     bool
 	Managed     bool // sbin_uvm: managed memory
+	// Location is only meaningful when Managed is true; unmanaged page
+	// constructors leave it at the UNMANAGED zero value. // sbin_codex
+	Location    MemoryLocation
 	IsMigrating bool
 	IsPinned    bool
 }
