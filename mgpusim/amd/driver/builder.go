@@ -133,6 +133,11 @@ func (b Builder) Build(name string) *Driver {
 		// the fault service so each consumes only its own responses.
 		driver.uvmMigration = &migrationMiddleware{driver: driver}
 		driver.middlewares = append(driver.middlewares, driver.uvmMigration)
+
+		// sbin_codex (todo 19): wire the reactive eviction service after the
+		// migration service so each consumes only its own responses.
+		driver.uvmEviction = &evictionMiddleware{driver: driver}
+		driver.middlewares = append(driver.middlewares, driver.uvmEviction)
 	}
 
 	if b.useMagicMemoryCopy {

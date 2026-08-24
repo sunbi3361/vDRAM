@@ -74,6 +74,11 @@ type Driver struct {
 	// migration transactions (nil when disabled).
 	uvmMigration *migrationMiddleware
 
+	// sbin_codex (todo 19): reactive eviction service selecting deterministic
+	// LRU victims and driving the ordered 64 KB eviction transaction (nil when
+	// disabled).
+	uvmEviction *evictionMiddleware
+
 	codeObjGPUAddrs map[*insts.KernelCodeObject]Ptr
 }
 

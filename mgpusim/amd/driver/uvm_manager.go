@@ -94,6 +94,17 @@ type UVMManager struct {
 	// sbin_codex (todo 17): TBN selection statistics (uvm-manager.md §11.12),
 	// recorded by recomputeTBN at every fault service.
 	tbnStats tbnStatistics
+
+	// sbin_codex (todo 19): the eviction coalescing table: one live eviction
+	// transaction per (PID, GPU, regionBase). An entry exists from the victim
+	// selection until the transaction completes after the unblock; a region is
+	// never selected twice (§18.2).
+	evictByKey map[copyRegionKey]*evictionTransaction
+
+	// sbin_codex (todo 19): the pinned-region registry (uvm-manager.md §18.2:
+	// a victim must not be pinned). No pin API exists in the initial model;
+	// the registry is exercised by the PinnedExclusion contract test.
+	pinned map[copyRegionKey]bool
 }
 
 // NewUVMManager constructs a UVM manager for an enabled UVM configuration.
@@ -109,6 +120,10 @@ func NewUVMManager(cfg UVMConfig, availableGPUMemory uint64) *UVMManager {
 		faultByKey:  make(map[copyRegionKey]*faultTransaction), // sbin_codex (todo 15)
 		// sbin_codex (todo 18): the AC/write migration coalescing table.
 		migrationByKey: make(map[copyRegionKey]*migrationTransaction),
+		// sbin_codex (todo 19): the eviction coalescing table and the
+		// pinned-region registry.
+		evictByKey: make(map[copyRegionKey]*evictionTransaction),
+		pinned:     make(map[copyRegionKey]bool),
 	}
 }
 
@@ -1050,4 +1065,29 @@ func (m *UVMManager) SuppressedMigrationCount() uint64 {
 	defer m.Unlock()
 
 	return m.suppressedMigrationCount
+}
+
+// PinRegion marks a 64 KB region pinned: it is never selected as an eviction
+// victim (§18.2). // sbin_codex
+func (m *UVMManager) PinRegion(key copyRegionKey) {
+	m.Lock()
+	defer m.Unlock()
+
+	m.pinned[key] = true
+}
+
+// UnpinRegion removes the pin of a 64 KB region. // sbin_codex
+func (m *UVMManager) UnpinRegion(key copyRegionKey) {
+	m.Lock()
+	defer m.Unlock()
+
+	delete(m.pinned, key)
+}
+
+// IsPinned reports whether a 64 KB region is pinned. // sbin_codex
+func (m *UVMManager) IsPinned(key copyRegionKey) bool {
+	m.Lock()
+	defer m.Unlock()
+
+	return m.pinned[key]
 }
