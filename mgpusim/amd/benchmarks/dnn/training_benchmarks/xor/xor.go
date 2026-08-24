@@ -103,3 +103,9 @@ func (b *Benchmark) Verify() {
 func (b *Benchmark) SetUnifiedMemory() {
 	panic("unified memory is not supported by dnn workloads")
 }
+
+// SetManagedMemory asks the benchmark to allocate its GPU tensors through the
+// driver's managed-memory (UVM) API. sbin_codex
+func (b *Benchmark) SetManagedMemory() {
+	b.to.SetManagedMemory()
+}

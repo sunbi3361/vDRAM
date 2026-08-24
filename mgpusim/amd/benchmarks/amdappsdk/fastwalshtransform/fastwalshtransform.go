@@ -59,6 +59,7 @@ type Benchmark struct {
 	dInputArray    driver.Ptr
 
 	useUnifiedMemory bool
+	useManagedMemory bool // sbin_codex
 }
 
 // NewBenchmark returns a benchmark
@@ -98,6 +99,11 @@ func (b *Benchmark) SetUnifiedMemory() {
 	b.useUnifiedMemory = true
 }
 
+// SetManagedMemory uses Managed Memory. sbin_codex
+func (b *Benchmark) SetManagedMemory() {
+	b.useManagedMemory = true
+}
+
 // Run runs
 func (b *Benchmark) Run() {
 	b.loadProgram()
@@ -125,6 +131,8 @@ func (b *Benchmark) initMem() {
 
 	if b.useUnifiedMemory {
 		b.dInputArray = b.driver.AllocateUnifiedMemory(b.context, uint64(b.Length*4))
+	} else if b.useManagedMemory { // sbin_codex
+		b.dInputArray = b.driver.AllocateManagedMemory(b.context, uint64(b.Length*4))
 	} else {
 		b.dInputArray = b.driver.AllocateMemory(b.context, uint64(b.Length*4))
 	}

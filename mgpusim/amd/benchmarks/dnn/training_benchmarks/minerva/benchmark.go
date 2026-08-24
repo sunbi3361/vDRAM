@@ -31,6 +31,7 @@ type Benchmark struct {
 	MaxBatchPerEpoch   int
 	EnableTesting      bool
 	EnableVerification bool
+	useManagedMemory   bool // sbin_codex
 }
 
 // NewBenchmark creates a new benchmark.
@@ -61,6 +62,10 @@ func (b *Benchmark) defineNetwork(gpuID int) {
 	context := b.driver.InitWithExistingPID(b.ctx)
 	b.driver.SelectGPU(context, gpuID)
 	to := gputensor.NewGPUOperator(b.driver, context)
+
+	if b.useManagedMemory { // sbin_codex
+		to.SetManagedMemory()
+	}
 
 	if b.EnableVerification {
 		to.EnableVerification()
@@ -169,4 +174,10 @@ func (b *Benchmark) Verify() {
 // SetUnifiedMemory asks the benchmark to use unified memory.
 func (b *Benchmark) SetUnifiedMemory() {
 	panic("unified memory is not supported by dnn workloads")
+}
+
+// SetManagedMemory asks the benchmark to allocate its GPU tensors through the
+// driver's managed-memory (UVM) API. sbin_codex
+func (b *Benchmark) SetManagedMemory() {
+	b.useManagedMemory = true
 }

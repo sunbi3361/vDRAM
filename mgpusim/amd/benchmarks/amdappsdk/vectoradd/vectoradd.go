@@ -55,6 +55,7 @@ type Benchmark struct {
 	dC driver.Ptr
 
 	useUnifiedMemory bool
+	useManagedMemory bool // sbin_codex
 }
 
 // NewBenchmark returns a benchmark
@@ -74,6 +75,11 @@ func (b *Benchmark) SelectGPU(gpus []int) {
 // SetUnifiedMemory uses Unified Memory
 func (b *Benchmark) SetUnifiedMemory() {
 	b.useUnifiedMemory = true
+}
+
+// SetManagedMemory uses Managed Memory. sbin_codex
+func (b *Benchmark) SetManagedMemory() {
+	b.useManagedMemory = true
 }
 
 //go:embed kernels.hsaco
@@ -110,6 +116,10 @@ func (b *Benchmark) initMem() {
 		b.dA = b.driver.AllocateUnifiedMemory(b.context, uint64(numData*4))
 		b.dB = b.driver.AllocateUnifiedMemory(b.context, uint64(numData*4))
 		b.dC = b.driver.AllocateUnifiedMemory(b.context, uint64(numData*4))
+	} else if b.useManagedMemory { // sbin_codex
+		b.dA = b.driver.AllocateManagedMemory(b.context, uint64(numData*4))
+		b.dB = b.driver.AllocateManagedMemory(b.context, uint64(numData*4))
+		b.dC = b.driver.AllocateManagedMemory(b.context, uint64(numData*4))
 	} else {
 		b.dA = b.driver.AllocateMemory(b.context, uint64(numData*4))
 		b.driver.Distribute(b.context, b.dA, uint64(numData*4), b.gpus)

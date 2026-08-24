@@ -43,11 +43,11 @@ type CDNA3Kernel1Args struct {
 	NX  int32      // offset 24
 	NY  int32      // offset 28
 	// Implicit args expected by CDNA3 runtime
-	Pad1             [12]byte   // offset 32-43 (padding)
-	HiddenGroupSizeX uint16     // offset 44 (0x2c)
-	HiddenGroupSizeY uint16     // offset 46
-	HiddenGroupSizeZ uint16     // offset 48
-	Pad2             [238]byte  // offset 50-287 (rest of implicit args)
+	Pad1             [12]byte  // offset 32-43 (padding)
+	HiddenGroupSizeX uint16    // offset 44 (0x2c)
+	HiddenGroupSizeY uint16    // offset 46
+	HiddenGroupSizeZ uint16    // offset 48
+	Pad2             [238]byte // offset 50-287 (rest of implicit args)
 }
 
 // CDNA3Kernel2Args defines kernel arguments for CDNA3 architecture (GFX942)
@@ -58,11 +58,11 @@ type CDNA3Kernel2Args struct {
 	NX  int32      // offset 24
 	NY  int32      // offset 28
 	// Implicit args expected by CDNA3 runtime
-	Pad1             [12]byte   // offset 32-43 (padding)
-	HiddenGroupSizeX uint16     // offset 44 (0x2c)
-	HiddenGroupSizeY uint16     // offset 46
-	HiddenGroupSizeZ uint16     // offset 48
-	Pad2             [238]byte  // offset 50-287 (rest of implicit args)
+	Pad1             [12]byte  // offset 32-43 (padding)
+	HiddenGroupSizeX uint16    // offset 44 (0x2c)
+	HiddenGroupSizeY uint16    // offset 46
+	HiddenGroupSizeZ uint16    // offset 48
+	Pad2             [238]byte // offset 50-287 (rest of implicit args)
 }
 
 // Benchmark defines a benchmark
@@ -80,6 +80,7 @@ type Benchmark struct {
 	cpuY                  []float32
 
 	useUnifiedMemory bool
+	useManagedMemory bool // sbin_codex
 }
 
 // NewBenchmark makes a new benchmark
@@ -98,6 +99,11 @@ func (b *Benchmark) SelectGPU(gpus []int) {
 // SetUnifiedMemory uses Unified Memory
 func (b *Benchmark) SetUnifiedMemory() {
 	b.useUnifiedMemory = true
+}
+
+// SetManagedMemory uses Managed Memory. sbin_codex
+func (b *Benchmark) SetManagedMemory() {
+	b.useManagedMemory = true
 }
 
 //go:embed kernels.hsaco
@@ -164,6 +170,15 @@ func (b *Benchmark) initMem() {
 			uint64(b.NY*4))
 		b.dTmp = b.driver.AllocateUnifiedMemory(b.context,
 			uint64(b.NX*4))
+	} else if b.useManagedMemory { // sbin_codex
+		b.dA = b.driver.AllocateManagedMemory(b.context,
+			uint64(b.NY*b.NX*4))
+		b.dX = b.driver.AllocateManagedMemory(b.context,
+			uint64(b.NY*4))
+		b.dY = b.driver.AllocateManagedMemory(b.context,
+			uint64(b.NY*4))
+		b.dTmp = b.driver.AllocateManagedMemory(b.context,
+			uint64(b.NX*4))
 	} else {
 		b.dA = b.driver.AllocateMemory(b.context,
 			uint64(b.NY*b.NX*4))
@@ -190,7 +205,7 @@ func (b *Benchmark) launchKernel1(localSize [3]uint16, globalSize [3]uint32) {
 		}
 		b.driver.LaunchKernel(b.context, b.kernel1,
 			globalSize, localSize, &kernel1Arg)
-	} else{
+	} else {
 		kernel1Arg := Kernel1Args{
 			A:   b.dA,
 			X:   b.dX,

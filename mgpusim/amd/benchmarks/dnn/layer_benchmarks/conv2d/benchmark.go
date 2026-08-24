@@ -64,6 +64,12 @@ func (b *Benchmark) SetUnifiedMemory() {
 	b.useUnifiedMemory = true
 }
 
+// SetManagedMemory configures the benchmark to allocate its GPU tensors
+// through the driver's managed-memory (UVM) API. sbin_codex
+func (b *Benchmark) SetManagedMemory() {
+	b.operator.SetManagedMemory()
+}
+
 // Run runs the benchmark.
 func (b *Benchmark) Run() {
 	b.operator.Arch = b.Arch

@@ -17,10 +17,11 @@ type Benchmark struct {
 	context *driver.Context
 	gpus    []int
 
-	Arch                       arch.Type
+	Arch                      arch.Type
 	X, Y, Z                   uint32
 	MatrixA, MatrixB, MatrixC *Matrix
 	useUnifiedMemory          bool
+	useManagedMemory          bool // sbin_codex
 }
 
 // NewBenchmark makes a new benchmark
@@ -48,6 +49,11 @@ func (b *Benchmark) SetUnifiedMemory() {
 	b.useUnifiedMemory = true
 }
 
+// SetManagedMemory uses Managed Memory. sbin_codex
+func (b *Benchmark) SetManagedMemory() {
+	b.useManagedMemory = true
+}
+
 func (b *Benchmark) initMem() {
 	rand.Seed(0)
 
@@ -73,6 +79,7 @@ func (b *Benchmark) exec() {
 	m.SelectGPU(b.gpus)
 	m.Arch = b.Arch
 	m.useUnifiedMemory = b.useUnifiedMemory
+	m.useManagedMemory = b.useManagedMemory // sbin_codex
 	b.MatrixC = m.Multiply(b.MatrixA, b.MatrixB)
 }
 

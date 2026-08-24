@@ -62,6 +62,7 @@ type Benchmark struct {
 	gpus             []int
 	queues           []*driver.CommandQueue
 	useUnifiedMemory bool
+	useManagedMemory bool // sbin_codex
 	spmvKernel       *insts.KernelCodeObject
 
 	Arch      arch.Type
@@ -96,6 +97,11 @@ func (b *Benchmark) SelectGPU(gpus []int) {
 // SetUnifiedMemory uses Unified Memory
 func (b *Benchmark) SetUnifiedMemory() {
 	b.useUnifiedMemory = true
+}
+
+// SetManagedMemory uses Managed Memory. sbin_codex
+func (b *Benchmark) SetManagedMemory() {
+	b.useManagedMemory = true
 }
 
 //go:embed spmv.hsaco
@@ -148,9 +154,26 @@ func (b *Benchmark) initMem() {
 
 	if b.useUnifiedMemory {
 		b.allocateUnifiedMemory()
+	} else if b.useManagedMemory { // sbin_codex
+		b.allocateManagedMemory()
 	} else {
 		b.allocateMemory()
 	}
+}
+
+// allocateManagedMemory allocates every SpMV buffer through the managed-memory
+// (UVM) API. sbin_codex
+func (b *Benchmark) allocateManagedMemory() {
+	b.dValData = b.driver.AllocateManagedMemory(b.context,
+		uint64(b.nItems*4))
+	b.dVecData = b.driver.AllocateManagedMemory(b.context,
+		uint64(b.Dim*4))
+	b.dColsData = b.driver.AllocateManagedMemory(b.context,
+		uint64(b.nItems*4))
+	b.dRowDData = b.driver.AllocateManagedMemory(b.context,
+		uint64((b.Dim+1)*4))
+	b.dOutData = b.driver.AllocateManagedMemory(b.context,
+		uint64(b.Dim*4))
 }
 
 func (b *Benchmark) allocateUnifiedMemory() {

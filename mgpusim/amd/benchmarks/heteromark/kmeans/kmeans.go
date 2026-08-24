@@ -122,6 +122,7 @@ type Benchmark struct {
 	gpuRMSE float64
 
 	useUnifiedMemory bool
+	useManagedMemory bool // sbin_codex
 }
 
 // NewBenchmark makes a new benchmark
@@ -169,6 +170,11 @@ func (b *Benchmark) SetUnifiedMemory() {
 	b.useUnifiedMemory = true
 }
 
+// SetManagedMemory uses Managed Memory. sbin_codex
+func (b *Benchmark) SetManagedMemory() {
+	b.useManagedMemory = true
+}
+
 // Run runs
 func (b *Benchmark) Run() {
 	b.loadKernels()
@@ -186,6 +192,14 @@ func (b *Benchmark) initMem() {
 		b.dFeaturesSwap = b.driver.AllocateUnifiedMemory(
 			b.context, uint64(b.NumPoints*b.NumFeatures*4))
 		b.dMembership = b.driver.AllocateUnifiedMemory(
+			b.context, uint64(b.NumPoints*4))
+	} else if b.useManagedMemory { // sbin_codex
+		b.dFeatures = b.driver.AllocateManagedMemory(
+			b.context,
+			uint64(b.NumPoints*b.NumFeatures*4))
+		b.dFeaturesSwap = b.driver.AllocateManagedMemory(
+			b.context, uint64(b.NumPoints*b.NumFeatures*4))
+		b.dMembership = b.driver.AllocateManagedMemory(
 			b.context, uint64(b.NumPoints*4))
 	} else {
 		b.dFeatures = b.driver.AllocateMemory(
@@ -210,6 +224,9 @@ func (b *Benchmark) initMem() {
 		b.driver.SelectGPU(b.context, gpu)
 		if b.useUnifiedMemory {
 			b.dClusters[i] = b.driver.AllocateUnifiedMemory(
+				b.context, uint64(b.NumClusters*b.NumFeatures*4))
+		} else if b.useManagedMemory { // sbin_codex
+			b.dClusters[i] = b.driver.AllocateManagedMemory(
 				b.context, uint64(b.NumClusters*b.NumFeatures*4))
 		} else {
 			b.dClusters[i] = b.driver.AllocateMemory(

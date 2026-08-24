@@ -63,31 +63,32 @@ type Benchmark struct {
 	gpus             []int
 	queues           []*driver.CommandQueue
 	useUnifiedMemory bool
+	useManagedMemory bool // sbin_codex
 	nbodyKernel      *insts.KernelCodeObject
 
-	Arch         arch.Type
-	NumParticles int32
-	delT             float32   // dT (timestep)
-	espSqr           float32   // Softening Factor
-	initPos          []float32 // initial position
-	initVel          []float32 // initial velocity
-	pos              []float32 // Output position
-	vel              []float32 // Output velocity
-	refPos           []float32 // Reference position
-	refVel           []float32 // Reference velocity
-	groupSize        int32     // Work-Group size
-	NumIterations    int32
-	exchange         bool
-	numBodies        int32
-	currPos          driver.Ptr
-	currVel          driver.Ptr
-	newPos           driver.Ptr
-	newVel           driver.Ptr
-	dPos             *driver.Ptr
-	dVel             *driver.Ptr
-	dNewPos          *driver.Ptr
-	dNewVel          *driver.Ptr
-	localPosBuf      driver.Ptr
+	Arch          arch.Type
+	NumParticles  int32
+	delT          float32   // dT (timestep)
+	espSqr        float32   // Softening Factor
+	initPos       []float32 // initial position
+	initVel       []float32 // initial velocity
+	pos           []float32 // Output position
+	vel           []float32 // Output velocity
+	refPos        []float32 // Reference position
+	refVel        []float32 // Reference velocity
+	groupSize     int32     // Work-Group size
+	NumIterations int32
+	exchange      bool
+	numBodies     int32
+	currPos       driver.Ptr
+	currVel       driver.Ptr
+	newPos        driver.Ptr
+	newVel        driver.Ptr
+	dPos          *driver.Ptr
+	dVel          *driver.Ptr
+	dNewPos       *driver.Ptr
+	dNewVel       *driver.Ptr
+	localPosBuf   driver.Ptr
 }
 
 // NewBenchmark returns a benchmark
@@ -111,6 +112,11 @@ func (b *Benchmark) SelectGPU(gpus []int) {
 // SetUnifiedMemory uses Unified Memory
 func (b *Benchmark) SetUnifiedMemory() {
 	b.useUnifiedMemory = true
+}
+
+// SetManagedMemory uses Managed Memory. sbin_codex
+func (b *Benchmark) SetManagedMemory() {
+	b.useManagedMemory = true
 }
 
 //go:embed nbody.hsaco
@@ -169,6 +175,15 @@ func (b *Benchmark) initMem() {
 			uint64(b.numBodies*4*4))
 		b.newVel = b.driver.AllocateUnifiedMemory(b.context,
 			uint64(b.numBodies*4*4))
+	} else if b.useManagedMemory { // sbin_codex
+		b.currPos = b.driver.AllocateManagedMemory(b.context,
+			uint64(b.numBodies*4*4))
+		b.newPos = b.driver.AllocateManagedMemory(b.context,
+			uint64(b.numBodies*4*4))
+		b.currVel = b.driver.AllocateManagedMemory(b.context,
+			uint64(b.numBodies*4*4))
+		b.newVel = b.driver.AllocateManagedMemory(b.context,
+			uint64(b.numBodies*4*4))
 	} else {
 		b.currPos = b.driver.AllocateMemory(b.context,
 			uint64(b.numBodies*4*4))
@@ -201,23 +216,23 @@ func (b *Benchmark) exec() {
 	for i := int32(0); i < b.NumIterations; i++ {
 		if b.Arch == arch.CDNA3 {
 			args := CDNA3KernelArgs{
-				Pos:               *b.dPos,
-				Vel:               *b.dVel,
-				NumBodies:         b.numBodies,
-				DeltaTime:         b.delT,
-				EpsSqr:            b.espSqr,
-				LocalPos:          b.localPosBuf,
-				NewPosition:       *b.dNewPos,
-				NewVelocity:       *b.dNewVel,
-				HiddenBlockCountX: globalSize[0] / uint32(localSize[0]),
-				HiddenBlockCountY: 1,
-				HiddenBlockCountZ: 1,
-				HiddenGroupSizeX:  localSize[0],
-				HiddenGroupSizeY:  1,
-				HiddenGroupSizeZ:  1,
-				HiddenRemainderX:  uint16(globalSize[0] % uint32(localSize[0])),
-				HiddenRemainderY:  0,
-				HiddenRemainderZ:  0,
+				Pos:                 *b.dPos,
+				Vel:                 *b.dVel,
+				NumBodies:           b.numBodies,
+				DeltaTime:           b.delT,
+				EpsSqr:              b.espSqr,
+				LocalPos:            b.localPosBuf,
+				NewPosition:         *b.dNewPos,
+				NewVelocity:         *b.dNewVel,
+				HiddenBlockCountX:   globalSize[0] / uint32(localSize[0]),
+				HiddenBlockCountY:   1,
+				HiddenBlockCountZ:   1,
+				HiddenGroupSizeX:    localSize[0],
+				HiddenGroupSizeY:    1,
+				HiddenGroupSizeZ:    1,
+				HiddenRemainderX:    uint16(globalSize[0] % uint32(localSize[0])),
+				HiddenRemainderY:    0,
+				HiddenRemainderZ:    0,
 				HiddenGlobalOffsetX: 0,
 				HiddenGlobalOffsetY: 0,
 				HiddenGlobalOffsetZ: 0,

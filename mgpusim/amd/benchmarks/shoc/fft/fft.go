@@ -71,6 +71,7 @@ type Benchmark struct {
 	gpus             []int
 	queues           []*driver.CommandQueue
 	useUnifiedMemory bool
+	useManagedMemory bool // sbin_codex
 	fftKernel        *insts.KernelCodeObject
 
 	Arch       arch.Type
@@ -102,6 +103,11 @@ func (b *Benchmark) SelectGPU(gpus []int) {
 // SetUnifiedMemory uses Unified Memory
 func (b *Benchmark) SetUnifiedMemory() {
 	b.useUnifiedMemory = true
+}
+
+// SetManagedMemory uses Managed Memory. sbin_codex
+func (b *Benchmark) SetManagedMemory() {
+	b.useManagedMemory = true
 }
 
 //go:embed fft.hsaco
@@ -154,6 +160,9 @@ func (b *Benchmark) initMem() {
 
 	if b.useUnifiedMemory {
 		b.dSource = b.driver.AllocateUnifiedMemory(b.context,
+			b.usedBytes)
+	} else if b.useManagedMemory { // sbin_codex
+		b.dSource = b.driver.AllocateManagedMemory(b.context,
 			b.usedBytes)
 	} else {
 		b.dSource = b.driver.AllocateMemory(b.context,

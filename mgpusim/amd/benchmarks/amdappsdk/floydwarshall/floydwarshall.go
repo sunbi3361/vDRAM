@@ -65,6 +65,7 @@ type Benchmark struct {
 	hVerificationPathDistanceMatrix []uint32
 
 	useUnifiedMemory bool
+	useManagedMemory bool // sbin_codex
 }
 
 // NewBenchmark creates a new benchmark
@@ -83,6 +84,11 @@ func (b *Benchmark) SelectGPU(gpus []int) {
 // SetUnifiedMemory Use Unified Memory
 func (b *Benchmark) SetUnifiedMemory() {
 	b.useUnifiedMemory = true
+}
+
+// SetManagedMemory uses Managed Memory. sbin_codex
+func (b *Benchmark) SetManagedMemory() {
+	b.useManagedMemory = true
 }
 
 //go:embed kernels.hsaco
@@ -160,6 +166,13 @@ func (b *Benchmark) initMem() {
 			b.context,
 			uint64(numNodes*numNodes*4))
 		b.dOutputPathDistanceMatrix = b.driver.AllocateUnifiedMemory(
+			b.context,
+			uint64(numNodes*numNodes*4))
+	} else if b.useManagedMemory { // sbin_codex
+		b.dOutputPathMatrix = b.driver.AllocateManagedMemory(
+			b.context,
+			uint64(numNodes*numNodes*4))
+		b.dOutputPathDistanceMatrix = b.driver.AllocateManagedMemory(
 			b.context,
 			uint64(numNodes*numNodes*4))
 	} else {

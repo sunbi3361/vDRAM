@@ -137,8 +137,8 @@ type Benchmark struct {
 	hInput, hOutput               []float32
 	NumIteration                  int
 	haloWidth                     int
-	dData1, dData2    driver.Ptr
-	currData, newData *driver.Ptr
+	dData1, dData2                driver.Ptr
+	currData, newData             *driver.Ptr
 	NumRows, NumCols              int
 	dataSize                      int
 	numPaddedCols                 int
@@ -147,6 +147,7 @@ type Benchmark struct {
 	localRows, localCols          int
 
 	useUnifiedMemory bool
+	useManagedMemory bool // sbin_codex
 }
 
 // NewBenchmark returns a benchmark
@@ -172,6 +173,11 @@ func (b *Benchmark) SelectGPU(gpus []int) {
 // SetUnifiedMemory uses Unified Memory
 func (b *Benchmark) SetUnifiedMemory() {
 	b.useUnifiedMemory = true
+}
+
+// SetManagedMemory uses Managed Memory. sbin_codex
+func (b *Benchmark) SetManagedMemory() {
+	b.useManagedMemory = true
 }
 
 //go:embed kernels.hsaco
@@ -230,6 +236,11 @@ func (b *Benchmark) initMem() {
 		b.dData1 = b.driver.AllocateUnifiedMemory(b.context,
 			uint64(b.paddedDataSize*4))
 		b.dData2 = b.driver.AllocateUnifiedMemory(b.context,
+			uint64(b.paddedDataSize*4))
+	} else if b.useManagedMemory { // sbin_codex
+		b.dData1 = b.driver.AllocateManagedMemory(b.context,
+			uint64(b.paddedDataSize*4))
+		b.dData2 = b.driver.AllocateManagedMemory(b.context,
 			uint64(b.paddedDataSize*4))
 	} else {
 		b.dData1 = b.driver.AllocateMemory(b.context,

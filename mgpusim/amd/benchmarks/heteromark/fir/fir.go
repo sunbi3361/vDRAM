@@ -71,6 +71,7 @@ type Benchmark struct {
 	gOutputData  driver.Ptr
 
 	useUnifiedMemory bool
+	useManagedMemory bool // sbin_codex
 }
 
 //go:embed kernels.hsaco
@@ -113,6 +114,11 @@ func (b *Benchmark) SetUnifiedMemory() {
 	b.useUnifiedMemory = true
 }
 
+// SetManagedMemory uses Managed Memory. sbin_codex
+func (b *Benchmark) SetManagedMemory() {
+	b.useManagedMemory = true
+}
+
 // Run runs
 func (b *Benchmark) Run() {
 	b.loadProgram()
@@ -147,6 +153,14 @@ func (b *Benchmark) initMem() {
 			b.context, uint64(b.Length*4))
 		b.gOutputData = b.driver.AllocateUnifiedMemory(
 			b.context, uint64(b.Length*4))
+	} else if b.useManagedMemory { // sbin_codex
+		b.gFilterData = make([]driver.Ptr, len(b.gpus))
+		b.gHistoryData = b.driver.AllocateManagedMemory(
+			b.context, uint64(b.numTaps*4))
+		b.gInputData = b.driver.AllocateManagedMemory(
+			b.context, uint64(b.Length*4))
+		b.gOutputData = b.driver.AllocateManagedMemory(
+			b.context, uint64(b.Length*4))
 	} else {
 		b.gFilterData = make([]driver.Ptr, len(b.gpus))
 		b.gHistoryData = b.driver.AllocateMemory(
@@ -167,6 +181,9 @@ func (b *Benchmark) initMem() {
 		b.driver.SelectGPU(b.context, gpu)
 		if b.useUnifiedMemory {
 			b.gFilterData[i] = b.driver.AllocateUnifiedMemory(
+				b.context, uint64(b.numTaps*4))
+		} else if b.useManagedMemory { // sbin_codex
+			b.gFilterData[i] = b.driver.AllocateManagedMemory(
 				b.context, uint64(b.numTaps*4))
 		} else {
 			b.gFilterData[i] = b.driver.AllocateMemory(

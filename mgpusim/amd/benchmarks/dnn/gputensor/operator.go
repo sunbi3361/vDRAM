@@ -21,17 +21,18 @@ var sizeOfInt32 = 4
 
 // GPUOperator can perform operations on GPU tensors.
 type GPUOperator struct {
-	driver        *driver.Driver
-	ctx           *driver.Context
-	Arch          arch.Type
-	kernelsLoaded bool
-	loadedArch    arch.Type
-	verification  bool
-	timerMutex    sync.Mutex
-	reportTime    bool
-	vStart, vEnd  sim.VTimeInSec
-	start, end    time.Time
-	cpuOperator   *tensor.CPUOperator
+	driver           *driver.Driver
+	ctx              *driver.Context
+	Arch             arch.Type
+	kernelsLoaded    bool
+	loadedArch       arch.Type
+	verification     bool
+	timerMutex       sync.Mutex
+	reportTime       bool
+	useManagedMemory bool // sbin_codex
+	vStart, vEnd     sim.VTimeInSec
+	start, end       time.Time
+	cpuOperator      *tensor.CPUOperator
 
 	sumKernel                           *insts.KernelCodeObject
 	transposeKernel                     *insts.KernelCodeObject
@@ -83,6 +84,12 @@ func (o *GPUOperator) ensureKernelsLoaded() {
 func (o *GPUOperator) EnableVerification() {
 	o.verification = true
 	o.cpuOperator = &tensor.CPUOperator{}
+}
+
+// SetManagedMemory makes Create and the GPU-used temporary buffers allocate
+// through the driver's managed-memory (UVM) API. sbin_codex
+func (o *GPUOperator) SetManagedMemory() {
+	o.useManagedMemory = true
 }
 
 // ReportTime lets the operator to report the execution time of each kernel.
@@ -250,7 +257,11 @@ func (o *GPUOperator) Create(size []int) tensor.Tensor {
 		size:   size,
 	}
 
-	t.ptr = o.driver.AllocateMemory(o.ctx, uint64(t.NumElement()*sizeOfFloat32))
+	if o.useManagedMemory { // sbin_codex
+		t.ptr = o.driver.AllocateManagedMemory(o.ctx, uint64(t.NumElement()*sizeOfFloat32))
+	} else {
+		t.ptr = o.driver.AllocateMemory(o.ctx, uint64(t.NumElement()*sizeOfFloat32))
+	}
 
 	return t
 }
@@ -502,16 +513,43 @@ func (o *GPUOperator) prepareTranspose(
 
 	output := o.Create(outSize).(*Tensor)
 
-	dOrder := o.driver.AllocateMemory(o.ctx, uint64(dim*sizeOfInt32))
+	var dOrder driver.Ptr
+	if o.useManagedMemory { // sbin_codex
+		dOrder = o.driver.AllocateManagedMemory(o.ctx, uint64(dim*sizeOfInt32))
+	} else {
+		dOrder = o.driver.AllocateMemory(o.ctx, uint64(dim*sizeOfInt32))
+	}
 	o.driver.MemCopyH2D(o.ctx, dOrder, hOrder)
-	dInSize := o.driver.AllocateMemory(o.ctx, uint64(dim*sizeOfInt32))
+	var dInSize driver.Ptr
+	if o.useManagedMemory { // sbin_codex
+		dInSize = o.driver.AllocateManagedMemory(o.ctx, uint64(dim*sizeOfInt32))
+	} else {
+		dInSize = o.driver.AllocateMemory(o.ctx, uint64(dim*sizeOfInt32))
+	}
 	o.driver.MemCopyH2D(o.ctx, dInSize, hInSize)
-	dOutSize := o.driver.AllocateMemory(o.ctx, uint64(dim*sizeOfInt32))
+	var dOutSize driver.Ptr
+	if o.useManagedMemory { // sbin_codex
+		dOutSize = o.driver.AllocateManagedMemory(o.ctx, uint64(dim*sizeOfInt32))
+	} else {
+		dOutSize = o.driver.AllocateMemory(o.ctx, uint64(dim*sizeOfInt32))
+	}
 	o.driver.MemCopyH2D(o.ctx, dOutSize, hOutSize)
-	dInIndexBuf := o.driver.AllocateMemory(o.ctx,
-		uint64(t.NumElement()*dim*sizeOfInt32))
-	dOutIndexBuf := o.driver.AllocateMemory(o.ctx,
-		uint64(t.NumElement()*dim*sizeOfInt32))
+	var dInIndexBuf driver.Ptr
+	if o.useManagedMemory { // sbin_codex
+		dInIndexBuf = o.driver.AllocateManagedMemory(o.ctx,
+			uint64(t.NumElement()*dim*sizeOfInt32))
+	} else {
+		dInIndexBuf = o.driver.AllocateMemory(o.ctx,
+			uint64(t.NumElement()*dim*sizeOfInt32))
+	}
+	var dOutIndexBuf driver.Ptr
+	if o.useManagedMemory { // sbin_codex
+		dOutIndexBuf = o.driver.AllocateManagedMemory(o.ctx,
+			uint64(t.NumElement()*dim*sizeOfInt32))
+	} else {
+		dOutIndexBuf = o.driver.AllocateMemory(o.ctx,
+			uint64(t.NumElement()*dim*sizeOfInt32))
+	}
 
 	cleanup := func() {
 		o.driver.FreeMemory(o.ctx, dOrder)
@@ -575,17 +613,39 @@ func (o *GPUOperator) Rotate180(t tensor.Tensor) tensor.Tensor {
 
 	output := o.Create(outSize).(*Tensor)
 
-	dInSize := o.driver.AllocateMemory(o.ctx, uint64(dim*sizeOfInt32))
+	var dInSize driver.Ptr
+	if o.useManagedMemory { // sbin_codex
+		dInSize = o.driver.AllocateManagedMemory(o.ctx, uint64(dim*sizeOfInt32))
+	} else {
+		dInSize = o.driver.AllocateMemory(o.ctx, uint64(dim*sizeOfInt32))
+	}
 	o.driver.MemCopyH2D(o.ctx, dInSize, hInSize)
 	defer o.driver.FreeMemory(o.ctx, dInSize)
-	dOutSize := o.driver.AllocateMemory(o.ctx, uint64(dim*sizeOfInt32))
+	var dOutSize driver.Ptr
+	if o.useManagedMemory { // sbin_codex
+		dOutSize = o.driver.AllocateManagedMemory(o.ctx, uint64(dim*sizeOfInt32))
+	} else {
+		dOutSize = o.driver.AllocateMemory(o.ctx, uint64(dim*sizeOfInt32))
+	}
 	o.driver.MemCopyH2D(o.ctx, dOutSize, hOutSize)
 	defer o.driver.FreeMemory(o.ctx, dOutSize)
-	dInIndexBuf := o.driver.AllocateMemory(o.ctx,
-		uint64(t.NumElement()*dim*sizeOfInt32))
+	var dInIndexBuf driver.Ptr
+	if o.useManagedMemory { // sbin_codex
+		dInIndexBuf = o.driver.AllocateManagedMemory(o.ctx,
+			uint64(t.NumElement()*dim*sizeOfInt32))
+	} else {
+		dInIndexBuf = o.driver.AllocateMemory(o.ctx,
+			uint64(t.NumElement()*dim*sizeOfInt32))
+	}
 	defer o.driver.FreeMemory(o.ctx, dInIndexBuf)
-	dOutIndexBuf := o.driver.AllocateMemory(o.ctx,
-		uint64(t.NumElement()*dim*sizeOfInt32))
+	var dOutIndexBuf driver.Ptr
+	if o.useManagedMemory { // sbin_codex
+		dOutIndexBuf = o.driver.AllocateManagedMemory(o.ctx,
+			uint64(t.NumElement()*dim*sizeOfInt32))
+	} else {
+		dOutIndexBuf = o.driver.AllocateMemory(o.ctx,
+			uint64(t.NumElement()*dim*sizeOfInt32))
+	}
 	defer o.driver.FreeMemory(o.ctx, dOutIndexBuf)
 
 	args := rotateKernelArgs{
@@ -648,20 +708,47 @@ func (o *GPUOperator) Dilate(t tensor.Tensor, dilate []int) tensor.Tensor {
 		hOutSize[i] = int32(outSize[i])
 	}
 
-	dInSize := o.driver.AllocateMemory(o.ctx, uint64(dim*sizeOfInt32))
+	var dInSize driver.Ptr
+	if o.useManagedMemory { // sbin_codex
+		dInSize = o.driver.AllocateManagedMemory(o.ctx, uint64(dim*sizeOfInt32))
+	} else {
+		dInSize = o.driver.AllocateMemory(o.ctx, uint64(dim*sizeOfInt32))
+	}
 	o.driver.MemCopyH2D(o.ctx, dInSize, hInSize)
 	defer o.driver.FreeMemory(o.ctx, dInSize)
-	dOutSize := o.driver.AllocateMemory(o.ctx, uint64(dim*sizeOfInt32))
+	var dOutSize driver.Ptr
+	if o.useManagedMemory { // sbin_codex
+		dOutSize = o.driver.AllocateManagedMemory(o.ctx, uint64(dim*sizeOfInt32))
+	} else {
+		dOutSize = o.driver.AllocateMemory(o.ctx, uint64(dim*sizeOfInt32))
+	}
 	o.driver.MemCopyH2D(o.ctx, dOutSize, hOutSize)
 	defer o.driver.FreeMemory(o.ctx, dOutSize)
-	dDilate := o.driver.AllocateMemory(o.ctx, uint64(2*sizeOfInt32))
+	var dDilate driver.Ptr
+	if o.useManagedMemory { // sbin_codex
+		dDilate = o.driver.AllocateManagedMemory(o.ctx, uint64(2*sizeOfInt32))
+	} else {
+		dDilate = o.driver.AllocateMemory(o.ctx, uint64(2*sizeOfInt32))
+	}
 	o.driver.MemCopyH2D(o.ctx, dDilate, hDilate)
 	defer o.driver.FreeMemory(o.ctx, dDilate)
-	dInIndexBuf := o.driver.AllocateMemory(o.ctx,
-		uint64(output.NumElement()*dim*sizeOfInt32))
+	var dInIndexBuf driver.Ptr
+	if o.useManagedMemory { // sbin_codex
+		dInIndexBuf = o.driver.AllocateManagedMemory(o.ctx,
+			uint64(output.NumElement()*dim*sizeOfInt32))
+	} else {
+		dInIndexBuf = o.driver.AllocateMemory(o.ctx,
+			uint64(output.NumElement()*dim*sizeOfInt32))
+	}
 	defer o.driver.FreeMemory(o.ctx, dInIndexBuf)
-	dOutIndexBuf := o.driver.AllocateMemory(o.ctx,
-		uint64(output.NumElement()*dim*sizeOfInt32))
+	var dOutIndexBuf driver.Ptr
+	if o.useManagedMemory { // sbin_codex
+		dOutIndexBuf = o.driver.AllocateManagedMemory(o.ctx,
+			uint64(output.NumElement()*dim*sizeOfInt32))
+	} else {
+		dOutIndexBuf = o.driver.AllocateMemory(o.ctx,
+			uint64(output.NumElement()*dim*sizeOfInt32))
+	}
 	defer o.driver.FreeMemory(o.ctx, dOutIndexBuf)
 
 	args := dilateKernelArgs{
@@ -783,12 +870,32 @@ func (o *GPUOperator) prepareSumOneAxis(
 	}
 
 	globalSize := out.NumElement()
-	dInSize := o.driver.AllocateMemory(o.ctx, uint64(t.Dim()*4))
+	var dInSize driver.Ptr
+	if o.useManagedMemory { // sbin_codex
+		dInSize = o.driver.AllocateManagedMemory(o.ctx, uint64(t.Dim()*4))
+	} else {
+		dInSize = o.driver.AllocateMemory(o.ctx, uint64(t.Dim()*4))
+	}
 	o.driver.MemCopyH2D(o.ctx, dInSize, hInSize)
-	dOutSize := o.driver.AllocateMemory(o.ctx, uint64(len(outSize)*4))
+	var dOutSize driver.Ptr
+	if o.useManagedMemory { // sbin_codex
+		dOutSize = o.driver.AllocateManagedMemory(o.ctx, uint64(len(outSize)*4))
+	} else {
+		dOutSize = o.driver.AllocateMemory(o.ctx, uint64(len(outSize)*4))
+	}
 	o.driver.MemCopyH2D(o.ctx, dOutSize, hOutSize)
-	dInIndexBuf := o.driver.AllocateMemory(o.ctx, uint64(globalSize*t.Dim()*4))
-	dOutIndexBuf := o.driver.AllocateMemory(o.ctx, uint64(globalSize*out.Dim()*4))
+	var dInIndexBuf driver.Ptr
+	if o.useManagedMemory { // sbin_codex
+		dInIndexBuf = o.driver.AllocateManagedMemory(o.ctx, uint64(globalSize*t.Dim()*4))
+	} else {
+		dInIndexBuf = o.driver.AllocateMemory(o.ctx, uint64(globalSize*t.Dim()*4))
+	}
+	var dOutIndexBuf driver.Ptr
+	if o.useManagedMemory { // sbin_codex
+		dOutIndexBuf = o.driver.AllocateManagedMemory(o.ctx, uint64(globalSize*out.Dim()*4))
+	} else {
+		dOutIndexBuf = o.driver.AllocateMemory(o.ctx, uint64(globalSize*out.Dim()*4))
+	}
 
 	cleanup := func() {
 		o.driver.FreeMemory(o.ctx, dInSize)
@@ -1443,7 +1550,12 @@ func (o *GPUOperator) CrossEntropyDerivative(
 	for i := 0; i < len(label); i++ {
 		hLabel[i] = int32(label[i])
 	}
-	dLabel := o.driver.AllocateMemory(o.ctx, uint64(len(label)*4))
+	var dLabel driver.Ptr
+	if o.useManagedMemory { // sbin_codex
+		dLabel = o.driver.AllocateManagedMemory(o.ctx, uint64(len(label)*4))
+	} else {
+		dLabel = o.driver.AllocateMemory(o.ctx, uint64(len(label)*4))
+	}
 	defer o.driver.FreeMemory(o.ctx, dLabel)
 	o.driver.MemCopyH2D(o.ctx, dLabel, hLabel)
 
@@ -1491,7 +1603,12 @@ func (o *GPUOperator) SoftmaxCrossEntropyDerivative(
 	for i := 0; i < len(label); i++ {
 		hLabel[i] = int32(label[i])
 	}
-	dLabel := o.driver.AllocateMemory(o.ctx, uint64(len(label)*4))
+	var dLabel driver.Ptr
+	if o.useManagedMemory { // sbin_codex
+		dLabel = o.driver.AllocateManagedMemory(o.ctx, uint64(len(label)*4))
+	} else {
+		dLabel = o.driver.AllocateMemory(o.ctx, uint64(len(label)*4))
+	}
 	defer o.driver.FreeMemory(o.ctx, dLabel)
 	o.driver.MemCopyH2D(o.ctx, dLabel, hLabel)
 
