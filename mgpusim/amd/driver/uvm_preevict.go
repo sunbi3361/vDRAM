@@ -52,18 +52,21 @@ type admissionDecision struct {
 	Shortfall uint64
 }
 
-// preEvictionStats tracks the §17.1 pre-eviction statistics. Todo 22 exposes
-// them through the reporter; this todo owns the update points.
-type preEvictionStats struct {
-	numPreEvictions                  uint64
-	bytesPreEvicted                  uint64
-	numConcurrentPreEvictions        uint64
-	maxConcurrentPreEvictions        uint64
-	numPreEvictionsOverlappedWithH2D uint64
-	migrationWaitCyclesForCapacity   uint64
-	optionalHeadroomShortfallCount   uint64
-	optionalHeadroomShortfallBytes   uint64
-}
+// preEvictionStats tracks the §17.1 pre-eviction statistics.
+// sbin_codex (todo 22): moved to uvm_stats.go — uvm_stats.go is the single
+// owner of every UVM counter (the manager holds it as stats.preEviction);
+// the immutable snapshot is exposed through Snapshot()/Driver.UVMStats().
+//
+//	type preEvictionStats struct {
+//		numPreEvictions                  uint64
+//		bytesPreEvicted                  uint64
+//		numConcurrentPreEvictions        uint64
+//		maxConcurrentPreEvictions        uint64
+//		numPreEvictionsOverlappedWithH2D uint64
+//		migrationWaitCyclesForCapacity   uint64
+//		optionalHeadroomShortfallCount   uint64
+//		optionalHeadroomShortfallBytes   uint64
+//	}
 
 // projectedOccupancyLocked returns the projected occupancy terms under the
 // manager lock: R = resident bytes, I = in-flight eviction bytes, N =
@@ -166,24 +169,29 @@ func (m *UVMManager) launchPreEvictionVictimsLocked(
 			// Optional headroom infeasible: admit anyway, record shortfall.
 			dec.HeadroomFeasible = false
 			dec.Shortfall = dec.NeedToEvict - uint64(v)*subblockSizeBytes
-			m.preEviction.optionalHeadroomShortfallCount++
-			m.preEviction.optionalHeadroomShortfallBytes += dec.Shortfall
+			// sbin_codex (todo 22): the one update point of the
+			// optional-headroom shortfall diagnostics (§17.1).
+			m.stats.preEviction.optionalHeadroomShortfallCount++
+			m.stats.preEviction.optionalHeadroomShortfallBytes += dec.Shortfall
 			break
 		}
 		tx.preEviction = true
 		victims = append(victims, tx)
-		m.preEviction.numPreEvictions++
-		m.preEviction.bytesPreEvicted += tx.bytes
-		m.preEviction.numConcurrentPreEvictions++
-		if m.preEviction.numConcurrentPreEvictions >
-			m.preEviction.maxConcurrentPreEvictions {
-			m.preEviction.maxConcurrentPreEvictions =
-				m.preEviction.numConcurrentPreEvictions
+		// sbin_codex (todo 22): the one update point of num_pre_evictions,
+		// bytes_pre_evicted, num/max_concurrent_pre_evictions, and
+		// num_pre_evictions_overlapped_with_h2d (§17.1).
+		m.stats.preEviction.numPreEvictions++
+		m.stats.preEviction.bytesPreEvicted += tx.bytes
+		m.stats.preEviction.numConcurrentPreEvictions++
+		if m.stats.preEviction.numConcurrentPreEvictions >
+			m.stats.preEviction.maxConcurrentPreEvictions {
+			m.stats.preEviction.maxConcurrentPreEvictions =
+				m.stats.preEviction.numConcurrentPreEvictions
 		}
 		// A victim launched while an H2D admission is reserved overlaps with
 		// that H2D transfer (§17.1 DMA concurrency).
 		if m.reservation.ReservedBytes() > 0 {
-			m.preEviction.numPreEvictionsOverlappedWithH2D++
+			m.stats.preEviction.numPreEvictionsOverlappedWithH2D++
 		}
 	}
 	return victims
@@ -195,7 +203,7 @@ func (m *UVMManager) recordCapacityWait() {
 	m.Lock()
 	defer m.Unlock()
 
-	m.preEviction.migrationWaitCyclesForCapacity++
+	m.stats.preEviction.migrationWaitCyclesForCapacity++
 }
 
 // NumPreEvictions returns the number of pre-eviction victims launched
@@ -204,7 +212,7 @@ func (m *UVMManager) NumPreEvictions() uint64 {
 	m.Lock()
 	defer m.Unlock()
 
-	return m.preEviction.numPreEvictions
+	return m.stats.preEviction.numPreEvictions
 }
 
 // BytesPreEvicted returns the bytes scheduled for pre-eviction (§17.1
@@ -213,7 +221,7 @@ func (m *UVMManager) BytesPreEvicted() uint64 {
 	m.Lock()
 	defer m.Unlock()
 
-	return m.preEviction.bytesPreEvicted
+	return m.stats.preEviction.bytesPreEvicted
 }
 
 // NumConcurrentPreEvictions returns the number of pre-evictions currently in
@@ -222,7 +230,7 @@ func (m *UVMManager) NumConcurrentPreEvictions() uint64 {
 	m.Lock()
 	defer m.Unlock()
 
-	return m.preEviction.numConcurrentPreEvictions
+	return m.stats.preEviction.numConcurrentPreEvictions
 }
 
 // MaxConcurrentPreEvictions returns the peak concurrent pre-eviction depth
@@ -231,7 +239,7 @@ func (m *UVMManager) MaxConcurrentPreEvictions() uint64 {
 	m.Lock()
 	defer m.Unlock()
 
-	return m.preEviction.maxConcurrentPreEvictions
+	return m.stats.preEviction.maxConcurrentPreEvictions
 }
 
 // NumPreEvictionsOverlappedWithH2D returns the number of pre-evictions that
@@ -241,7 +249,7 @@ func (m *UVMManager) NumPreEvictionsOverlappedWithH2D() uint64 {
 	m.Lock()
 	defer m.Unlock()
 
-	return m.preEviction.numPreEvictionsOverlappedWithH2D
+	return m.stats.preEviction.numPreEvictionsOverlappedWithH2D
 }
 
 // MigrationWaitCyclesForCapacity returns the number of admission wait cycles
@@ -251,7 +259,7 @@ func (m *UVMManager) MigrationWaitCyclesForCapacity() uint64 {
 	m.Lock()
 	defer m.Unlock()
 
-	return m.preEviction.migrationWaitCyclesForCapacity
+	return m.stats.preEviction.migrationWaitCyclesForCapacity
 }
 
 // OptionalHeadroomShortfallCount returns the number of admissions whose
@@ -260,7 +268,7 @@ func (m *UVMManager) OptionalHeadroomShortfallCount() uint64 {
 	m.Lock()
 	defer m.Unlock()
 
-	return m.preEviction.optionalHeadroomShortfallCount
+	return m.stats.preEviction.optionalHeadroomShortfallCount
 }
 
 // OptionalHeadroomShortfallBytes returns the total headroom deficit recorded
@@ -269,5 +277,5 @@ func (m *UVMManager) OptionalHeadroomShortfallBytes() uint64 {
 	m.Lock()
 	defer m.Unlock()
 
-	return m.preEviction.optionalHeadroomShortfallBytes
+	return m.stats.preEviction.optionalHeadroomShortfallBytes
 }

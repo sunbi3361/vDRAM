@@ -77,14 +77,19 @@ type UVMManager struct {
 	// sbin_codex (todo 18): migration statistics (uvm-manager.md §16, §31.1).
 	// The trigger-specific counters record created transactions; the
 	// suppressed counter records ignored notifications/writes (§16).
-	accessCounterMigrationCount uint64
-	remoteWriteMigrationCount   uint64
-	suppressedMigrationCount    uint64
+	// sbin_codex (todo 22): the trigger counters moved into uvmStats
+	// (num_access_counter_migrations / num_write_triggered_migrations); the
+	// suppressed counter stays here (internal diagnostic, §16).
+	// accessCounterMigrationCount uint64
+	// remoteWriteMigrationCount   uint64
+	suppressedMigrationCount uint64
 
 	// sbin_codex (todo 15): fault statistics (uvm-manager.md §8.4).
-	rawPageFaultCount       uint64
-	coalescedPageFaultCount uint64
-	uniqueFaultServiceCount uint64
+	// sbin_codex (todo 22): moved into uvmStats (num_gpu_page_fault_requests /
+	// num_unique_fault_services / num_coalesced_faults).
+	// rawPageFaultCount       uint64
+	// coalescedPageFaultCount uint64
+	// uniqueFaultServiceCount uint64
 
 	// sbin_codex (todo 16): the migration destination frame allocator (the
 	// driver), installed after construction. prepareFaultMigration allocates
@@ -93,7 +98,9 @@ type UVMManager struct {
 
 	// sbin_codex (todo 17): TBN selection statistics (uvm-manager.md §11.12),
 	// recorded by recomputeTBN at every fault service.
-	tbnStats tbnStatistics
+	// sbin_codex (todo 22): moved into uvmStats (the §11.12 detailed TBN
+	// counters and the §27 TBN summary derived from them).
+	// tbnStats tbnStatistics
 
 	// sbin_codex (todo 19): the eviction coalescing table: one live eviction
 	// transaction per (PID, GPU, regionBase). An entry exists from the victim
@@ -110,8 +117,17 @@ type UVMManager struct {
 	// (uvm-manager.md §17.1): num_pre_evictions, bytes_pre_evicted,
 	// num/max_concurrent_pre_evictions, num_pre_evictions_overlapped_with_h2d,
 	// migration_wait_cycles_for_capacity, and the optional-headroom shortfall
-	// diagnostic. Todo 22 exposes them through the reporter.
-	preEviction preEvictionStats
+	// diagnostic.
+	// sbin_codex (todo 22): moved into uvmStats (§17.1 pre-eviction counters);
+	// the manager exposes the immutable UVMStatsSnapshot through
+	// Snapshot()/Driver.UVMStats().
+	// preEviction preEvictionStats
+
+	// sbin_codex (todo 22): the single owner of every UVM statistic (§27,
+	// §11.12, §17.1, §28). Each metric has exactly one documented update
+	// point (the StatisticOwnership table in uvm_invariants.go); the manager
+	// exposes the immutable snapshot through Snapshot().
+	stats uvmStats
 }
 
 // NewUVMManager constructs a UVM manager for an enabled UVM configuration.
@@ -149,6 +165,9 @@ func NewUVMManager(cfg UVMConfig, availableGPUMemory uint64) *UVMManager {
 		// pinned-region registry.
 		evictByKey: make(map[copyRegionKey]*evictionTransaction),
 		pinned:     make(map[copyRegionKey]bool),
+		// sbin_codex (todo 22): the §28 oversubscription capacity diagnostic
+		// is fixed at construction (uvm_capacity_bytes).
+		stats: uvmStats{capacityBytes: capacity},
 	}
 }
 
@@ -606,7 +625,9 @@ func (m *UVMManager) intakePageFault(
 	m.Lock()
 	defer m.Unlock()
 
-	m.rawPageFaultCount++
+	// sbin_codex (todo 22): the one update point of
+	// num_gpu_page_fault_requests (§27).
+	m.stats.recordRawFault()
 
 	reg := m.registrationForPageLocked(pid, vaddr)
 	if reg == nil {
@@ -616,7 +637,8 @@ func (m *UVMManager) intakePageFault(
 
 	key := copyRegionKey{PID: pid, GPU: gpu, RegionBase: SubBlockStartVA(vaddr)}
 	if tx := m.faultByKey[key]; tx != nil {
-		m.coalescedPageFaultCount++
+		// sbin_codex (todo 22): the one update point of num_coalesced_faults.
+		m.stats.recordCoalescedFault()
 		return tx, false, nil
 	}
 
@@ -636,7 +658,9 @@ func (m *UVMManager) intakePageFault(
 			sm.Region.State, pid, gpu, key.RegionBase)
 	}
 
-	m.uniqueFaultServiceCount++
+	// sbin_codex (todo 22): the one update point of
+	// num_unique_fault_services (§27).
+	m.stats.recordUniqueFaultService()
 	tx = &faultTransaction{
 		Ticket:      m.nextTicketLocked(),
 		PID:         pid,
@@ -657,7 +681,7 @@ func (m *UVMManager) RawPageFaultCount() uint64 {
 	m.Lock()
 	defer m.Unlock()
 
-	return m.rawPageFaultCount
+	return m.stats.numGPUPageFaultRequests
 }
 
 // CoalescedPageFaultCount returns the number of raw faults attached to an
@@ -666,7 +690,7 @@ func (m *UVMManager) CoalescedPageFaultCount() uint64 {
 	m.Lock()
 	defer m.Unlock()
 
-	return m.coalescedPageFaultCount
+	return m.stats.numCoalescedFaults
 }
 
 // UniqueFaultServiceCount returns the number of unique fault-service
@@ -675,7 +699,7 @@ func (m *UVMManager) UniqueFaultServiceCount() uint64 {
 	m.Lock()
 	defer m.Unlock()
 
-	return m.uniqueFaultServiceCount
+	return m.stats.numUniqueFaultServices
 }
 
 // faultRegionMachineLocked binds a region state machine to the 64 KB region
@@ -970,6 +994,9 @@ func (m *UVMManager) completeMigrationAdmission(
 			"uvm: migration completion in illegal region state %s", sm.Region.State)
 	}
 	m.reservation.CommitAdmission(bytes)
+	// sbin_codex (todo 22): the one update point of peak_resident_bytes
+	// (§28 oversubscription diagnostic): the peak committed resident bytes.
+	m.stats.recordResidentBytes(m.reservation.ResidentBytes())
 	return nil
 }
 
@@ -1036,9 +1063,13 @@ func (m *UVMManager) intakeMigration(
 
 	switch trigger {
 	case migrationTriggerAccessCounter:
-		m.accessCounterMigrationCount++
+		// sbin_codex (todo 22): the one update point of
+		// num_access_counter_migrations (§27).
+		m.stats.recordAccessCounterMigration()
 	case migrationTriggerRemoteWrite:
-		m.remoteWriteMigrationCount++
+		// sbin_codex (todo 22): the one update point of
+		// num_write_triggered_migrations (§27).
+		m.stats.recordWriteTriggeredMigration()
 	}
 
 	tx = &migrationTransaction{
@@ -1074,7 +1105,7 @@ func (m *UVMManager) AccessCounterMigrationCount() uint64 {
 	m.Lock()
 	defer m.Unlock()
 
-	return m.accessCounterMigrationCount
+	return m.stats.numAccessCounterMigrations
 }
 
 // RemoteWriteMigrationCount returns the number of write-triggered migration
@@ -1083,7 +1114,7 @@ func (m *UVMManager) RemoteWriteMigrationCount() uint64 {
 	m.Lock()
 	defer m.Unlock()
 
-	return m.remoteWriteMigrationCount
+	return m.stats.numWriteTriggeredMigrations
 }
 
 // SuppressedMigrationCount returns the number of ignored notifications/writes

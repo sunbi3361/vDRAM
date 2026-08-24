@@ -105,6 +105,16 @@ type migrationMiddleware struct {
 func (m *migrationMiddleware) intakeNotification(
 	notif *protocol.AccessCounterNotification,
 ) bool {
+	// sbin_codex (todo 22): the one update points of the §27 access-counter
+	// and remote-read counters — num_access_counter_increments (the
+	// notification carries its region's counter value at the threshold
+	// crossing), num_access_counter_notifications /
+	// num_access_counter_threshold_hits, and num_remote_reads /
+	// bytes_remote_read / pcie_remote_read_transactions (the remote accesses
+	// observed through the notification seam).
+	m.driver.uvm.recordAccessCounterIncrements(notif.AccessCount)
+	m.driver.uvm.recordAccessCounterNotification()
+	m.driver.uvm.recordRemoteReads(notif.AccessCount)
 	tx := m.intake(notif.PID, notif.GPU, notif.VAddr,
 		migrationTriggerAccessCounter)
 	if tx != nil {
@@ -121,6 +131,9 @@ func (m *migrationMiddleware) intakeRemoteWrite(
 	gpu int,
 	vaddr uint64,
 ) bool {
+	// sbin_codex (todo 22): the one update point of
+	// num_remote_writes_detected (§27).
+	m.driver.uvm.recordRemoteWriteDetected()
 	return m.intake(pid, gpu, vaddr, migrationTriggerRemoteWrite) != nil
 }
 
@@ -266,6 +279,15 @@ func (m *migrationMiddleware) publish(tx *migrationTransaction) {
 			Location: vm.MemoryLocationGPU_LOCAL,
 		})
 	}
+	// sbin_codex (todo 22): the one update points of the §27 H2D migration
+	// counters — num_cpu_to_gpu_migrations / bytes_cpu_to_gpu and
+	// bytes_access_counter_migrated (the completed AC migration's H2D bytes)
+	// — and of num_local_pte_installs (the GPU_LOCAL PTE publications).
+	m.driver.uvm.recordCPUToGPUMigration(tx.plan.TotalBytes)
+	if tx.Trigger == migrationTriggerAccessCounter {
+		m.driver.uvm.recordAccessCounterMigratedBytes(tx.plan.TotalBytes)
+	}
+	m.driver.uvm.recordLocalPTEInstalls(uint64(len(pages)))
 	m.startTLBI(tx)
 }
 
@@ -283,6 +305,9 @@ func (m *migrationMiddleware) startTLBI(tx *migrationTransaction) {
 	tx.tlbReqs = append(tx.tlbReqs, req)
 	tx.pendingTLB++
 	m.driver.requestsToSend = append(m.driver.requestsToSend, req)
+	// sbin_codex (todo 22): the one update point of
+	// num_uvm_tlb_range_invalidations (§27).
+	m.driver.uvm.recordUVMTLBRangeInvalidation()
 }
 
 // markResident completes the admission after the TLB ack: the region

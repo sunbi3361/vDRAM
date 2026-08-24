@@ -166,8 +166,11 @@ func (c *InvariantContext) CheckAll() error {
 }
 
 // StatisticOwner documents the single update point for one UVM statistic.
-// Full statistics exposure is plan todo 22; this todo establishes the
-// ownership structure so every counter has exactly one owner.
+// sbin_codex (todo 22): the table now covers every §27 metric, every §11.12
+// detailed TBN metric, and every §17.1 pre-eviction metric exposed by the
+// immutable UVMStatsSnapshot (Driver.UVMStats / extendedReporter SQLite
+// rows). Each statistic is updated by exactly one function; the invariant
+// test asserts uniqueness and completeness.
 type StatisticOwner struct {
 	Statistic string
 	Owner     string
@@ -175,10 +178,94 @@ type StatisticOwner struct {
 
 // StatisticOwnership is the authoritative owner table. Each statistic is
 // updated by exactly one function; the invariant test asserts uniqueness.
+// sbin_codex (todo 22): full §27 + §11.12 + §17.1 coverage.
 var StatisticOwnership = []StatisticOwner{
+	// Internal capacity/residency statistics (plan todos 4/20).
 	{Statistic: "resident_bytes_gpu", Owner: "AdmissionReservation.CommitAdmission / CompleteMigrationToGPU"},
 	{Statistic: "in_flight_bytes", Owner: "AdmissionReservation.StartMigration"},
 	{Statistic: "reserved_bytes", Owner: "AdmissionReservation.ReserveAdmission"},
 	{Statistic: "access_counter", Owner: "SubBlockState.RecordRemoteAccess"},
 	{Statistic: "migration_recency", Owner: "SubBlockState.RecordMigration"},
+	{Statistic: "suppressed_migrations", Owner: "UVMManager.intakeMigration"},
+
+	// §27 Faults.
+	{Statistic: "num_gpu_page_fault_requests", Owner: "UVMManager.intakePageFault (uvmStats.recordRawFault)"},
+	{Statistic: "num_unique_fault_services", Owner: "UVMManager.intakePageFault (uvmStats.recordUniqueFaultService)"},
+	{Statistic: "num_coalesced_faults", Owner: "UVMManager.intakePageFault (uvmStats.recordCoalescedFault)"},
+	{Statistic: "fault_service_latency_total", Owner: "faultServiceMiddleware.chargeLatency (uvmStats.recordFaultServiceLatency)"},
+	{Statistic: "fault_service_latency_avg", Owner: "derived from fault_service_latency_total / count at snapshot time (safe average)"},
+
+	// §27 Migration.
+	{Statistic: "num_cpu_to_gpu_migrations", Owner: "faultServiceMiddleware.completeMigration / migrationMiddleware.publish (uvmStats.recordCPUToGPUMigration)"},
+	{Statistic: "bytes_cpu_to_gpu", Owner: "faultServiceMiddleware.completeMigration / migrationMiddleware.publish (uvmStats.recordCPUToGPUMigration)"},
+	{Statistic: "num_gpu_to_cpu_migrations", Owner: "evictionD2HTransfer.writeback (uvmStats.recordGPUToCPUMigration)"},
+	{Statistic: "bytes_gpu_to_cpu", Owner: "evictionD2HTransfer.writeback (uvmStats.recordGPUToCPUMigration)"},
+	{Statistic: "num_prefetch_migrations", Owner: "faultServiceMiddleware.completeMigration (uvmStats.recordPrefetchMigration)"},
+	{Statistic: "bytes_prefetched", Owner: "faultServiceMiddleware.completeMigration (uvmStats.recordPrefetchMigration)"},
+	{Statistic: "num_demand_migrations", Owner: "faultServiceMiddleware.completeMigration (uvmStats.recordDemandMigration)"},
+	{Statistic: "bytes_demand_migrated", Owner: "faultServiceMiddleware.completeMigration (uvmStats.recordDemandMigration)"},
+	{Statistic: "num_access_counter_migrations", Owner: "UVMManager.intakeMigration (uvmStats.recordAccessCounterMigration)"},
+	{Statistic: "bytes_access_counter_migrated", Owner: "migrationMiddleware.publish (uvmStats.recordAccessCounterMigratedBytes)"},
+	{Statistic: "num_write_triggered_migrations", Owner: "UVMManager.intakeMigration (uvmStats.recordWriteTriggeredMigration)"},
+
+	// §27 Remote access.
+	{Statistic: "num_remote_reads", Owner: "migrationMiddleware.intakeNotification (uvmStats.recordRemoteReads)"},
+	{Statistic: "bytes_remote_read", Owner: "migrationMiddleware.intakeNotification (uvmStats.recordRemoteReads)"},
+	{Statistic: "pcie_remote_read_transactions", Owner: "migrationMiddleware.intakeNotification (uvmStats.recordRemoteReads)"},
+	{Statistic: "num_remote_writes_detected", Owner: "migrationMiddleware.intakeRemoteWrite (uvmStats.recordRemoteWriteDetected)"},
+
+	// §27 Access counter.
+	{Statistic: "num_access_counter_increments", Owner: "migrationMiddleware.intakeNotification (uvmStats.recordAccessCounterIncrements)"},
+	{Statistic: "num_access_counter_notifications", Owner: "migrationMiddleware.intakeNotification (uvmStats.recordAccessCounterNotification)"},
+	{Statistic: "num_access_counter_threshold_hits", Owner: "migrationMiddleware.intakeNotification (uvmStats.recordAccessCounterNotification)"},
+
+	// §27 Eviction.
+	{Statistic: "num_evictions", Owner: "UVMManager.freeEvictionFrames (uvmStats.recordEviction)"},
+	{Statistic: "bytes_evicted", Owner: "UVMManager.freeEvictionFrames (uvmStats.recordEviction)"},
+	{Statistic: "num_dirty_evictions", Owner: "UVMManager.freeEvictionFrames (uvmStats.recordEviction, DirtyMask check)"},
+
+	// §27 TBN summary (derived from the §11.12 detailed counters).
+	{Statistic: "num_tbn_prefetch_events", Owner: "UVMManager.recomputeTBN (tbnStatistics.PrefetchEvents)"},
+	{Statistic: "tbn_prefetch_bytes", Owner: "derived from tbn_actual_prefetch_dma_bytes at snapshot time"},
+	{Statistic: "tbn_useful_prefetch_bytes", Owner: "derived from tbn_useful_prefetched_4kb_pages at snapshot time"},
+	{Statistic: "tbn_unused_prefetch_bytes", Owner: "derived from tbn_unused_prefetched_4kb_pages at snapshot time"},
+
+	// §27 TLB / mapping.
+	{Statistic: "num_remote_pte_installs", Owner: "evictionMiddleware.finalPTE (uvmStats.recordRemotePTEInstalls)"},
+	{Statistic: "num_local_pte_installs", Owner: "faultServiceMiddleware.completeMigration / migrationMiddleware.publish (uvmStats.recordLocalPTEInstalls)"},
+	{Statistic: "num_uvm_tlb_range_invalidations", Owner: "fault/migration/eviction startTLBI (uvmStats.recordUVMTLBRangeInvalidation)"},
+
+	// §11.12 detailed TBN.
+	{Statistic: "num_tbn_fault_events", Owner: "UVMManager.recomputeTBN (tbnStatistics.FaultEvents)"},
+	{Statistic: "num_tbn_64kb_selections", Owner: "UVMManager.recomputeTBN (tbnStatistics.Selections64KB)"},
+	{Statistic: "num_tbn_128kb_expansions", Owner: "UVMManager.recomputeTBN (tbnStatistics.Expansions128KB)"},
+	{Statistic: "num_tbn_256kb_expansions", Owner: "UVMManager.recomputeTBN (tbnStatistics.Expansions256KB)"},
+	{Statistic: "num_tbn_512kb_expansions", Owner: "UVMManager.recomputeTBN (tbnStatistics.Expansions512KB)"},
+	{Statistic: "num_tbn_1mb_expansions", Owner: "UVMManager.recomputeTBN (tbnStatistics.Expansions1MB)"},
+	{Statistic: "num_tbn_2mb_expansions", Owner: "UVMManager.recomputeTBN (tbnStatistics.Expansions2MB)"},
+	{Statistic: "tbn_selected_bytes", Owner: "UVMManager.recomputeTBN (tbnStatistics.SelectedBytes)"},
+	{Statistic: "tbn_demand_bytes", Owner: "UVMManager.recomputeTBN (tbnStatistics.DemandBytes)"},
+	{Statistic: "tbn_prefetch_candidate_bytes", Owner: "UVMManager.recomputeTBN (tbnStatistics.PrefetchCandidateBytes)"},
+	{Statistic: "tbn_actual_prefetch_dma_bytes", Owner: "UVMManager.recomputeTBN (tbnStatistics.ActualPrefetchDMABytes)"},
+	{Statistic: "tbn_prefetch_suppressed_resident_bytes", Owner: "UVMManager.recomputeTBN (tbnStatistics.SuppressedResidentBytes)"},
+	{Statistic: "tbn_prefetch_suppressed_inflight_bytes", Owner: "UVMManager.recomputeTBN (tbnStatistics.SuppressedInflightBytes)"},
+	{Statistic: "tbn_useful_prefetched_4kb_pages", Owner: "UVMManager.recomputeTBN (tbnStatistics.UsefulPrefetchedPages)"},
+	{Statistic: "tbn_unused_prefetched_4kb_pages", Owner: "UVMManager.recomputeTBN (tbnStatistics.UnusedPrefetchedPages)"},
+
+	// §17.1 pre-eviction.
+	{Statistic: "num_pre_evictions", Owner: "UVMManager.launchPreEvictionVictimsLocked (preEvictionStats.numPreEvictions)"},
+	{Statistic: "bytes_pre_evicted", Owner: "UVMManager.launchPreEvictionVictimsLocked (preEvictionStats.bytesPreEvicted)"},
+	{Statistic: "num_concurrent_pre_evictions", Owner: "preEvictionStats lifecycle: launchPreEvictionVictimsLocked / completeEviction / abortEviction"},
+	{Statistic: "max_concurrent_pre_evictions", Owner: "UVMManager.launchPreEvictionVictimsLocked (preEvictionStats.maxConcurrentPreEvictions)"},
+	{Statistic: "num_pre_evictions_overlapped_with_h2d", Owner: "UVMManager.launchPreEvictionVictimsLocked (preEvictionStats.numPreEvictionsOverlappedWithH2D)"},
+	{Statistic: "migration_wait_cycles_for_capacity", Owner: "UVMManager.recordCapacityWait (preEvictionStats.migrationWaitCyclesForCapacity)"},
+	{Statistic: "optional_headroom_shortfall_count", Owner: "UVMManager.launchPreEvictionVictimsLocked (preEvictionStats.optionalHeadroomShortfallCount)"},
+	{Statistic: "optional_headroom_shortfall_bytes", Owner: "UVMManager.launchPreEvictionVictimsLocked (preEvictionStats.optionalHeadroomShortfallBytes)"},
+
+	// §28 oversubscription diagnostics.
+	{Statistic: "peak_resident_bytes", Owner: "UVMManager.completeMigrationAdmission (uvmStats.recordResidentBytes)"},
+	{Statistic: "uvm_capacity_bytes", Owner: "UVMManager.NewUVMManager (fixed at construction)"},
+
+	// Mode flag (not a statistic).
+	{Statistic: "uvm_mode", Owner: "UVMConfig.Ideal (immutable mode flag)"},
 }

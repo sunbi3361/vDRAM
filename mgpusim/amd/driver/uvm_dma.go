@@ -373,6 +373,9 @@ type evictionD2HTransfer struct {
 	driver  *Driver
 	runs    []evictionD2HRun
 	pending int
+	// sbin_codex (todo 22): the logical bytes of the completed D2H transfer
+	// (the §27 num_gpu_to_cpu_migrations / bytes_gpu_to_cpu update point).
+	bytes uint64
 }
 
 // startEvictionD2H forms the maximal D2H runs of one logical 64 KB eviction
@@ -386,7 +389,11 @@ func (d *Driver) startEvictionD2H(
 	if err != nil {
 		return nil, err
 	}
-	t := &evictionD2HTransfer{driver: d, pending: len(plan.Runs)}
+	t := &evictionD2HTransfer{
+		driver: d,
+		pending: len(plan.Runs),
+		bytes:   plan.TotalBytes,
+	}
 	for _, run := range plan.Runs {
 		req := protocol.NewMemCopyD2HReq(
 			d.gpuPort, d.GPUs[gpu-1], run.SrcStart, make([]byte, run.Bytes))
@@ -425,4 +432,7 @@ func (t *evictionD2HTransfer) writeback() {
 			t.driver.globalStorage.Write(r.run.DstStart, r.req.DstBuffer)
 		}
 	}
+	// sbin_codex (todo 22): the one update point of num_gpu_to_cpu_migrations
+	// and bytes_gpu_to_cpu (§27): the eviction's D2H transfer completed.
+	t.driver.uvm.recordGPUToCPUMigration(t.bytes)
 }

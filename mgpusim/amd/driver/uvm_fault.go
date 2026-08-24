@@ -187,6 +187,10 @@ func (m *faultServiceMiddleware) chargeLatency(tx *faultTransaction) {
 	tx.latencyEvent = evt
 	m.driver.Engine.Schedule(evt)
 	m.latencyChargedCount++
+	// sbin_codex (todo 22): the one update point of
+	// fault_service_latency_total (§27); ideal mode charges zero so the
+	// ideal latency rows are zero.
+	m.driver.uvm.recordFaultServiceLatency(sim.VTimeInSec(float64(latency) / float64(time.Second)))
 }
 
 // driveActive advances the active transaction: after the latency event it
@@ -364,6 +368,20 @@ func (m *faultServiceMiddleware) completeMigration(tx *faultTransaction) {
 		tx, m.driver.Engine.CurrentTime()); err != nil {
 		panic(err)
 	}
+	// sbin_codex (todo 22): the one update points of the §27 H2D migration
+	// counters — num_cpu_to_gpu_migrations / bytes_cpu_to_gpu and the
+	// demand/prefetch breakdown (num_demand_migrations / bytes_demand_migrated
+	// / num_prefetch_migrations / bytes_prefetched) — and of
+	// num_local_pte_installs (the GPU_LOCAL PTE publications). The demand
+	// bytes are the migration set minus the TBN prefetch component
+	// (tx.prefetchPages).
+	m.driver.uvm.recordCPUToGPUMigration(tx.plan.TotalBytes)
+	prefetchBytes := uint64(len(tx.prefetchPages)) * basePageSize
+	m.driver.uvm.recordDemandMigration(tx.plan.TotalBytes - prefetchBytes)
+	if prefetchBytes > 0 {
+		m.driver.uvm.recordPrefetchMigration(prefetchBytes)
+	}
+	m.driver.uvm.recordLocalPTEInstalls(uint64(len(pages)))
 	m.startTLBI(tx)
 }
 
@@ -381,6 +399,9 @@ func (m *faultServiceMiddleware) startTLBI(tx *faultTransaction) {
 	tx.tlbReqs = append(tx.tlbReqs, req)
 	tx.pendingTLB++
 	m.driver.requestsToSend = append(m.driver.requestsToSend, req)
+	// sbin_codex (todo 22): the one update point of
+	// num_uvm_tlb_range_invalidations (§27).
+	m.driver.uvm.recordUVMTLBRangeInvalidation()
 }
 
 // startReplay issues the one GMMU replay for the serviced region; the

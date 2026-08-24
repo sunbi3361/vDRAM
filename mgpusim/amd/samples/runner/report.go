@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"reflect" // sbin_codex (todo 22): UVM snapshot rows are emitted from the metric tags.
 	"sort"
 	"strings"
 	// "sync" // sbin_codex: removed - instructionCountTracer no longer exists.
@@ -847,7 +848,48 @@ func (r *extendedReporter) report(base *reporter) {
 	if *reportAll || *pageMigrationReportFlag {
 		r.reportMigrationMetrics(base)
 	}
+	// sbin_codex (todo 22): the complete UVM statistics (uvm-manager.md §27,
+	// §11.12, §17.1) are emitted whenever -report-all is set; the rows come
+	// from the immutable UVMStatsSnapshot so the SQLite schema always matches
+	// the driver's snapshot exactly.
+	if *reportAll {
+		r.reportUVMStats(base)
+	}
 	// r.reportL2TLBMPKI(base) // sbin_codex: removed - now reported by the main reporter.
+}
+
+// reportUVMStats emits one SQLite row per metric-tagged field of the
+// immutable UVMStatsSnapshot (the driver's single statistics exposure).
+// sbin_codex (todo 22)
+func (r *extendedReporter) reportUVMStats(base *reporter) {
+	if r.driver == nil {
+		return
+	}
+	s := r.driver.UVMStats()
+	v := reflect.ValueOf(s)
+	t := reflect.TypeOf(s)
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		name := field.Tag.Get("metric")
+		if name == "" {
+			continue
+		}
+		fv := v.Field(i)
+		var value float64
+		switch fv.Kind() {
+		case reflect.Bool:
+			if fv.Bool() {
+				value = 1
+			}
+		case reflect.Uint64:
+			value = float64(fv.Uint())
+		case reflect.Float64:
+			value = fv.Float()
+		default:
+			continue
+		}
+		insertMetric(base, "Driver", name, value, field.Tag.Get("unit"))
+	}
 }
 
 func (r *extendedReporter) reportTranslationMetrics(base *reporter) {

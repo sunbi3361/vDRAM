@@ -224,23 +224,30 @@ func countOccupiedPages(
 // partition the selections by their final level (64 KB selections vs
 // 128 KB .. 2 MB expansions). The byte counters accumulate the per-selection
 // accounting of tbnSelection.
-type tbnStatistics struct {
-	FaultEvents             uint64 // num_tbn_fault_events
-	Selections64KB          uint64 // num_tbn_64kb_selections
-	Expansions128KB         uint64 // num_tbn_128kb_expansions
-	Expansions256KB         uint64 // num_tbn_256kb_expansions
-	Expansions512KB         uint64 // num_tbn_512kb_expansions
-	Expansions1MB           uint64 // num_tbn_1mb_expansions
-	Expansions2MB           uint64 // num_tbn_2mb_expansions
-	SelectedBytes           uint64 // tbn_selected_bytes
-	DemandBytes             uint64 // tbn_demand_bytes
-	PrefetchCandidateBytes  uint64 // tbn_prefetch_candidate_bytes
-	ActualPrefetchDMABytes  uint64 // tbn_actual_prefetch_dma_bytes
-	SuppressedResidentBytes uint64 // tbn_prefetch_suppressed_resident_bytes
-	SuppressedInflightBytes uint64 // tbn_prefetch_suppressed_inflight_bytes
-	UsefulPrefetchedPages   uint64 // tbn_useful_prefetched_4kb_pages
-	UnusedPrefetchedPages   uint64 // tbn_unused_prefetched_4kb_pages
-}
+// sbin_codex (todo 22): moved to uvm_stats.go — uvm_stats.go is the single
+// owner of every UVM counter (the manager holds it as stats.tbn).
+//
+//	type tbnStatistics struct {
+//		FaultEvents             uint64 // num_tbn_fault_events
+//		Selections64KB          uint64 // num_tbn_64kb_selections
+//		Expansions128KB         uint64 // num_tbn_128kb_expansions
+//		Expansions256KB         uint64 // num_tbn_256kb_expansions
+//		Expansions512KB         uint64 // num_tbn_512kb_expansions
+//		Expansions1MB           uint64 // num_tbn_1mb_expansions
+//		Expansions2MB           uint64 // num_tbn_2mb_expansions
+//		SelectedBytes           uint64 // tbn_selected_bytes
+//		DemandBytes             uint64 // tbn_demand_bytes
+//		PrefetchCandidateBytes  uint64 // tbn_prefetch_candidate_bytes
+//		ActualPrefetchDMABytes  uint64 // tbn_actual_prefetch_dma_bytes
+//		SuppressedResidentBytes uint64 // tbn_prefetch_suppressed_resident_bytes
+//		SuppressedInflightBytes uint64 // tbn_prefetch_suppressed_inflight_bytes
+//		UsefulPrefetchedPages   uint64 // tbn_useful_prefetched_4kb_pages
+//		UnusedPrefetchedPages   uint64 // tbn_unused_prefetched_4kb_pages
+//		// PrefetchEvents is the §27 num_tbn_prefetch_events counter:
+//		// selections whose actual prefetch DMA bytes are nonzero.
+//		// sbin_codex (todo 22)
+//		PrefetchEvents uint64
+//	}
 
 // recomputeTBN re-reads the transaction's demand residency from the current
 // masks and recomputes the TBN migration set: the missing demand pages plus
@@ -265,9 +272,9 @@ func (m *UVMManager) recomputeTBN(tx *faultTransaction) []uint64 {
 	for _, page := range tx.DemandPages {
 		if maskBit(reg.PrefetchedMask, page) {
 			if maskBit(reg.ResidentMask, page) {
-				m.tbnStats.UsefulPrefetchedPages++
+				m.stats.tbn.UsefulPrefetchedPages++
 			} else {
-				m.tbnStats.UnusedPrefetchedPages++
+				m.stats.tbn.UnusedPrefetchedPages++
 			}
 			setMaskBit(reg.PrefetchedMask, page, false)
 		}
@@ -280,7 +287,7 @@ func (m *UVMManager) recomputeTBN(tx *faultTransaction) []uint64 {
 			bit := word & -word
 			page := uint64(w*64) + uint64(bits.TrailingZeros64(bit))
 			if !maskBit(reg.ResidentMask, page) {
-				m.tbnStats.UnusedPrefetchedPages++
+				m.stats.tbn.UnusedPrefetchedPages++
 				setMaskBit(reg.PrefetchedMask, page, false)
 			}
 			word &^= bit
@@ -293,27 +300,32 @@ func (m *UVMManager) recomputeTBN(tx *faultTransaction) []uint64 {
 	sel := selectTBNRegion(reg, tx.RegionBase,
 		reg.ResidentMask, reg.InFlightMask, reg.InFlightMask)
 
-	m.tbnStats.FaultEvents++
+	// sbin_codex (todo 22): the one update point of every §11.12 detailed
+	// TBN counter and the §27 num_tbn_prefetch_events counter.
+	m.stats.tbn.FaultEvents++
 	switch sel.Level {
 	case 0:
-		m.tbnStats.Selections64KB++
+		m.stats.tbn.Selections64KB++
 	case 1:
-		m.tbnStats.Expansions128KB++
+		m.stats.tbn.Expansions128KB++
 	case 2:
-		m.tbnStats.Expansions256KB++
+		m.stats.tbn.Expansions256KB++
 	case 3:
-		m.tbnStats.Expansions512KB++
+		m.stats.tbn.Expansions512KB++
 	case 4:
-		m.tbnStats.Expansions1MB++
+		m.stats.tbn.Expansions1MB++
 	case 5:
-		m.tbnStats.Expansions2MB++
+		m.stats.tbn.Expansions2MB++
 	}
-	m.tbnStats.SelectedBytes += sel.SelectedBytes
-	m.tbnStats.DemandBytes += sel.DemandBytes
-	m.tbnStats.PrefetchCandidateBytes += sel.PrefetchCandidateBytes
-	m.tbnStats.ActualPrefetchDMABytes += sel.ActualPrefetchDMABytes
-	m.tbnStats.SuppressedResidentBytes += sel.SuppressedResidentBytes
-	m.tbnStats.SuppressedInflightBytes += sel.SuppressedInflightBytes
+	if sel.ActualPrefetchDMABytes > 0 {
+		m.stats.tbn.PrefetchEvents++
+	}
+	m.stats.tbn.SelectedBytes += sel.SelectedBytes
+	m.stats.tbn.DemandBytes += sel.DemandBytes
+	m.stats.tbn.PrefetchCandidateBytes += sel.PrefetchCandidateBytes
+	m.stats.tbn.ActualPrefetchDMABytes += sel.ActualPrefetchDMABytes
+	m.stats.tbn.SuppressedResidentBytes += sel.SuppressedResidentBytes
+	m.stats.tbn.SuppressedInflightBytes += sel.SuppressedInflightBytes
 
 	// The migration set is the missing demand pages plus the actual prefetch
 	// pages, merged in VA order.
@@ -344,7 +356,7 @@ func (m *UVMManager) TBNStats() tbnStatistics {
 	m.Lock()
 	defer m.Unlock()
 
-	return m.tbnStats
+	return m.stats.tbn
 }
 
 // regionsTouchedByPlanLocked returns the set of 64 KB region base VAs touched

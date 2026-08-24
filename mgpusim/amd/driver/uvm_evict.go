@@ -328,6 +328,9 @@ func (m *evictionMiddleware) startTLBI(tx *evictionTransaction) {
 	tx.tlbReqs = append(tx.tlbReqs, req)
 	tx.pendingTLB++
 	m.driver.requestsToSend = append(m.driver.requestsToSend, req)
+	// sbin_codex (todo 22): the one update point of
+	// num_uvm_tlb_range_invalidations (§27).
+	m.driver.uvm.recordUVMTLBRangeInvalidation()
 }
 
 // startD2H transfers every valid page of the region to its CPU backing
@@ -368,6 +371,12 @@ func (m *evictionMiddleware) finalPTE(tx *evictionTransaction) {
 			pg.Location = vm.MemoryLocationINVALID
 		}
 		m.driver.memAllocator.UpdatePage(pg)
+	}
+	// sbin_codex (todo 22): the one update point of num_remote_pte_installs
+	// (§27): the REMOTE mapping publications of the eviction final PTE (only
+	// when the Access Counter is on).
+	if remote {
+		m.driver.uvm.recordRemotePTEInstalls(valid)
 	}
 	m.advance(tx, evictionStageFreeing)
 }
@@ -799,7 +808,33 @@ func (m *UVMManager) freeEvictionFrames(
 	}
 	m.reservation.CompleteMigrationToCPU(tx.bytes)
 	tx.completed = true
+	// sbin_codex (todo 22): the one update point of num_evictions,
+	// bytes_evicted, and num_dirty_evictions (§27). A region is dirty when
+	// any of its valid pages carries the dirty mark (§28 write invariant).
+	m.stats.recordEviction(tx.bytes, m.regionDirtyLocked(reg, tx.RegionBase))
 	return nil
+}
+
+// regionDirtyLocked reports whether any valid page of the 64 KB region
+// containing regionBase of reg is dirty. The caller must hold the manager
+// lock. sbin_codex (todo 22)
+func (m *UVMManager) regionDirtyLocked(
+	reg *ManagedAllocationRegistration,
+	regionBase uint64,
+) bool {
+	blockIdx := (BlockForVA(regionBase) - BlockForVA(reg.Base)) /
+		vablockSizeBytes
+	block := reg.VABlocks[blockIdx]
+	regionIdx := (regionBase - block.StartVA) / subblockSizeBytes
+	allocStart, valid := (&InvariantContext{
+		Reg: reg, Block: block, RegionIdx: regionIdx,
+	}).regionPageRange()
+	for i := uint64(0); i < valid; i++ {
+		if maskBit(reg.DirtyMask, allocStart+i) {
+			return true
+		}
+	}
+	return false
 }
 
 // completeEviction retires a completed eviction transaction: the coalescing
@@ -811,9 +846,9 @@ func (m *UVMManager) completeEviction(tx *evictionTransaction) {
 
 	delete(m.evictByKey, tx.Key)
 	// sbin_codex (todo 20): a completed pre-eviction leaves the concurrent
-	// pre-eviction set.
+	// pre-eviction set (§17.1 num_concurrent_pre_evictions).
 	if tx.preEviction {
-		m.preEviction.numConcurrentPreEvictions--
+		m.stats.preEviction.numConcurrentPreEvictions--
 	}
 	m.reevaluateLocked()
 }
@@ -833,9 +868,9 @@ func (m *UVMManager) abortEviction(tx *evictionTransaction) {
 		e.OwnerID = 0
 	}
 	// sbin_codex (todo 20): an aborted pre-eviction leaves the concurrent
-	// pre-eviction set.
+	// pre-eviction set (§17.1 num_concurrent_pre_evictions).
 	if tx.preEviction {
-		m.preEviction.numConcurrentPreEvictions--
+		m.stats.preEviction.numConcurrentPreEvictions--
 	}
 	if tx.migrated && !tx.completed {
 		m.reservation.CompleteMigrationToGPU(tx.bytes)
