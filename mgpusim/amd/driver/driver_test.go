@@ -1,6 +1,8 @@
 package driver
 
 import (
+	"sync" // sbin_codex: coordinate concurrent GPU request queue producers and consumers.
+
 	"github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/sarchlab/akita/v4/mem/mem"
@@ -74,6 +76,37 @@ var _ = ginkgo.Describe("Driver", func() {
 
 	ginkgo.AfterEach(func() {
 		mockCtrl.Finish()
+	})
+
+	// sbin_codex: parallel UVM events may enqueue while a Driver tick sends the
+	// current head; both operations must preserve every request without racing.
+	ginkgo.It("should enqueue and send GPU requests concurrently", func() {
+		const requestCount = 64
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		toGPUs.EXPECT().Send(gomock.Any()).Return(nil).AnyTimes()
+
+		for i := 0; i < requestCount; i++ {
+			req := sim.GeneralRspBuilder{}.Build()
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				<-start
+				driver.enqueueRequestsToSend(req)
+			}()
+			go func() {
+				defer wg.Done()
+				<-start
+				driver.sendToGPUs()
+			}()
+		}
+
+		close(start)
+		wg.Wait()
+		for driver.sendToGPUs() {
+		}
+
+		Expect(driver.requestsToSend).To(BeEmpty())
 	})
 
 	ginkgo.Context("process MemCopyH2D command", func() {

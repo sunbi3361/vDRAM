@@ -59,6 +59,9 @@ func (d *Driver) UVMStats() UVMStats {
 	if d.uvm == nil {
 		return UVMStats{}
 	}
+	d.uvm.stateMu.RLock() // sbin_codex: report a coherent snapshot during parallel execution.
+	defer d.uvm.stateMu.RUnlock()
+
 	stats := d.uvm.stats
 	stats.Enabled = d.uvm.config.Enabled
 	stats.Ideal = d.uvm.config.Ideal

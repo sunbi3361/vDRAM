@@ -267,7 +267,8 @@ func (m *defaultMemoryCopyMiddleware) sendFlushRequest(
 ) {
 	for _, gpu := range m.driver.GPUs {
 		req := protocol.NewFlushReq(m.driver.gpuPort, gpu)
-		m.driver.requestsToSend = append(m.driver.requestsToSend, req)
+		// m.driver.requestsToSend = append(m.driver.requestsToSend, req) // sbin_codex: queue writes must be synchronized.
+		m.driver.enqueueRequestsToSend(req) // sbin_codex
 		cmd.AddReq(req)
 
 		m.driver.logTaskToGPUInitiate(cmd, req)
@@ -285,7 +286,8 @@ func (m *defaultMemoryCopyMiddleware) Tick() (madeProgress bool) {
 		m.cyclesLeft--
 		madeProgress = true
 	} else if m.cyclesLeft == 0 {
-		m.driver.requestsToSend = append(m.driver.requestsToSend, m.awaitingReqs...)
+		// m.driver.requestsToSend = append(m.driver.requestsToSend, m.awaitingReqs...) // sbin_codex: queue writes must be synchronized.
+		m.driver.enqueueRequestsToSend(m.awaitingReqs...) // sbin_codex
 		m.awaitingReqs = nil
 		m.cyclesLeft = -1
 		madeProgress = true

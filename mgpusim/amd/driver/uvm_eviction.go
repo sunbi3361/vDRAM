@@ -46,14 +46,47 @@ func (m *UVMManager) removeLRU(key RegionKey) {
 // hasPendingEvictions reports whether a TLB-shootdown eviction is awaiting its
 // GPU ACK. // sbin_codex
 func (m *UVMManager) hasPendingEvictions() bool {
+	m.stateMu.RLock() // sbin_codex: eviction ACK polling overlaps parallel UVM events.
+	defer m.stateMu.RUnlock()
+
 	return m.evictACK > 0
+}
+
+// withCapacity ensures the GPU has room for requiredFrames before running
+// migrate. If evictions are needed, it reserves victims, performs a TLB
+// shootdown, and resumes migrate only after the ACK. While an eviction is
+// pending, further capacity requests queue and re-evaluate capacity when
+// resumed. // sbin_codex
+func (m *UVMManager) withCapacity(required uint64, exclude map[PageKey]bool, migrate func()) {
+	if m.evictACK > 0 {
+		m.pendingResumes = append(m.pendingResumes, func() {
+			m.withCapacity(required, exclude, migrate)
+		})
+		return
+	}
+	victims := m.selectLRUVictims(required, exclude)
+	if len(victims) > 0 {
+		m.beginEviction(victims, func() {
+			m.withCapacity(required, exclude, migrate)
+		})
+		return
+	}
+	migrate()
 }
 
 // beginEviction reserves the victim regions, sends a ShootDownCommand to the
 // GPU to flush its TLB, and defers the PTE/frame finalization until the ACK.
-// onDone resumes the migration that triggered the eviction. // sbin_codex
+// onDone resumes the migration that triggered the eviction. While an eviction
+// is pending, further eviction requests queue their resumptions. // sbin_codex
 func (m *UVMManager) beginEviction(victims []*RegionState, onDone func()) {
-	if len(victims) == 0 || m.evictACK > 0 {
+	if m.evictACK > 0 {
+		m.pendingResumes = append(m.pendingResumes, onDone)
+		return
+	}
+	if len(victims) == 0 {
+		if onDone != nil {
+			onDone()
+		}
 		return
 	}
 	m.evicting = victims
@@ -74,13 +107,17 @@ func (m *UVMManager) beginEviction(victims []*RegionState, onDone func()) {
 
 	req := protocol.NewShootdownCommand(
 		m.d.gpuPort, m.d.GPUs[0], vAddrs, pid)
-	m.d.requestsToSend = append(m.d.requestsToSend, req)
+	// m.d.requestsToSend = append(m.d.requestsToSend, req) // sbin_codex: parallel eviction events use the synchronized queue.
+	m.d.enqueueRequestsToSend(req) // sbin_codex
 	m.evictACK = 1
 }
 
 // finalizeEviction applies the reserved evictions after the GPU TLB has been
-// flushed, then resumes the pending migration. // sbin_codex
+// flushed, then resumes the pending migration and any queued resumptions. // sbin_codex
 func (m *UVMManager) finalizeEviction() {
+	m.stateMu.Lock() // sbin_codex: the ACK transition mutates the complete UVM state machine.
+	defer m.stateMu.Unlock()
+
 	for _, region := range m.evicting {
 		m.evictRegion(region)
 	}
@@ -90,6 +127,11 @@ func (m *UVMManager) finalizeEviction() {
 	m.evictOnDone = nil
 	if onDone != nil {
 		onDone()
+	}
+	if len(m.pendingResumes) > 0 {
+		next := m.pendingResumes[0]
+		m.pendingResumes = m.pendingResumes[1:]
+		next()
 	}
 }
 

@@ -2,6 +2,7 @@ package driver
 
 import (
 	"container/list"
+	"sync" // sbin_codex: serialize the UVM state machine under ParallelEngine.
 )
 
 // UVMManager owns the functional UVM demand-paging state machine: residency,
@@ -10,8 +11,13 @@ import (
 // driven by scheduled Akita events so that the fixed fault latency never
 // blocks the simulation engine.
 type UVMManager struct {
-	config UVMConfig
-	d      *Driver
+	// config UVMConfig // sbin_codex: retained below with stateMu-aligned formatting.
+	// d      *Driver
+	// config  UVMConfig // sbin_codex: pre-format declaration retained per repository policy.
+	// d       *Driver
+	config  UVMConfig    // sbin_codex
+	d       *Driver      // sbin_codex
+	stateMu sync.RWMutex // sbin_codex: protects all mutable UVM state below.
 
 	allocations map[string]*ManagedAllocation
 	pages       map[PageKey]*ManagedPage
@@ -35,6 +41,9 @@ type UVMManager struct {
 	evicting    []*RegionState
 	evictACK    uint64
 	evictOnDone func()
+	// sbin_codex: migrations that arrived while an eviction was pending; they
+	// resume in order after the pending eviction finalizes.
+	pendingResumes []func()
 
 	stats  UVMStats
 	nextID uint64

@@ -31,7 +31,10 @@ type Driver struct {
 	pageTable   vm.PageTable
 	middlewares []Middleware
 
-	requestsToSend []sim.Msg
+	// requestsToSend []sim.Msg // sbin_codex: retained below with its synchronization field.
+	// requestsToSend      []sim.Msg // sbin_codex: pre-format declaration retained per repository policy.
+	requestsToSend      []sim.Msg  // sbin_codex
+	requestsToSendMutex sync.Mutex // sbin_codex: protects producers and the single queue consumer.
 
 	contextMutex sync.Mutex
 	contexts     []*Context
@@ -214,6 +217,9 @@ func (d *Driver) parseFromUVM() bool {
 }
 
 func (d *Driver) sendToGPUs() bool {
+	d.requestsToSendMutex.Lock() // sbin_codex: serialize queue consumption with parallel UVM producers.
+	defer d.requestsToSendMutex.Unlock()
+
 	if len(d.requestsToSend) == 0 {
 		return false
 	}
@@ -226,6 +232,14 @@ func (d *Driver) sendToGPUs() bool {
 	}
 
 	return false
+}
+
+// enqueueRequestsToSend is the only production write path for the GPU request
+// queue, which can receive requests from parallel simulation events. // sbin_codex
+func (d *Driver) enqueueRequestsToSend(reqs ...sim.Msg) {
+	d.requestsToSendMutex.Lock()
+	defer d.requestsToSendMutex.Unlock()
+	d.requestsToSend = append(d.requestsToSend, reqs...)
 }
 
 //nolint:gocyclo
@@ -385,7 +399,8 @@ func (d *Driver) processLaunchKernelCommand(
 	queue.IsRunning = true
 	cmd.Reqs = append(cmd.Reqs, req)
 
-	d.requestsToSend = append(d.requestsToSend, req)
+	// d.requestsToSend = append(d.requestsToSend, req) // sbin_codex: queue writes must be synchronized.
+	d.enqueueRequestsToSend(req) // sbin_codex
 
 	queue.Context.l2Dirty = true
 	queue.Context.markAllBuffersDirty()
@@ -437,7 +452,8 @@ func (d *Driver) processUnifiedMultiGPULaunchKernelCommand(
 		queue.IsRunning = true
 		cmd.Reqs = append(cmd.Reqs, req)
 
-		d.requestsToSend = append(d.requestsToSend, req)
+		// d.requestsToSend = append(d.requestsToSend, req) // sbin_codex: queue writes must be synchronized.
+		d.enqueueRequestsToSend(req) // sbin_codex
 
 		queue.Context.l2Dirty = true
 		queue.Context.markAllBuffersDirty()
@@ -598,7 +614,8 @@ func (d *Driver) initiateRDMADrain() bool {
 	for i := 0; i < len(d.GPUs); i++ {
 		req := protocol.NewRDMADrainCmdFromDriver(d.gpuPort,
 			d.GPUs[i])
-		d.requestsToSend = append(d.requestsToSend, req)
+		// d.requestsToSend = append(d.requestsToSend, req) // sbin_codex: queue writes must be synchronized.
+		d.enqueueRequestsToSend(req) // sbin_codex
 		d.numRDMADrainACK++
 	}
 
@@ -642,7 +659,8 @@ func (d *Driver) sendShootDownReqs() bool {
 		shootDownReq := protocol.NewShootdownCommand(
 			d.gpuPort, d.GPUs[toShootdownGPU],
 			vAddr, pid)
-		d.requestsToSend = append(d.requestsToSend, shootDownReq)
+		// d.requestsToSend = append(d.requestsToSend, shootDownReq) // sbin_codex: queue writes must be synchronized.
+		d.enqueueRequestsToSend(shootDownReq) // sbin_codex
 	}
 
 	return true
@@ -652,9 +670,9 @@ func (d *Driver) processShootdownCompleteRsp(
 	req *protocol.ShootDownCompleteRsp,
 ) bool {
 	// sbin_codex: UVM eviction shootdown ACK: finalize the reserved evictions
-	// and resume the pending migration.
+	// and resume the pending migration. The response was already retrieved by
+	// processReturnReq.
 	if d.uvm != nil && d.uvm.hasPendingEvictions() {
-		d.gpuPort.RetrieveIncoming()
 		d.uvm.finalizeEviction()
 		return true
 	}
@@ -791,7 +809,8 @@ func (d *Driver) prepareGPURestartReqs() {
 		restartReq := protocol.NewGPURestartReq(
 			d.gpuPort,
 			d.GPUs[restartGPUID])
-		d.requestsToSend = append(d.requestsToSend, restartReq)
+		// d.requestsToSend = append(d.requestsToSend, restartReq) // sbin_codex: queue writes must be synchronized.
+		d.enqueueRequestsToSend(restartReq) // sbin_codex
 		d.numRestartACK++
 	}
 }
@@ -839,7 +858,8 @@ func (d *Driver) handleGPURestartRsp(
 func (d *Driver) prepareRDMARestartReqs() {
 	for i := 0; i < len(d.GPUs); i++ {
 		req := protocol.NewRDMARestartCmdFromDriver(d.gpuPort, d.GPUs[i])
-		d.requestsToSend = append(d.requestsToSend, req)
+		// d.requestsToSend = append(d.requestsToSend, req) // sbin_codex: queue writes must be synchronized.
+		d.enqueueRequestsToSend(req) // sbin_codex
 		d.numRDMARestartACK++
 	}
 }

@@ -25,6 +25,9 @@ func (m *UVMManager) blockForKey(key BlockKey) *VABlock {
 // CPU-resident region; at the threshold it asks the driver to migrate the
 // region to the GPU. // sbin_codex
 func (m *UVMManager) onAccessCounterNotify(pid vm.PID, regionBase uint64, deviceID uint64) {
+	m.stateMu.Lock() // sbin_codex: serialize counter-triggered migration with fault events.
+	defer m.stateMu.Unlock()
+
 	m.stats.AccessCounterNotif++
 	m.triggerAccessCounterMigration(AccessCounterKey{
 		PID:        pid,
@@ -63,14 +66,10 @@ func (m *UVMManager) triggerAccessCounterMigration(key AccessCounterKey) {
 	for _, pk := range pages {
 		exclude[pk] = true
 	}
-	victims := m.selectLRUVictims(required, exclude)
-	if len(victims) > 0 { // sbin_codex: TLB shootdown before finalizing eviction.
-		m.beginEviction(victims, func() {
-			m.finishAccessCounterMigration(key, pages)
-		})
-		return
-	}
-	m.finishAccessCounterMigration(key, pages)
+	// sbin_codex: ensure capacity (with TLB shootdown evictions) then migrate.
+	m.withCapacity(required, exclude, func() {
+		m.finishAccessCounterMigration(key, pages)
+	})
 }
 
 // finishAccessCounterMigration runs the access-counter-triggered migration

@@ -9,6 +9,9 @@ import (
 // registerManagedAllocation registers the residency metadata for a managed
 // allocation produced by the allocator.
 func (m *UVMManager) registerManagedAllocation(pid vm.PID, res internal.ManagedAllocationResult) {
+	m.stateMu.Lock() // sbin_codex: allocation registration can overlap parallel simulation events.
+	defer m.stateMu.Unlock()
+
 	cfg := m.config
 	alloc := &ManagedAllocation{
 		ID:        m.newID("alloc"),
@@ -81,6 +84,9 @@ func (m *UVMManager) onManagedAccess(
 	requestID string,
 	replyTo sim.RemotePort,
 ) {
+	m.stateMu.Lock() // sbin_codex: serialize fault ingestion with migration completion.
+	defer m.stateMu.Unlock()
+
 	now := m.d.TickScheduler.CurrentTime()
 	cfg := m.config
 	pageKey := PageKey{PID: pid, VAddr: cfg.alignDown(vAddr, cfg.PageSize)}
@@ -182,6 +188,9 @@ func (m *UVMManager) coalesceFault(pageKey PageKey, deviceID uint64, requestID s
 // handleFaultReady runs the fault-ready stage: TBN selection, capacity check,
 // eviction, and migration.
 func (m *UVMManager) handleFaultReady(faultID string) {
+	m.stateMu.Lock() // sbin_codex: fault-ready events mutate the shared UVM state machine.
+	defer m.stateMu.Unlock()
+
 	fault := m.faultsByID[faultID]
 	if fault == nil || fault.State != FaultPending {
 		return
@@ -220,14 +229,10 @@ func (m *UVMManager) handleFaultReady(faultID string) {
 	for _, pk := range sel.pageKeys {
 		exclude[pk] = true
 	}
-	victims := m.selectLRUVictims(required, exclude)
-	if len(victims) > 0 { // sbin_codex: TLB shootdown before finalizing eviction.
-		m.beginEviction(victims, func() {
-			m.startCPUGPUMigration(fault, sel)
-		})
-		return
-	}
-	m.startCPUGPUMigration(fault, sel)
+	// sbin_codex: TLB shootdown before finalizing eviction, then migrate.
+	m.withCapacity(required, exclude, func() {
+		m.startCPUGPUMigration(fault, sel)
+	})
 }
 
 // startCPUGPUMigration allocates GPU frames, performs the transfer, updates
@@ -342,6 +347,9 @@ func (m *UVMManager) copyMigrationData(mig *Migration) {
 // completeMigration finalizes a CPU->GPU migration: updates PTEs, resets
 // access counters, updates LRU/residency, and replays all fault waiters.
 func (m *UVMManager) completeMigration(migID string) {
+	m.stateMu.Lock() // sbin_codex: ParallelEngine may deliver migration events concurrently.
+	defer m.stateMu.Unlock()
+
 	mig := m.migrations[migID]
 	if mig == nil {
 		return
@@ -395,8 +403,13 @@ func (m *UVMManager) completeMigration(migID string) {
 		m.replayFault(fid)
 	}
 	delete(m.migrations, migID)
-	for _, pk := range mig.Pages {
-		delete(m.pageToMig, pk)
+	// for _, pk := range mig.Pages { // sbin_codex: a demand key can be absent from mig.Pages after overlap.
+	// 	delete(m.pageToMig, pk)
+	// }
+	for pk, ownerID := range m.pageToMig { // sbin_codex: clear every key still owned by the completed migration.
+		if ownerID == migID {
+			delete(m.pageToMig, pk)
+		}
 	}
 }
 
@@ -428,6 +441,9 @@ func (m *UVMManager) replyFaultWaiter(w FaultWaiter) {
 // this returns false before reading managed buffers, so the flush-triggered
 // write-backs (and their migrations) complete first.
 func (m *UVMManager) hasPendingWorkInRange(pid vm.PID, start, size uint64) bool {
+	m.stateMu.RLock() // sbin_codex: D2H polling races with migration/fault completion.
+	defer m.stateMu.RUnlock()
+
 	cfg := m.config
 	begin := cfg.alignDown(start, cfg.PageSize)
 	end := cfg.alignDown(start+size-1, cfg.PageSize)

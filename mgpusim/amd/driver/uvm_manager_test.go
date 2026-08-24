@@ -1,6 +1,8 @@
 package driver
 
 import (
+	"sync" // sbin_codex: coordinate simultaneous migration completions in the race regression.
+
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	"github.com/sarchlab/akita/v4/mem/mem"
@@ -113,6 +115,57 @@ var _ = ginkgo.Describe("UVMManager", func() {
 		gomega.Expect(mp.GPUFrameValid).To(gomega.BeTrue())
 	})
 
+	// sbin_codex: completion must clear demand ownership even when overlap leaves
+	// the demand page outside the migration's reserved page list.
+	ginkgo.It("should clear demand ownership when a migration reserved no page", func() {
+		// Given
+		ptr := driver.AllocateManaged(ctx, 128*1024)
+		demand := PageKey{PID: ctx.pid, VAddr: uint64(ptr) + 4096}
+		mig := &Migration{ID: "overlapped-migration", DeviceID: 1}
+		driver.uvm.migrations[mig.ID] = mig
+		driver.uvm.pageToMig[demand] = mig.ID
+		gomega.Expect(mig.Pages).To(gomega.BeEmpty())
+
+		// When
+		driver.uvm.completeMigration(mig.ID)
+
+		// Then
+		gomega.Expect(driver.uvm.pageToMig).To(gomega.BeEmpty())
+	})
+
+	// sbin_codex: parallel-engine migration events must serialize every mutation
+	// of the shared UVM maps, LRU list, page state, and statistics.
+	ginkgo.It("should complete migrations concurrently without racing", func() {
+		const migrationCount = 64
+		ptr := driver.AllocateManaged(ctx, migrationCount*4096)
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+
+		for i := 0; i < migrationCount; i++ {
+			pk := PageKey{PID: ctx.pid, VAddr: uint64(ptr) + uint64(i)*4096}
+			migID := "parallel-migration-" + itoa(uint64(i))
+			driver.uvm.migrations[migID] = &Migration{
+				ID:       migID,
+				DeviceID: 1,
+				Pages:    []PageKey{pk},
+			}
+			driver.uvm.pageToMig[pk] = migID
+
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				driver.uvm.completeMigration(migID)
+			}()
+		}
+
+		close(start)
+		wg.Wait()
+
+		gomega.Expect(driver.uvm.migrations).To(gomega.BeEmpty())
+		gomega.Expect(driver.uvm.pageToMig).To(gomega.BeEmpty())
+	})
+
 	ginkgo.It("should enforce GPU capacity with eviction", func() {
 		// GPU capacity is 128MB; allocate 192MB and touch everything.
 		ptr := driver.AllocateManaged(ctx, 192*1024*1024)
@@ -158,6 +211,38 @@ var _ = ginkgo.Describe("UVMManager", func() {
 
 	ginkgo.It("should keep ideal-uvm timing zero", func() {
 		gomega.Expect(driver.uvm.config.faultHandlingCycles()).To(gomega.Equal(0))
+	})
+
+	ginkgo.It("should queue capacity requests during a pending eviction", func() {
+		// GPU capacity is 128MB; touching a 192MB working set forces
+		// evictions. Two faults arriving while an eviction is pending must
+		// queue and resume in order without stalling.
+		ptr := driver.AllocateManaged(ctx, 192*1024*1024)
+		base := uint64(ptr)
+		pid := ctx.pid
+
+		for off := uint64(0); off < 128*1024*1024; off += 64 * 1024 {
+			driver.uvm.onManagedAccess(pid, base+off, 1, "req", "")
+			engine.Run()
+			if driver.uvm.hasPendingEvictions() {
+				driver.uvm.finalizeEviction()
+				engine.Run()
+			}
+		}
+		// Beyond capacity, consecutive faults must queue behind the pending
+		// eviction instead of being dropped.
+		for off := uint64(128 * 1024 * 1024); off < 192*1024*1024; off += 64 * 1024 {
+			driver.uvm.onManagedAccess(pid, base+off, 1, "req", "")
+			engine.Run()
+			if driver.uvm.hasPendingEvictions() {
+				driver.uvm.finalizeEviction()
+				engine.Run()
+			}
+		}
+
+		gomega.Expect(driver.uvm.stats.Evictions).To(gomega.BeNumerically(">", 0))
+		residentBytes := driver.uvm.stats.GPUResidentPages * driver.uvm.config.PageSize
+		gomega.Expect(residentBytes).To(gomega.BeNumerically("<=", 128*1024*1024))
 	})
 
 	ginkgo.It("should count repeated migrations under thrashing", func() {
