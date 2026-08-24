@@ -173,6 +173,9 @@ func (b Builder) Build(name string) *Driver {
 			log.Panic(err)
 		}
 		driver.uvm = NewUVMManager(*b.uvmConfig, b.uvmGPUMemorySize)
+		// sbin_codex (todo 16): the driver allocates migration destination
+		// frames from its registered GPU devices.
+		driver.uvm.SetFrameAllocator(driver)
 	}
 
 	return driver

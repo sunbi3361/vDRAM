@@ -72,6 +72,11 @@ type UVMManager struct {
 	rawPageFaultCount       uint64
 	coalescedPageFaultCount uint64
 	uniqueFaultServiceCount uint64
+
+	// sbin_codex (todo 16): the migration destination frame allocator (the
+	// driver), installed after construction. prepareFaultMigration allocates
+	// destination PFNs through it and rollbackFaultMigration returns them.
+	frames migrationFrameAllocator
 }
 
 // NewUVMManager constructs a UVM manager for an enabled UVM configuration.
@@ -666,65 +671,69 @@ func (m *UVMManager) missingDemandPages(tx *faultTransaction) []uint64 {
 
 // prepareFaultMigration marks the missing pages in flight and returns their
 // transfer descriptors (CPU source, HBM destination). // sbin_codex
-func (m *UVMManager) prepareFaultMigration(
-	tx *faultTransaction,
-	missing []uint64,
-) ([]faultMigrationPage, error) {
-	m.Lock()
-	defer m.Unlock()
-
-	reg := tx.reg
-	if reg == nil {
-		return nil, fmt.Errorf("uvm: fault migration without a registration")
-	}
-	pages := make([]faultMigrationPage, 0, len(missing))
-	for _, page := range missing {
-		blockIdx := (BlockForVA(reg.Base+page*basePageSize) -
-			BlockForVA(reg.Base)) / vablockSizeBytes
-		block := reg.VABlocks[blockIdx]
-		blockLocal := (reg.Base + page*basePageSize - block.StartVA) / basePageSize
-		p := &block.Pages[blockLocal]
-		if p.GPUPhysicalPage == 0 {
-			return nil, fmt.Errorf(
-				"uvm: fault migration page %d has no GPU physical page", page)
-		}
-		setMaskBit(reg.InFlightMask, page, true)
-		pages = append(pages, faultMigrationPage{
-			PageVA:  reg.Base + page*basePageSize,
-			CPUPage: p.CPUPhysicalPage,
-			GPUPage: p.GPUPhysicalPage,
-		})
-	}
-	return pages, nil
-}
+// sbin_codex (todo 16): superseded by the maximal-run implementation in
+// uvm_dma.go (reservation -> destination frame allocation -> run formation).
+// func (m *UVMManager) prepareFaultMigration(
+// 	tx *faultTransaction,
+// 	missing []uint64,
+// ) ([]faultMigrationPage, error) {
+// 	m.Lock()
+// 	defer m.Unlock()
+//
+// 	reg := tx.reg
+// 	if reg == nil {
+// 		return nil, fmt.Errorf("uvm: fault migration without a registration")
+// 	}
+// 	pages := make([]faultMigrationPage, 0, len(missing))
+// 	for _, page := range missing {
+// 		blockIdx := (BlockForVA(reg.Base+page*basePageSize) -
+// 			BlockForVA(reg.Base)) / vablockSizeBytes
+// 		block := reg.VABlocks[blockIdx]
+// 		blockLocal := (reg.Base + page*basePageSize - block.StartVA) / basePageSize
+// 		p := &block.Pages[blockLocal]
+// 		if p.GPUPhysicalPage == 0 {
+// 			return nil, fmt.Errorf(
+// 				"uvm: fault migration page %d has no GPU physical page", page)
+// 		}
+// 		setMaskBit(reg.InFlightMask, page, true)
+// 		pages = append(pages, faultMigrationPage{
+// 			PageVA:  reg.Base + page*basePageSize,
+// 			CPUPage: p.CPUPhysicalPage,
+// 			GPUPage: p.GPUPhysicalPage,
+// 		})
+// 	}
+// 	return pages, nil
+// }
 
 // commitFaultMigration publishes GPU residency for the migrated pages and
 // returns their (VA, HBM PA) pairs for the GPU PTE publication. // sbin_codex
-func (m *UVMManager) commitFaultMigration(
-	tx *faultTransaction,
-) ([]faultMigratedPage, error) {
-	m.Lock()
-	defer m.Unlock()
-
-	reg := tx.reg
-	if reg == nil {
-		return nil, fmt.Errorf("uvm: fault migration commit without a registration")
-	}
-	pages := make([]faultMigratedPage, 0, len(tx.missingPages))
-	for _, page := range tx.missingPages {
-		setMaskBit(reg.ResidentMask, page, true)
-		setMaskBit(reg.InFlightMask, page, false)
-		blockIdx := (BlockForVA(reg.Base+page*basePageSize) -
-			BlockForVA(reg.Base)) / vablockSizeBytes
-		block := reg.VABlocks[blockIdx]
-		blockLocal := (reg.Base + page*basePageSize - block.StartVA) / basePageSize
-		pages = append(pages, faultMigratedPage{
-			PageVA:  reg.Base + page*basePageSize,
-			GPUPage: block.Pages[blockLocal].GPUPhysicalPage,
-		})
-	}
-	return pages, nil
-}
+// sbin_codex (todo 16): superseded by the plan-based implementation in
+// uvm_dma.go (commits only after ALL runs succeed).
+// func (m *UVMManager) commitFaultMigration(
+// 	tx *faultTransaction,
+// ) ([]faultMigratedPage, error) {
+// 	m.Lock()
+// 	defer m.Unlock()
+//
+// 	reg := tx.reg
+// 	if reg == nil {
+// 		return nil, fmt.Errorf("uvm: fault migration commit without a registration")
+// 	}
+// 	pages := make([]faultMigratedPage, 0, len(tx.missingPages))
+// 	for _, page := range tx.missingPages {
+// 		setMaskBit(reg.ResidentMask, page, true)
+// 		setMaskBit(reg.InFlightMask, page, false)
+// 		blockIdx := (BlockForVA(reg.Base+page*basePageSize) -
+// 			BlockForVA(reg.Base)) / vablockSizeBytes
+// 		block := reg.VABlocks[blockIdx]
+// 		blockLocal := (reg.Base + page*basePageSize - block.StartVA) / basePageSize
+// 		pages = append(pages, faultMigratedPage{
+// 			PageVA:  reg.Base + page*basePageSize,
+// 			GPUPage: block.Pages[blockLocal].GPUPhysicalPage,
+// 		})
+// 	}
+// 	return pages, nil
+// }
 
 // beginFaultMigration reserves admission for the migrated bytes and
 // transitions the fault region to MIGRATING_TO_GPU. // sbin_codex
@@ -736,9 +745,13 @@ func (m *UVMManager) beginFaultMigration(
 	m.Lock()
 	defer m.Unlock()
 
-	if err := m.reservation.ReserveAdmission(bytes); err != nil {
-		return err
-	}
+	// sbin_codex (todo 16): the admission reservation now happens in
+	// prepareFaultMigration BEFORE any DMA is emitted (uvm-manager.md §17.1
+	// "Reserve required GPU pages before H2D"); beginFaultMigration only
+	// performs the FAULT_PENDING -> MIGRATING_TO_GPU transition.
+	// if err := m.reservation.ReserveAdmission(bytes); err != nil {
+	// 	return err
+	// }
 	reg := tx.reg
 	if reg == nil {
 		return fmt.Errorf("uvm: fault migration without a registration")

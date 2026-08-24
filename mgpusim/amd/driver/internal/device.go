@@ -67,6 +67,17 @@ func (d *Device) allocateMultiplePages(numPages int) (pAddrs []uint64) {
 	return pAddrs
 }
 
+// AllocatePages allocates n contiguous physical page frames from the device.
+// sbin_codex (todo 16): UVM migration destination frame allocation.
+func (d *Device) AllocatePages(n int) []uint64 {
+	return d.allocateMultiplePages(n)
+}
+
+// FreePage returns one physical page frame to the device. // sbin_codex (todo 16)
+func (d *Device) FreePage(pAddr uint64) {
+	d.MemState.addSinglePAddr(pAddr)
+}
+
 func (d *Device) mustHaveSpaceLeft() {
 	if d.MemState.noAvailablePAddrs() {
 		panic("out of memory")

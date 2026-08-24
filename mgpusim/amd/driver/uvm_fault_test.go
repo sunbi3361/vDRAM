@@ -537,24 +537,29 @@ func TestUVMFaultQueuedPartiallySatisfiedByTBN(t *testing.T) {
 	mw.Handle(txB.latencyEvent)
 	mw.Tick()
 
-	// Missing-page-only DMA: exactly the 9 non-resident pages 22..30.
+	// Missing-page-only DMA: exactly the 9 non-resident pages 22..30, emitted
+	// as ONE maximal run (contiguous CPU backing PAs AND contiguous
+	// pre-assigned destination frames -> one superior MemCopyH2DReq). // sbin_codex (todo 16)
 	reqs = drainRequests(d)
-	if len(reqs) != 9 {
-		t.Fatalf("B DMA reqs = %d, want 9 (missing pages only)", len(reqs))
+	if len(reqs) != 1 {
+		t.Fatalf("B DMA reqs = %d, want 1 (one maximal run of the 9 missing pages)",
+			len(reqs))
 	}
-	for i, req := range reqs {
-		h2d, ok := req.(*protocol.MemCopyH2DReq)
-		if !ok {
-			t.Fatalf("B req %d = %T, want MemCopyH2DReq", i, req)
-		}
-		page := uint64(22 + i)
-		wantPA := 0x2_0000_0000 + page*basePageSize
-		if h2d.DstAddress != wantPA {
-			t.Errorf("B DMA %d dst = %#x, want %#x (page %d)", i, h2d.DstAddress, wantPA, page)
-		}
-		if !bytes.Equal(h2d.SrcBuffer, cpuData[page-15]) {
-			t.Errorf("B DMA %d payload mismatch for page %d", i, page)
-		}
+	h2d, ok := reqs[0].(*protocol.MemCopyH2DReq)
+	if !ok {
+		t.Fatalf("B req = %T, want MemCopyH2DReq", reqs[0])
+	}
+	wantPA := uint64(0x2_0000_0000) + 22*basePageSize
+	if h2d.DstAddress != wantPA {
+		t.Errorf("B DMA dst = %#x, want %#x (first page 22)", h2d.DstAddress, wantPA)
+	}
+	wantData := make([]byte, 0, 9*basePageSize)
+	for page := uint64(22); page <= 30; page++ {
+		wantData = append(wantData, cpuData[page-15]...)
+	}
+	if !bytes.Equal(h2d.SrcBuffer, wantData) {
+		t.Errorf("B DMA payload mismatch: %d bytes, want the 9 pages 22..30",
+			len(h2d.SrcBuffer))
 	}
 	for page := uint64(15); page <= 21; page++ {
 		if maskBit(reg.InFlightMask, page) {
@@ -724,8 +729,13 @@ func TestUVMFaultCopyFaultOwnershipRace(t *testing.T) {
 		t.Errorf("owner = %v/%d, want FAULT/%d", typ, owner, txFault.Ticket)
 	}
 	reqs = drainRequests(d)
-	if len(reqs) != 15 {
-		t.Fatalf("fault DMA reqs = %d, want 15 (region 0 demand)", len(reqs))
+	if len(reqs) != 1 {
+		t.Fatalf("fault DMA reqs = %d, want 1 (one maximal run of the 15 demand pages)",
+			len(reqs))
+	}
+	if h2d, ok := reqs[0].(*protocol.MemCopyH2DReq); !ok ||
+		h2d.DstAddress != 0x2_0000_0000 || len(h2d.SrcBuffer) != 15*basePageSize {
+		t.Fatalf("fault DMA req = %+v, want one 60 KB run at 0x2_0000_0000", reqs[0])
 	}
 
 	// Scenario B: an earlier active fault transition completes before a

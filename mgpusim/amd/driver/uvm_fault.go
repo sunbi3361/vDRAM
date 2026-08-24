@@ -46,11 +46,14 @@ type faultTransaction struct {
 	latencyEvent *faultLatencyEvent
 
 	missingPages []uint64 // pages this transaction migrates
-	dmaReqs      []sim.Msg
-	pendingDMA   int
-	tlbReqs      []*protocol.UVMTLBInvalidateReq
-	pendingTLB   int
-	replayReq    *protocol.UVMFaultReplayReq
+	// sbin_codex (todo 16): the maximal-run migration plan of this
+	// transaction (reservation + destination frames + runs).
+	plan       *migrationPlan
+	dmaReqs    []sim.Msg
+	pendingDMA int
+	tlbReqs    []*protocol.UVMTLBInvalidateReq
+	pendingTLB int
+	replayReq  *protocol.UVMFaultReplayReq
 }
 
 // faultMigrationPage is one page a fault service transfers. // sbin_codex
@@ -84,6 +87,11 @@ type faultServiceMiddleware struct {
 	queue               []*faultTransaction
 	active              *faultTransaction
 	latencyChargedCount int
+
+	// sbin_codex (todo 16): test hook — when > 0, the next startMigration
+	// emits only failAfterRuns runs' requests and then rolls the migration
+	// back (the injected-failure rollback contract).
+	failAfterRuns int
 }
 
 // intake consumes one raw PageFaultReq: it coalesces into the region's live
@@ -176,18 +184,24 @@ func (m *faultServiceMiddleware) driveActive() bool {
 		if !tx.latencyDone {
 			return false
 		}
-		if !m.driver.uvm.AcquireOwnership(tx.Key, OwnershipFault, tx.Ticket) {
-			tx.phase = faultPhaseClaiming
-			return false
+		// sbin_codex (todo 16): a claimed transaction (e.g. after a rollback
+		// retry) does not re-acquire its own ownership slot.
+		if !tx.claimed {
+			if !m.driver.uvm.AcquireOwnership(tx.Key, OwnershipFault, tx.Ticket) {
+				tx.phase = faultPhaseClaiming
+				return false
+			}
+			tx.claimed = true
 		}
-		tx.claimed = true
 		m.service(tx)
 		return true
 	case faultPhaseClaiming:
-		if !m.driver.uvm.AcquireOwnership(tx.Key, OwnershipFault, tx.Ticket) {
-			return false
+		if !tx.claimed {
+			if !m.driver.uvm.AcquireOwnership(tx.Key, OwnershipFault, tx.Ticket) {
+				return false
+			}
+			tx.claimed = true
 		}
-		tx.claimed = true
 		m.service(tx)
 		return true
 	}
@@ -206,35 +220,57 @@ func (m *faultServiceMiddleware) service(tx *faultTransaction) {
 	m.startMigration(tx, missing)
 }
 
-// startMigration transfers only the missing pages: per-page H2D DMA from the
-// CPU backing to the assigned HBM frames, an admission reservation for the
-// migrated bytes, and the FAULT_PENDING -> MIGRATING_TO_GPU transition. // sbin_codex
+// startMigration transfers only the missing pages: the manager reserves the
+// admission, allocates the destination GPU frames, marks the pages in flight,
+// and forms the maximal runs; the service emits ONE MemCopyH2DReq per run
+// (uvm-manager.md §23.1.2). // sbin_codex
 func (m *faultServiceMiddleware) startMigration(
 	tx *faultTransaction,
 	missing []uint64,
 ) {
-	pages, err := m.driver.uvm.prepareFaultMigration(tx, missing)
+	plan, err := m.driver.uvm.prepareFaultMigration(tx, missing)
 	if err != nil {
 		panic(err)
 	}
 	tx.missingPages = missing
+	tx.plan = plan
 	tx.phase = faultPhaseMigrating
-	for _, p := range pages {
-		data, err := m.driver.globalStorage.Read(p.CPUPage, basePageSize)
+	emitted := 0
+	for _, run := range plan.Runs {
+		// sbin_codex (todo 16): test hook — an injected failure after the
+		// first runs rolls the migration back (rollback contract).
+		if m.failAfterRuns > 0 && emitted >= m.failAfterRuns {
+			m.failAfterRuns = 0
+			m.rollbackMigration(tx)
+			return
+		}
+		data, err := m.driver.globalStorage.Read(run.SrcStart, run.Bytes)
 		if err != nil {
 			panic(err)
 		}
 		req := protocol.NewMemCopyH2DReq(
-			m.driver.gpuPort, m.driver.GPUs[tx.GPU-1], data, p.GPUPage)
+			m.driver.gpuPort, m.driver.GPUs[tx.GPU-1], data, run.DstStart)
 		tx.dmaReqs = append(tx.dmaReqs, req)
 		tx.pendingDMA++
 		m.driver.requestsToSend = append(m.driver.requestsToSend, req)
+		emitted++
 	}
 	if err := m.driver.uvm.beginFaultMigration(
-		tx, uint64(len(missing))*basePageSize,
-		m.driver.Engine.CurrentTime()); err != nil {
+		tx, plan.TotalBytes, m.driver.Engine.CurrentTime()); err != nil {
 		panic(err)
 	}
+}
+
+// rollbackMigration releases the reservation and frames of a failed migration
+// exactly once and clears the in-flight marks; the transaction retries its
+// service on the next tick. // sbin_codex
+func (m *faultServiceMiddleware) rollbackMigration(tx *faultTransaction) {
+	m.driver.uvm.rollbackFaultMigration(tx, tx.plan)
+	tx.plan = nil
+	tx.dmaReqs = nil
+	tx.pendingDMA = 0
+	tx.phase = faultPhaseLatency
+	tx.latencyDone = true
 }
 
 // completeMigration publishes residency and GPU PTEs for the migrated pages,
