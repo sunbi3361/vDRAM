@@ -8,6 +8,8 @@ import (
 	"github.com/sarchlab/akita/v4/sim"
 	"github.com/sarchlab/mgpusim/v4/amd/driver/internal"
 	"github.com/sarchlab/mgpusim/v4/amd/insts"
+	// sbin_codex (todo 21): the UVM coordinator (scheduling + trace).
+	"github.com/sarchlab/mgpusim/v4/amd/timing/uvm"
 )
 
 // A Builder can build a driver.
@@ -138,6 +140,35 @@ func (b Builder) Build(name string) *Driver {
 		// migration service so each consumes only its own responses.
 		driver.uvmEviction = &evictionMiddleware{driver: driver}
 		driver.middlewares = append(driver.middlewares, driver.uvmEviction)
+
+		// sbin_codex (todo 21): the UVM coordinator — the one scheduling +
+		// trace authority behind the timing-neutral handlers. Both modes
+		// enqueue delivered roots and use one secondary-event serialized
+		// drain; ideal zeroes the UVM control latency while preserving every
+		// functional event/counter.
+		mode := uvm.ModeNormal
+		if b.uvmConfig.Ideal {
+			mode = uvm.ModeIdeal
+		}
+		driver.uvmCoordinator = uvm.NewCoordinator(mode)
+		// sbin_codex: the timing-neutral handlers behind the coordinator —
+		// the middleware start adapters are idempotent (the middlewares
+		// drive the transactions; the coordinator records the trace).
+		driver.uvmCoordinator.RegisterHandler("fault-service",
+			uvm.HandlerFunc(func(root *uvm.Root) ([]*uvm.Root, string, string, bool) {
+				driver.uvmFault.startNext()
+				return nil, "", "", false
+			}))
+		driver.uvmCoordinator.RegisterHandler("access-counter-migration",
+			uvm.HandlerFunc(func(root *uvm.Root) ([]*uvm.Root, string, string, bool) {
+				driver.uvmMigration.driveActive()
+				return nil, "", "", false
+			}))
+		driver.uvmCoordinator.RegisterHandler("reactive-eviction",
+			uvm.HandlerFunc(func(root *uvm.Root) ([]*uvm.Root, string, string, bool) {
+				driver.uvmEviction.driveActive()
+				return nil, "", "", false
+			}))
 	}
 
 	if b.useMagicMemoryCopy {

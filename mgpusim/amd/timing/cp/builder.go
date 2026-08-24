@@ -134,6 +134,9 @@ func (b Builder) Build(name string) *CommandProcessor {
 	cp.uvmTLBInvalidateFanout = make(map[string]string)
 	cp.uvmCacheFlushFanout = make(map[string]string)
 	cp.uvmReplayRangeIDToDriverReqID = make(map[string]string)
+	// sbin_codex (todo 21): the per-source local sequence counters of the
+	// coordinator identity.
+	cp.uvmSourceSequences = make(map[string]uint64)
 
 	b.buildDispatchers(cp)
 

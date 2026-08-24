@@ -4,6 +4,8 @@ import (
 	"github.com/sarchlab/akita/v4/mem/vm"
 	"github.com/sarchlab/akita/v4/sim"
 	"github.com/sarchlab/mgpusim/v4/amd/protocol"
+	// sbin_codex (todo 21): the UVM coordinator identity types.
+	"github.com/sarchlab/mgpusim/v4/amd/timing/uvm"
 )
 
 // sbin_codex: Access-Counter and remote-write migration transactions (plan
@@ -64,6 +66,11 @@ type migrationTransaction struct {
 	Trigger    migrationTrigger
 	reg        *ManagedAllocationRegistration // the owning registration (stable)
 
+	// sbin_codex (todo 21): the coordinator identity of the transaction.
+	Stamp       uvm.SameModeStamp
+	SemanticKey uvm.SemanticRootKey
+	root        *uvm.Root
+
 	DemandPages []uint64 // allocation page indices of the 64 KB region
 	ReplayToken vm.ReplayToken
 
@@ -93,12 +100,17 @@ type migrationMiddleware struct {
 }
 
 // intakeNotification consumes one threshold AccessCounterNotification from
-// the CP and turns it into a migration transaction. // sbin_codex
+// the CP and turns it into a migration transaction, stamped with the
+// coordinator identity from the routed envelope (todo 21). // sbin_codex
 func (m *migrationMiddleware) intakeNotification(
 	notif *protocol.AccessCounterNotification,
 ) bool {
-	return m.intake(notif.PID, notif.GPU, notif.VAddr,
+	tx := m.intake(notif.PID, notif.GPU, notif.VAddr,
 		migrationTriggerAccessCounter)
+	if tx != nil {
+		m.enqueueMigrationRoot(tx, notif)
+	}
+	return true
 }
 
 // intakeRemoteWrite consumes a remote-write migration trigger (the GPU-side
@@ -109,32 +121,33 @@ func (m *migrationMiddleware) intakeRemoteWrite(
 	gpu int,
 	vaddr uint64,
 ) bool {
-	return m.intake(pid, gpu, vaddr, migrationTriggerRemoteWrite)
+	return m.intake(pid, gpu, vaddr, migrationTriggerRemoteWrite) != nil
 }
 
 // intake creates the region's migration transaction; a suppressed trigger
 // (region already being brought to the GPU, or a transaction already in
-// flight) is consumed without creating anything (§16). // sbin_codex
+// flight) is consumed without creating anything (§16). It returns the
+// transaction (nil when suppressed). // sbin_codex
 func (m *migrationMiddleware) intake(
 	pid vm.PID,
 	gpu int,
 	vaddr uint64,
 	trigger migrationTrigger,
-) bool {
+) *migrationTransaction {
 	tx, err := m.driver.uvm.intakeMigration(
 		pid, gpu, vaddr, trigger, m.driver.Engine.CurrentTime())
 	if err != nil {
 		panic(err)
 	}
 	if tx == nil {
-		return true // suppressed / coalesced
+		return nil // suppressed / coalesced
 	}
 	if m.active == nil {
 		m.active = tx
 	} else {
 		m.pending = append(m.pending, tx)
 	}
-	return true
+	return tx
 }
 
 // ProcessCommand reports that the migration service handles no commands.
@@ -324,6 +337,7 @@ func (m *migrationMiddleware) startUnblock(tx *migrationTransaction) {
 // coalescing entry is removed and the ticket queue is woken. // sbin_codex
 func (m *migrationMiddleware) finish(tx *migrationTransaction) {
 	m.driver.uvm.completeMigration(tx)
+	m.reportMigrationRoot(tx)
 	tx.phase = migrationPhaseDone
 	m.active = nil
 }

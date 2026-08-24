@@ -104,6 +104,10 @@ func (m *cpMiddleware) processLaunchKernelReq(
 		return false
 	}
 
+	// sbin_codex (todo 21): the kernel-launch ordinal of the coordinator
+	// identity advances per dispatched kernel.
+	m.uvmKernelLaunchOrdinal++
+
 	d := m.findAvailableDispatcher()
 
 	if d == nil {

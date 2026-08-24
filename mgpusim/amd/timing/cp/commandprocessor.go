@@ -46,6 +46,15 @@ type CommandProcessor struct {
 	// gate.
 	UVMGateIDs []uint64
 
+	// sbin_codex (todo 21): the kernel-launch ordinal counter and the
+	// per-source local sequence counters of the UVM coordinator identity.
+	// The routing middleware stamps every generated root
+	// (kernelLaunchOrdinal, sourceBuildOrdinal, sourceLocalSequence) and the
+	// semantic key components; sourceLocalSequence is a local tie-break,
+	// excluded from cross-mode identity.
+	uvmKernelLaunchOrdinal uint64
+	uvmSourceSequences     map[string]uint64
+
 	// sbin_codex: GMMUControl is the GMMU control port remote that the UVM
 	// middleware targets for block/unblock commands (todo 12 of
 	// mgpusim-uvm-manager). The topology builder registers it alongside the

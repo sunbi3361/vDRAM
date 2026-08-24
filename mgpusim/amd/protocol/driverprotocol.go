@@ -540,6 +540,17 @@ type PageFaultReq struct {
 	AccessType        vm.AccessKind
 	SourceCU          int
 	FaultPendingToken vm.FaultPendingToken
+
+	// sbin_codex (todo 21): the same-mode scheduling stamp and the semantic
+	// key components of the generated root, stamped by the CP routing
+	// middleware (uvmMiddleware) and consumed by the driver coordinator.
+	// sourceLocalSequence is a local tie-break, excluded from cross-mode
+	// identity.
+	KernelLaunchOrdinal     uint64
+	SourceBuildOrdinal      uint64
+	SourceLocalSequence     uint64
+	SourceComponentStableID string
+	ProgramCommandOrdinal   uint64
 }
 
 // Meta returns the meta data associated with the message.
@@ -585,6 +596,12 @@ type PageFaultReqBuilder struct {
 	accessType         vm.AccessKind
 	sourceCU           int
 	faultPendingToken  vm.FaultPendingToken
+	// sbin_codex (todo 21): same-mode stamp + semantic key components.
+	kernelLaunchOrdinal     uint64
+	sourceBuildOrdinal      uint64
+	sourceLocalSequence     uint64
+	sourceComponentStableID string
+	programCommandOrdinal   uint64
 }
 
 // WithSrc sets the source of the request to build.
@@ -637,6 +654,36 @@ func (b PageFaultReqBuilder) WithFaultPendingToken(
 	return b
 }
 
+// WithKernelLaunchOrdinal sets the kernel-launch ordinal of the stamp.
+func (b PageFaultReqBuilder) WithKernelLaunchOrdinal(n uint64) PageFaultReqBuilder {
+	b.kernelLaunchOrdinal = n
+	return b
+}
+
+// WithSourceBuildOrdinal sets the source build ordinal of the stamp.
+func (b PageFaultReqBuilder) WithSourceBuildOrdinal(n uint64) PageFaultReqBuilder {
+	b.sourceBuildOrdinal = n
+	return b
+}
+
+// WithSourceLocalSequence sets the source-local sequence of the stamp.
+func (b PageFaultReqBuilder) WithSourceLocalSequence(n uint64) PageFaultReqBuilder {
+	b.sourceLocalSequence = n
+	return b
+}
+
+// WithSourceComponentStableID sets the stable ID of the generating source.
+func (b PageFaultReqBuilder) WithSourceComponentStableID(id string) PageFaultReqBuilder {
+	b.sourceComponentStableID = id
+	return b
+}
+
+// WithProgramCommandOrdinal sets the program-command ordinal of the root.
+func (b PageFaultReqBuilder) WithProgramCommandOrdinal(n uint64) PageFaultReqBuilder {
+	b.programCommandOrdinal = n
+	return b
+}
+
 // Build creates a new PageFaultReq
 func (b PageFaultReqBuilder) Build() *PageFaultReq {
 	r := &PageFaultReq{}
@@ -649,6 +696,11 @@ func (b PageFaultReqBuilder) Build() *PageFaultReq {
 	r.AccessType = b.accessType
 	r.SourceCU = b.sourceCU
 	r.FaultPendingToken = b.faultPendingToken
+	r.KernelLaunchOrdinal = b.kernelLaunchOrdinal
+	r.SourceBuildOrdinal = b.sourceBuildOrdinal
+	r.SourceLocalSequence = b.sourceLocalSequence
+	r.SourceComponentStableID = b.sourceComponentStableID
+	r.ProgramCommandOrdinal = b.programCommandOrdinal
 	return r
 }
 
@@ -742,6 +794,15 @@ type AccessCounterNotification struct {
 	VAddr       uint64
 	AccessKind  vm.AccessKind
 	AccessCount uint64
+
+	// sbin_codex (todo 21): the same-mode scheduling stamp and the semantic
+	// key components of the generated root, stamped by the CP routing
+	// middleware (uvmMiddleware) and consumed by the driver coordinator.
+	KernelLaunchOrdinal     uint64
+	SourceBuildOrdinal      uint64
+	SourceLocalSequence     uint64
+	SourceComponentStableID string
+	ProgramCommandOrdinal   uint64
 }
 
 // Meta returns the meta data associated with the message.
@@ -774,6 +835,12 @@ type AccessCounterNotificationBuilder struct {
 	vAddr        uint64
 	accessKind   vm.AccessKind
 	accessCount  uint64
+	// sbin_codex (todo 21): same-mode stamp + semantic key components.
+	kernelLaunchOrdinal     uint64
+	sourceBuildOrdinal      uint64
+	sourceLocalSequence     uint64
+	sourceComponentStableID string
+	programCommandOrdinal   uint64
 }
 
 // WithSrc sets the source of the notification to build.
@@ -822,6 +889,36 @@ func (b AccessCounterNotificationBuilder) WithAccessCount(
 	return b
 }
 
+// WithKernelLaunchOrdinal sets the kernel-launch ordinal of the stamp.
+func (b AccessCounterNotificationBuilder) WithKernelLaunchOrdinal(n uint64) AccessCounterNotificationBuilder {
+	b.kernelLaunchOrdinal = n
+	return b
+}
+
+// WithSourceBuildOrdinal sets the source build ordinal of the stamp.
+func (b AccessCounterNotificationBuilder) WithSourceBuildOrdinal(n uint64) AccessCounterNotificationBuilder {
+	b.sourceBuildOrdinal = n
+	return b
+}
+
+// WithSourceLocalSequence sets the source-local sequence of the stamp.
+func (b AccessCounterNotificationBuilder) WithSourceLocalSequence(n uint64) AccessCounterNotificationBuilder {
+	b.sourceLocalSequence = n
+	return b
+}
+
+// WithSourceComponentStableID sets the stable ID of the generating source.
+func (b AccessCounterNotificationBuilder) WithSourceComponentStableID(id string) AccessCounterNotificationBuilder {
+	b.sourceComponentStableID = id
+	return b
+}
+
+// WithProgramCommandOrdinal sets the program-command ordinal of the root.
+func (b AccessCounterNotificationBuilder) WithProgramCommandOrdinal(n uint64) AccessCounterNotificationBuilder {
+	b.programCommandOrdinal = n
+	return b
+}
+
 // Build creates a new AccessCounterNotification
 func (b AccessCounterNotificationBuilder) Build() *AccessCounterNotification {
 	r := &AccessCounterNotification{}
@@ -833,6 +930,11 @@ func (b AccessCounterNotificationBuilder) Build() *AccessCounterNotification {
 	r.VAddr = b.vAddr
 	r.AccessKind = b.accessKind
 	r.AccessCount = b.accessCount
+	r.KernelLaunchOrdinal = b.kernelLaunchOrdinal
+	r.SourceBuildOrdinal = b.sourceBuildOrdinal
+	r.SourceLocalSequence = b.sourceLocalSequence
+	r.SourceComponentStableID = b.sourceComponentStableID
+	r.ProgramCommandOrdinal = b.programCommandOrdinal
 	return r
 }
 

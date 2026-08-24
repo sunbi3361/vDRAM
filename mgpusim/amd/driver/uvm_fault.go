@@ -6,6 +6,8 @@ import (
 	"github.com/sarchlab/akita/v4/mem/vm"
 	"github.com/sarchlab/akita/v4/sim"
 	"github.com/sarchlab/mgpusim/v4/amd/protocol"
+	// sbin_codex (todo 21): the UVM coordinator identity types.
+	"github.com/sarchlab/mgpusim/v4/amd/timing/uvm"
 )
 
 // sbin_codex: FIFO fault service, 64 KB coalescing, and scheduled software
@@ -37,6 +39,13 @@ type faultTransaction struct {
 	DemandPages []uint64 // allocation page indices of the 64 KB demand region
 	Waiters     []*faultWaiter
 	ReplayToken vm.ReplayToken
+
+	// sbin_codex (todo 21): the coordinator identity of the transaction —
+	// the same-mode stamp and the semantic root key (from the routed
+	// envelope), and the enqueued coordinator root.
+	Stamp       uvm.SameModeStamp
+	SemanticKey uvm.SemanticRootKey
+	root        *uvm.Root
 
 	reg *ManagedAllocationRegistration // the owning registration (stable)
 
@@ -101,7 +110,9 @@ type faultServiceMiddleware struct {
 }
 
 // intake consumes one raw PageFaultReq: it coalesces into the region's live
-// transaction or creates and enqueues the region's first transaction. // sbin_codex
+// transaction or creates and enqueues the region's first transaction. A new
+// transaction is stamped with the coordinator identity from the routed
+// envelope and enqueued as a delivered root (todo 21). // sbin_codex
 func (m *faultServiceMiddleware) intake(req *protocol.PageFaultReq) bool {
 	tx, isNew, err := m.driver.uvm.intakePageFault(req.PID, req.GPU, req.VAddr)
 	if err != nil {
@@ -113,6 +124,7 @@ func (m *faultServiceMiddleware) intake(req *protocol.PageFaultReq) bool {
 	})
 	if isNew {
 		m.queue = append(m.queue, tx)
+		m.enqueueFaultRoot(tx, req)
 	}
 	return true
 }
@@ -389,10 +401,11 @@ func (m *faultServiceMiddleware) startReplay(tx *faultTransaction) {
 }
 
 // completeFault retires the transaction after the replay ack: the coalescing
-// entry and ownership slot are released and the next FIFO transaction may
-// start. // sbin_codex
+// entry and ownership slot are released, the completion is reported to the
+// coordinator, and the next FIFO transaction may start. // sbin_codex
 func (m *faultServiceMiddleware) completeFault(tx *faultTransaction) {
 	m.driver.uvm.completeFault(tx)
+	m.reportFaultRoot(tx)
 	tx.phase = faultPhaseDone
 	m.active = nil
 }

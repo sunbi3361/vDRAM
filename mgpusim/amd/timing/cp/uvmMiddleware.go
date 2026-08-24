@@ -186,12 +186,19 @@ func (m *uvmMiddleware) processRspFromAccessCounter() bool {
 
 // processAccessCounterNotification routes a GPU-wide AccessCounter threshold
 // notification to the UVM driver, mirroring the GMMU fault-notification path
-// (uvm-manager.md §16: GPU Access Counter -> CP -> PCIe -> UVMDriver). // sbin_codex
+// (uvm-manager.md §16: GPU Access Counter -> CP -> PCIe -> UVMDriver). The
+// routed root is stamped with the same-mode stamp and the semantic key
+// components (todo 21). // sbin_codex
 func (m *uvmMiddleware) processAccessCounterNotification(
 	notif *protocol.AccessCounterNotification,
 ) bool {
 	notif.Src = m.ToDriver.AsRemote()
 	notif.Dst = m.Driver.AsRemote()
+	notif.KernelLaunchOrdinal = m.uvmKernelLaunchOrdinal
+	notif.SourceBuildOrdinal = 0
+	notif.SourceLocalSequence = m.nextSourceSequence("accesscounter")
+	notif.SourceComponentStableID = "accesscounter"
+	notif.ProgramCommandOrdinal = m.uvmKernelLaunchOrdinal
 	if err := m.ToDriver.Send(notif); err != nil {
 		return false
 	}
@@ -361,7 +368,10 @@ func (m *uvmMiddleware) completeUVMBlock(state *uvmBlockState) {
 }
 
 // processFaultNotification translates a GMMU-issued typed fault into the
-// driver PageFaultReq envelope and routes it to the UVM driver. // sbin_codex
+// driver PageFaultReq envelope and routes it to the UVM driver. The routed
+// root is stamped (kernelLaunchOrdinal, sourceBuildOrdinal,
+// sourceLocalSequence) with the semantic key components so the driver
+// coordinator can establish the cross-mode identity (todo 21). // sbin_codex
 func (m *uvmMiddleware) processFaultNotification(notif *vm.FaultNotification) bool {
 	req := protocol.PageFaultReqBuilder{}.
 		WithSrc(m.ToDriver.AsRemote()).
@@ -371,6 +381,11 @@ func (m *uvmMiddleware) processFaultNotification(notif *vm.FaultNotification) bo
 		WithVAddr(notif.VAddr).
 		WithAccessType(notif.AccessKind).
 		WithFaultPendingToken(notif.FaultPendingToken).
+		WithKernelLaunchOrdinal(m.uvmKernelLaunchOrdinal).
+		WithSourceBuildOrdinal(0).
+		WithSourceLocalSequence(m.nextSourceSequence("gmmu")).
+		WithSourceComponentStableID("gmmu").
+		WithProgramCommandOrdinal(m.uvmKernelLaunchOrdinal).
 		Build()
 
 	if err := m.ToDriver.Send(req); err != nil {
@@ -381,6 +396,13 @@ func (m *uvmMiddleware) processFaultNotification(notif *vm.FaultNotification) bo
 	tracing.TraceReqReceive(notif, m.CommandProcessor)
 
 	return true
+}
+
+// nextSourceSequence returns the next local sequence of a generating source
+// (the local tie-break of the same-mode stamp).
+func (m *uvmMiddleware) nextSourceSequence(source string) uint64 {
+	m.uvmSourceSequences[source]++
+	return m.uvmSourceSequences[source]
 }
 
 // processFaultReplayReq translates the driver replay command into the

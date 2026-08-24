@@ -7,6 +7,8 @@ import (
 	"github.com/sarchlab/akita/v4/mem/vm"
 	"github.com/sarchlab/akita/v4/sim"
 	"github.com/sarchlab/mgpusim/v4/amd/protocol"
+	// sbin_codex (todo 21): the UVM coordinator identity types.
+	"github.com/sarchlab/mgpusim/v4/amd/timing/uvm"
 )
 
 // sbin_codex: reactive 64 KB eviction with strict cache/PTE/TLB/DMA ordering
@@ -64,6 +66,11 @@ type evictionTransaction struct {
 	Key        copyRegionKey
 	reg        *ManagedAllocationRegistration // the owning registration (stable)
 
+	// sbin_codex (todo 21): the coordinator identity of the transaction.
+	Stamp       uvm.SameModeStamp
+	SemanticKey uvm.SemanticRootKey
+	root        *uvm.Root
+
 	ReplayToken vm.ReplayToken
 
 	phase   evictionStage
@@ -111,14 +118,15 @@ type evictionMiddleware struct {
 }
 
 // intake selects the deterministic LRU victim of pid on gpu and starts its
-// eviction transaction. An error (e.g. no eligible victim) creates nothing.
-// // sbin_codex
+// eviction transaction, stamped with the coordinator identity (todo 21). An
+// error (e.g. no eligible victim) creates nothing. // sbin_codex
 func (m *evictionMiddleware) intake(pid vm.PID, gpu int) error {
 	tx, err := m.driver.uvm.intakeEviction(pid, gpu)
 	if err != nil {
 		return err
 	}
 	m.queue(tx)
+	m.enqueueEvictionRoot(tx)
 	return nil
 }
 
@@ -127,6 +135,7 @@ func (m *evictionMiddleware) intake(pid vm.PID, gpu int) error {
 // eviction transaction machinery as a reactive eviction. // sbin_codex
 func (m *evictionMiddleware) intakePreEviction(tx *evictionTransaction) {
 	m.queue(tx)
+	m.enqueuePreEvictionRoot(tx)
 }
 
 // queue appends a transaction to the active/pending set; there is no fixed
@@ -411,10 +420,12 @@ func (m *evictionMiddleware) startUnblock(tx *evictionTransaction) {
 	m.driver.requestsToSend = append(m.driver.requestsToSend, req)
 }
 
-// finish retires the transaction after the unblock completion: the coalescing
-// entry is removed and the ticket queue is woken. // sbin_codex
+// finish retires the transaction after the unblock completion: the
+// coalescing entry is removed, the completion is reported to the
+// coordinator, and the ticket queue is woken. // sbin_codex
 func (m *evictionMiddleware) finish(tx *evictionTransaction) {
 	m.driver.uvm.completeEviction(tx)
+	m.reportEvictionRoot(tx)
 	tx.phase = evictionStageDone
 	m.active = nil
 }

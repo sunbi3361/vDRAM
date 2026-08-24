@@ -16,6 +16,8 @@ import (
 	"github.com/sarchlab/mgpusim/v4/amd/kernels"
 	"github.com/sarchlab/mgpusim/v4/amd/protocol"
 	"github.com/sarchlab/mgpusim/v4/amd/timing/cp" // sbin_codex: kernel-launch AccessCounter reset barrier (todo 11).
+	// sbin_codex (todo 21): the UVM coordinator (scheduling + trace).
+	"github.com/sarchlab/mgpusim/v4/amd/timing/uvm"
 	"github.com/tebeka/atexit"
 )
 
@@ -78,6 +80,22 @@ type Driver struct {
 	// LRU victims and driving the ordered 64 KB eviction transaction (nil when
 	// disabled).
 	uvmEviction *evictionMiddleware
+
+	// sbin_codex (todo 21): the UVM coordinator — the one scheduling + trace
+	// authority behind the timing-neutral handlers. Both modes enqueue
+	// delivered roots and use one secondary-event serialized drain; the
+	// coordinator records the causal trace DAG and the semantic root
+	// identity (nil when UVM is disabled).
+	uvmCoordinator *uvm.Coordinator
+
+	// sbin_codex (todo 21): the driver-side kernel-launch ordinal of the
+	// coordinator identity (the CP stamps the same ordinal into the routed
+	// roots).
+	uvmKernelLaunchOrdinal uint64
+
+	// sbin_codex (todo 21): the driver-local sequence of the
+	// driver-generated roots (the local tie-break of the same-mode stamp).
+	uvmDriverSequence uint64
 
 	codeObjGPUAddrs map[*insts.KernelCodeObject]Ptr
 }
@@ -192,6 +210,11 @@ func (d *Driver) Tick() bool {
 	for _, mw := range d.middlewares {
 		madeProgress = mw.Tick() || madeProgress
 	}
+
+	// sbin_codex (todo 21): the one secondary-event serialized drain of the
+	// UVM coordinator — it records the completed roots' trace nodes in the
+	// mode's order after the primary middleware work of this tick.
+	madeProgress = d.drainUVMCoordinator() || madeProgress
 
 	madeProgress = d.processReturnReq() || madeProgress
 	madeProgress = d.processNewCommand() || madeProgress
@@ -377,6 +400,10 @@ func (d *Driver) processLaunchKernelCommand(
 	cmd *LaunchKernelCommand,
 	queue *CommandQueue,
 ) bool {
+	// sbin_codex (todo 21): the driver-side kernel-launch ordinal of the
+	// coordinator identity advances per launched kernel.
+	d.uvmKernelLaunchOrdinal++
+
 	// sbin_codex: UVM kernel-launch AccessCounter reset (todo 11 of
 	// mgpusim-uvm-manager, uvm-manager.md §14.2). The acknowledged reset is
 	// queued before the launch request so the CP raises the kernel-dispatch
