@@ -398,6 +398,15 @@ func (b *Builder) addTLB(port sim.Port) { // sbin_codex
 	b.internalConn.PlugIn(port)
 }
 
+// sbin_codex: registerGMMUTLBEndpoints registers the topology-present TLB
+// endpoint set with the GMMU invalidation coordinator (plan todo 14 of
+// mgpusim-uvm-manager, uvm-manager.md §21.1). The set is exactly the CP's
+// TLB endpoints: baseline = private L1V/L1S/L1I + shared L2; virtual-caching
+// = private L1I + shared L2 only.
+func (b *Builder) registerGMMUTLBEndpoints() { // sbin_codex
+	b.gmmu.SetTLBEndpoints(b.cp.TLBs)
+}
+
 func (b *Builder) addPreCacheTranslator(port sim.Port) { // sbin_codex
 	b.cp.PreCacheTranslators.Ports = append(b.cp.PreCacheTranslators.Ports, port)
 	b.internalConn.PlugIn(port)

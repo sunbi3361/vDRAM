@@ -33,6 +33,8 @@ func (m *ctrlMiddleware) handleIncomingCommands() bool {
 		madeProgress = m.handleTLBFlush(msg) || madeProgress
 	case *RestartReq:
 		madeProgress = m.handleTLBRestart(msg) || madeProgress
+	case *UVMTLBInvalidateReq: // sbin_codex: UVM range invalidation (todo 14).
+		madeProgress = m.handleTLBInvalidate(msg) || madeProgress
 	default:
 		panic("Unhandled message")
 	}

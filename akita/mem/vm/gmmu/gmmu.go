@@ -129,6 +129,16 @@ type replayCommand struct {
 	inFlight int
 }
 
+// sbin_codex: a tlbInvalidateCommand tracks a range TLB invalidation the GMMU
+// coordinates: the original request for the completion response and the
+// broadcast request IDs still awaiting acknowledgements (plan todo 14 of
+// mgpusim-uvm-manager, uvm-manager.md §21.1).
+type tlbInvalidateCommand struct {
+	reqID   string
+	src     sim.RemotePort
+	pending map[string]bool
+}
+
 // sbin_codex: the GMMU is the single translation gate of the GPU. The CP
 // pre-registers this gate ID for block/unblock commands (todo 8 of
 // mgpusim-uvm-manager).
@@ -176,6 +186,14 @@ type Comp struct {
 	activeBlocks       []*blockCommand
 	activeReplay       *replayCommand
 	pendingReplays     []*vm.ReplayRange
+
+	// sbin_codex: UVM range TLB invalidation coordination (plan todo 14 of
+	// mgpusim-uvm-manager). The GMMU is the invalidation coordinator: it
+	// broadcasts the request to every topology-present TLB endpoint, collects
+	// the acknowledgements, and returns one completion response
+	// (uvm-manager.md §21.1).
+	tlbEndpoints         []sim.Port
+	activeTLBInvalidates map[string]*tlbInvalidateCommand
 }
 
 func (c *Comp) Tick() bool {
@@ -185,4 +203,15 @@ func (c *Comp) Tick() bool {
 // sbin_mcm
 func (c *Comp) SetCommandProcessor(cp sim.Port) {
 	c.commandProcessor = cp
+}
+
+// sbin_codex: SetTLBEndpoints registers the topology-present TLB endpoint set
+// for range invalidation coordination (plan todo 14 of mgpusim-uvm-manager).
+func (c *Comp) SetTLBEndpoints(endpoints []sim.Port) {
+	c.tlbEndpoints = endpoints
+}
+
+// sbin_codex: TLBEndpoints returns the registered TLB endpoint set.
+func (c *Comp) TLBEndpoints() []sim.Port {
+	return c.tlbEndpoints
 }

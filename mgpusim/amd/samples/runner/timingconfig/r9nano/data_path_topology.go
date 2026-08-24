@@ -114,7 +114,8 @@ func (baselineDataPathTopology) connectCP(b *Builder) {
 		b.addTLB(sa.GetPortByName("L1STLBCtrl"))
 		b.addTLB(sa.GetPortByName("L1ITLBCtrl"))
 	}
-	b.addSharedL2TLBs() // sbin_codex
+	b.addSharedL2TLBs()          // sbin_codex
+	b.registerGMMUTLBEndpoints() // sbin_codex: coordinator endpoint set (todo 14).
 }
 
 func (virtualDataPathTopology) connectCP(b *Builder) {
@@ -129,7 +130,8 @@ func (virtualDataPathTopology) connectCP(b *Builder) {
 		}
 		b.addPreCacheTranslator(sa.GetPortByName("L1SGateCtrl"))
 	}
-	b.addSharedL2TLBs() // sbin_codex
+	b.addSharedL2TLBs()          // sbin_codex
+	b.registerGMMUTLBEndpoints() // sbin_codex: coordinator endpoint set (todo 14).
 }
 
 func (b *Builder) plugL1ToL2(conn *directconnection.Comp) { // sbin_codex

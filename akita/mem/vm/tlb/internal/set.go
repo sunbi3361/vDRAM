@@ -118,3 +118,36 @@ func (s *setImpl) Visit(wayID int) {
 func (s *setImpl) hasNothingToEvict() bool {
 	return len(s.visitList) == 0
 }
+
+// sbin_codex: InvalidateRange invalidates every entry in the set whose PID
+// matches and whose covered VA range overlaps [startVA, startVA+size), and
+// returns the number of valid entries invalidated (plan todo 14 of
+// mgpusim-uvm-manager). Entries of other PIDs, non-overlapping entries, and
+// already-invalid entries are untouched. The entry's own page size bounds its
+// covered range; entries with no recorded page size are treated as 4 KB pages.
+func InvalidateRange(set Set, pid vm.PID, startVA, size uint64) int {
+	s, ok := set.(*setImpl)
+	if !ok {
+		return 0
+	}
+	end := startVA + size
+	count := 0
+	for _, wayID := range s.vAddrWayIDMap {
+		block := s.blocks[wayID]
+		page := block.page
+		if page.PID != pid || !page.Valid {
+			continue
+		}
+		pageSize := page.PageSize
+		if pageSize == 0 {
+			pageSize = 4096
+		}
+		if page.VAddr >= end || page.VAddr+pageSize <= startVA {
+			continue
+		}
+		page.Valid = false
+		block.page = page
+		count++
+	}
+	return count
+}

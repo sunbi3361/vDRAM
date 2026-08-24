@@ -5,6 +5,7 @@ import (
 
 	"github.com/sarchlab/akita/v4/mem/mem"
 	"github.com/sarchlab/akita/v4/mem/vm"
+	"github.com/sarchlab/akita/v4/mem/vm/tlb"
 	"github.com/sarchlab/akita/v4/sim"
 	"github.com/sarchlab/akita/v4/tracing"
 )
@@ -16,6 +17,9 @@ type ctrlMiddleware struct {
 func (m *ctrlMiddleware) Tick() bool {
 	madeProgress := false
 	madeProgress = m.handleIncomingCommands() || madeProgress
+	// sbin_codex: a fully-acknowledged invalidation completes once the
+	// response port accepts the completion (todo 14 of mgpusim-uvm-manager).
+	madeProgress = m.tryCompleteTLBInvalidates() || madeProgress
 	return madeProgress
 }
 
@@ -34,6 +38,10 @@ func (m *ctrlMiddleware) handleIncomingCommands() bool {
 		madeProgress = m.handleBlockRange(msg) || madeProgress
 	case *vm.UnblockRange: // sbin_codex: UVM mapping-transition unblock (todo 8).
 		madeProgress = m.handleUnblockRange(msg) || madeProgress
+	case *tlb.UVMTLBInvalidateReq: // sbin_codex: UVM range invalidation (todo 14).
+		madeProgress = m.handleTLBInvalidateCoord(msg) || madeProgress
+	case *tlb.UVMTLBInvalidateRsp: // sbin_codex: UVM range invalidation ack (todo 14).
+		madeProgress = m.handleTLBInvalidateAck(msg) || madeProgress
 	default:
 		panic("Unhandled message")
 	}
@@ -186,4 +194,87 @@ func (m *ctrlMiddleware) performCtrlReq() bool {
 	)
 
 	return true
+}
+
+// sbin_codex: handleTLBInvalidateCoord broadcasts a range TLB invalidation to
+// every topology-present TLB endpoint and registers the pending
+// acknowledgements (plan todo 14 of mgpusim-uvm-manager). The GMMU is the
+// invalidation coordinator (uvm-manager.md §21.1). The request is only
+// consumed once every broadcast send succeeds; a partial broadcast is retried
+// on the next tick and the stray acknowledgements are rejected.
+func (m *ctrlMiddleware) handleTLBInvalidateCoord(req *tlb.UVMTLBInvalidateReq) bool {
+	cmd := &tlbInvalidateCommand{
+		reqID:   req.ID,
+		src:     req.Src,
+		pending: make(map[string]bool),
+	}
+	for _, endpoint := range m.tlbEndpoints {
+		inv := tlb.UVMTLBInvalidateReqBuilder{}.
+			WithSrc(m.controlPort.AsRemote()).
+			WithDst(endpoint.AsRemote()).
+			WithPID(req.PID).
+			WithStartVA(req.StartVA).
+			WithSize(req.Size).
+			Build()
+		if err := m.controlPort.Send(inv); err != nil {
+			return false
+		}
+		cmd.pending[inv.ID] = true
+	}
+	m.activeTLBInvalidates[req.ID] = cmd
+	m.controlPort.RetrieveIncoming()
+
+	tracing.AddMilestone(
+		tracing.MsgIDAtReceiver(req, m.Comp),
+		tracing.MilestoneKindNetworkBusy,
+		m.controlPort.Name(),
+		m.Comp.Name(),
+		m.Comp,
+	)
+
+	return true
+}
+
+// sbin_codex: handleTLBInvalidateAck consumes one endpoint acknowledgement.
+// An ack for an unknown or already-satisfied broadcast is rejected
+// deterministically; the command completes only when every broadcast has
+// acknowledged exactly once.
+func (m *ctrlMiddleware) handleTLBInvalidateAck(ack *tlb.UVMTLBInvalidateRsp) bool {
+	for _, cmd := range m.activeTLBInvalidates {
+		if !cmd.pending[ack.RspTo] {
+			continue
+		}
+		delete(cmd.pending, ack.RspTo)
+		m.controlPort.RetrieveIncoming()
+		return true
+	}
+
+	// Unknown or duplicate ack: reject without completing.
+	m.controlPort.RetrieveIncoming()
+	return true
+}
+
+// sbin_codex: tryCompleteTLBInvalidates sends the exactly-one completion
+// response for every invalidation whose acknowledgements are exhausted.
+func (m *ctrlMiddleware) tryCompleteTLBInvalidates() bool {
+	madeProgress := false
+	for reqID, cmd := range m.activeTLBInvalidates {
+		if len(cmd.pending) > 0 {
+			continue
+		}
+		if !m.controlPort.CanSend() {
+			continue
+		}
+		rsp := tlb.UVMTLBInvalidateRspBuilder{}.
+			WithSrc(m.controlPort.AsRemote()).
+			WithDst(cmd.src).
+			WithRspTo(cmd.reqID).
+			Build()
+		if err := m.controlPort.Send(rsp); err != nil {
+			continue
+		}
+		delete(m.activeTLBInvalidates, reqID)
+		madeProgress = true
+	}
+	return madeProgress
 }

@@ -2,6 +2,7 @@ package tlb
 
 import (
 	"github.com/sarchlab/akita/v4/mem/vm"
+	"github.com/sarchlab/akita/v4/mem/vm/tlb/internal"
 	"github.com/sarchlab/akita/v4/tracing"
 )
 
@@ -580,6 +581,40 @@ func (m *tlbMiddleware) processTLBFlush() bool {
 
 	m.inflightFlushReq = nil
 	m.state = tlbStatePause
+
+	return true
+}
+
+// sbin_codex: handleTLBInvalidate processes a UVM range TLB invalidation
+// (plan todo 14 of mgpusim-uvm-manager). Every set entry for the matching
+// PID/ASID whose covered VA range overlaps the requested region is
+// invalidated; unrelated entries, MSHRs, and in-flight progress are
+// untouched. The TLB state never changes (no pause), and exactly one
+// aggregated response is returned (uvm-manager.md §21.1).
+func (c *Comp) handleTLBInvalidate(req *UVMTLBInvalidateReq) bool {
+	if !c.controlPort.CanSend() {
+		return false
+	}
+	rsp := UVMTLBInvalidateRspBuilder{}.
+		WithSrc(c.controlPort.AsRemote()).
+		WithDst(req.Src).
+		WithRspTo(req.ID).
+		Build()
+	if err := c.controlPort.Send(rsp); err != nil {
+		return false
+	}
+	for _, set := range c.sets {
+		internal.InvalidateRange(set, req.PID, req.StartVA, req.Size)
+	}
+	c.controlPort.RetrieveIncoming()
+
+	tracing.AddMilestone(
+		tracing.MsgIDAtReceiver(req, c),
+		tracing.MilestoneKindNetworkBusy,
+		c.controlPort.Name(),
+		c.Name(),
+		c,
+	)
 
 	return true
 }
