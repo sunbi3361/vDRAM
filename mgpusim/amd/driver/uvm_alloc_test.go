@@ -38,6 +38,7 @@ func buildManagedDriver(t *testing.T, accessCounter bool) (
 		WithLog2PageSize(12).
 		WithPageTable(pageTable).
 		WithGPUPageTables(gpuTables).
+		WithGlobalStorage(mem.NewStorage(8 * mem.GB)). // sbin_codex (todo 5): host backing for managed copy data paths.
 		WithUVMConfig(cfg).
 		WithUVMGPUMemorySize(4 * mem.GB).
 		Build("Driver")

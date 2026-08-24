@@ -174,6 +174,58 @@ func (m *RegionStateMachine) GPUWrite() error {
 	}
 }
 
+// OwnershipType classifies the holder of one ownership-table slot (plan todo
+// 5, uvm-manager.md §23). The ownership table is shared by copies, faults,
+// migrations, prefetches, and evictions: a slot is idle, or owned by exactly
+// one transaction of one type. COPY is the only type this todo drives; the
+// other types are reserved for the owning todos (15, 16, 17, 19) and are
+// exercised through the generic AcquireOwnership/ReleaseOwnership API.
+type OwnershipType int
+
+const (
+	// OwnershipIdle marks a slot with no owner.
+	OwnershipIdle OwnershipType = iota
+	// OwnershipCopy marks a slot owned by a managed host copy transaction.
+	OwnershipCopy
+	// OwnershipFault marks a slot owned by a fault service (plan todo 15).
+	OwnershipFault
+	// OwnershipMigration marks a slot owned by a migration (plan todo 16).
+	OwnershipMigration
+	// OwnershipPrefetch marks a slot owned by a prefetch (plan todo 17).
+	OwnershipPrefetch
+	// OwnershipEviction marks a slot owned by an eviction (plan todo 19).
+	OwnershipEviction
+)
+
+// String returns the symbolic ownership-type name.
+func (t OwnershipType) String() string {
+	switch t {
+	case OwnershipIdle:
+		return "IDLE"
+	case OwnershipCopy:
+		return "COPY"
+	case OwnershipFault:
+		return "FAULT"
+	case OwnershipMigration:
+		return "MIGRATION"
+	case OwnershipPrefetch:
+		return "PREFETCH"
+	case OwnershipEviction:
+		return "EVICTION"
+	default:
+		return "UNKNOWN"
+	}
+}
+
+// OwnershipEntry is one slot of the shared ownership table, keyed by
+// (PID, GPU, regionBase). A COPY-owned region is ineligible as an eviction
+// victim and later faults queue on it, so no victim dependency cycle exists:
+// waiters never hold a slot.
+type OwnershipEntry struct {
+	OwnerType OwnershipType
+	OwnerID   uint64 // transaction ticket / holder ID; 0 when idle
+}
+
 // AdmissionReservation tracks GPU capacity reservations for the R+I+N <= C
 // invariant (plan todo 20 enforces eviction; this todo owns the tracking
 // structure): R = resident bytes, I = in-flight migration bytes, N = reserved

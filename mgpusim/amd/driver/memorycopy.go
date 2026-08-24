@@ -13,6 +13,9 @@ import (
 type defaultMemoryCopyMiddleware struct {
 	driver *Driver
 
+	// sbin_codex (todo 5): managed copy handler; nil when UVM is disabled.
+	managed *managedMemoryCopyMiddleware
+
 	cyclesPerH2D int
 	cyclesPerD2H int
 	cyclesLeft   int
@@ -24,6 +27,15 @@ func (m *defaultMemoryCopyMiddleware) ProcessCommand(
 	cmd Command,
 	queue *CommandQueue,
 ) (processed bool) {
+	// sbin_codex (todo 5): branch copies by allocation. Managed
+	// destinations/sources take the UVM copy path; non-managed copies keep
+	// the existing path byte-identical; mixed/gapped spans are rejected.
+	if m.managed != nil {
+		if processed, handled := m.managed.tryProcess(cmd, queue); handled {
+			return processed
+		}
+	}
+
 	switch cmd := cmd.(type) {
 	case *MemCopyH2DCommand:
 		return m.processMemCopyH2DCommand(cmd, queue)
@@ -184,6 +196,12 @@ func (m *defaultMemoryCopyMiddleware) sendFlushRequest(
 
 func (m *defaultMemoryCopyMiddleware) Tick() (madeProgress bool) {
 	madeProgress = false
+
+	// sbin_codex (todo 5): drive managed copies first so their responses are
+	// consumed before the default DMA response handling.
+	if m.managed != nil {
+		madeProgress = m.managed.Tick() || madeProgress
+	}
 
 	if m.cyclesLeft > 0 {
 		m.cyclesLeft--

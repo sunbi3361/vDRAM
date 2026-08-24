@@ -134,6 +134,13 @@ func (b Builder) Build(name string) *Driver {
 			cyclesPerD2H: b.middlewareD2HCycles,
 			cyclesPerH2D: b.middlewareH2DCycles,
 		}
+		// sbin_codex (todo 5): wire the managed copy handler when UVM is
+		// enabled so copies branch by allocation.
+		if b.uvmConfig != nil && b.uvmConfig.Enabled {
+			defaultMemoryCopyMiddleware.managed = &managedMemoryCopyMiddleware{
+				driver: driver,
+			}
+		}
 		driver.middlewares = append(driver.middlewares, defaultMemoryCopyMiddleware)
 	}
 
