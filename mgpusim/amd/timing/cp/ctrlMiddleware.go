@@ -94,6 +94,8 @@ func (m *ctrlMiddleware) processRspFromCaches() bool {
 		return m.processCacheFlushRsp(req)
 	case *cache.RestartRsp:
 		return m.processCacheRestartRsp(req)
+	case *cache.UVMCacheRangeFlushRsp: // sbin_codex: UVM range WB+INV ack (todo 12).
+		return m.uvmMiddleware.processCacheRangeFlushRsp(req)
 	}
 
 	panic("never")
@@ -130,6 +132,8 @@ func (m *ctrlMiddleware) processRspFromTLBs() bool {
 		return m.processTLBFlushRsp(req)
 	case *tlb.RestartRsp:
 		return m.processTLBRestartRsp(req)
+	case *tlb.UVMTLBInvalidateRsp: // sbin_codex: UVM range TLB invalidate ack (todo 12).
+		return m.uvmMiddleware.processTLBInvalidateRsp(req)
 	}
 
 	panic("never")

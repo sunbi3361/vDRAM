@@ -14,14 +14,14 @@ import (
 
 // Builder can build Command Processors
 type Builder struct {
-	freq                         sim.Freq
-	engine                       sim.Engine
-	visTracer                    tracing.Tracer
-	monitor                      *monitoring.Monitor
-	perfAnalyzer                 *analysis.PerfAnalyzer
-	numDispatchers               int
-	driver                       sim.Port
-	cus                          []CUInterfaceForCP
+	freq                           sim.Freq
+	engine                         sim.Engine
+	visTracer                      tracing.Tracer
+	monitor                        *monitoring.Monitor
+	perfAnalyzer                   *analysis.PerfAnalyzer
+	numDispatchers                 int
+	driver                         sim.Port
+	cus                            []CUInterfaceForCP
 	constantKernelLaunchOverhead   int
 	constantKernelOverhead         int
 	subsequentKernelLaunchOverhead int
@@ -127,6 +127,14 @@ func (b Builder) Build(name string) *CommandProcessor {
 	cp.bottomMemCopyD2HReqIDToTopReqMap =
 		make(map[string]*protocol.MemCopyD2HReq)
 
+	// sbin_codex: UVM routing state (todo 12 of mgpusim-uvm-manager).
+	cp.activeUVMBlocks = make(map[uint64]*uvmBlockState)
+	cp.activeUVMTLBInvalidates = make(map[string]*uvmTLBInvalidateState)
+	cp.activeUVMCacheFlushes = make(map[string]*uvmCacheFlushState)
+	cp.uvmTLBInvalidateFanout = make(map[string]string)
+	cp.uvmCacheFlushFanout = make(map[string]string)
+	cp.uvmReplayRangeIDToDriverReqID = make(map[string]string)
+
 	b.buildDispatchers(cp)
 
 	if b.driver != nil {
@@ -137,6 +145,7 @@ func (b Builder) Build(name string) *CommandProcessor {
 	}
 	cp.middleware = &cpMiddleware{cp}
 	cp.ctrlMiddleware = &ctrlMiddleware{cp}
+	cp.uvmMiddleware = &uvmMiddleware{cp} // sbin_codex
 
 	if b.perfAnalyzer != nil {
 		b.perfAnalyzer.RegisterComponent(cp)
@@ -156,6 +165,8 @@ func (Builder) createPorts(cp *CommandProcessor, name string) {
 		name+".ToAddressTranslators")
 	cp.ToCaches = sim.NewPort(cp, 4096, 4096, name+".ToCaches")
 	cp.ToGMMU = sim.NewPort(cp, 4096, 4096, name+".ToGMMU") // sbin_codex
+	cp.ToAccessCounter = sim.NewPort(cp, 4096, 4096,
+		name+".ToAccessCounter") // sbin_codex
 
 	cp.AddPort("ToDriver", cp.ToDriver)
 	cp.AddPort("ToDispatcher", cp.ToDMA)
@@ -165,7 +176,8 @@ func (Builder) createPorts(cp *CommandProcessor, name string) {
 	cp.AddPort("ToPMC", cp.ToPMC)
 	cp.AddPort("ToAddressTranslators", cp.ToAddressTranslators)
 	cp.AddPort("ToCaches", cp.ToCaches)
-	cp.AddPort("ToGMMU", cp.ToGMMU) // sbin_codex
+	cp.AddPort("ToGMMU", cp.ToGMMU)                   // sbin_codex
+	cp.AddPort("ToAccessCounter", cp.ToAccessCounter) // sbin_codex
 }
 
 func (b Builder) buildDispatchers(cp *CommandProcessor) {

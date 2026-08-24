@@ -97,6 +97,13 @@ func (m *cpMiddleware) findAndRemoveOriginalMemCopyRequest(
 func (m *cpMiddleware) processLaunchKernelReq(
 	req *protocol.LaunchKernelReq,
 ) bool {
+	// sbin_codex: the acknowledged AccessCounter reset barrier holds kernel
+	// dispatch until the GPU-wide counter ack returns (todo 12 of
+	// mgpusim-uvm-manager, uvm-manager.md §14.2).
+	if m.counterResetPending {
+		return false
+	}
+
 	d := m.findAvailableDispatcher()
 
 	if d == nil {
@@ -164,7 +171,11 @@ func (m *cpMiddleware) processFlushReq(
 	return true
 }
 
-func (m *cpMiddleware) processMemCopyReq(
+// sbin_codex: processMemCopyReq and the clone helpers moved to the
+// CommandProcessor receiver so the UVM middleware can route migration DMA
+// through the same existing MemCopyH2DReq / MemCopyD2HReq flow (todo 12 of
+// mgpusim-uvm-manager, uvm-manager.md §23.1).
+func (m *CommandProcessor) processMemCopyReq(
 	req sim.Msg,
 ) bool {
 	if m.numCacheACK > 0 {
@@ -187,13 +198,13 @@ func (m *cpMiddleware) processMemCopyReq(
 	m.ToDMA.Send(cloned)
 	m.ToDriver.RetrieveIncoming()
 
-	tracing.TraceReqReceive(req, m.CommandProcessor)
-	tracing.TraceReqInitiate(cloned, m.CommandProcessor, tracing.MsgIDAtReceiver(req, m.CommandProcessor))
+	tracing.TraceReqReceive(req, m)
+	tracing.TraceReqInitiate(cloned, m, tracing.MsgIDAtReceiver(req, m))
 
 	return true
 }
 
-func (m *cpMiddleware) cloneMemCopyH2DReq(
+func (m *CommandProcessor) cloneMemCopyH2DReq(
 	req *protocol.MemCopyH2DReq,
 ) *protocol.MemCopyH2DReq {
 	cloned := *req
@@ -202,7 +213,7 @@ func (m *cpMiddleware) cloneMemCopyH2DReq(
 	return &cloned
 }
 
-func (m *cpMiddleware) cloneMemCopyD2HReq(
+func (m *CommandProcessor) cloneMemCopyD2HReq(
 	req *protocol.MemCopyD2HReq,
 ) *protocol.MemCopyD2HReq {
 	cloned := *req

@@ -38,12 +38,19 @@ type CommandProcessor struct {
 	ToRDMA               sim.Port
 	ToPMC                sim.Port
 	ToGMMU               sim.Port // sbin_codex: UVM GMMU control seam (todo 8).
+	ToAccessCounter      sim.Port // sbin_codex: GPU-wide AccessCounter seam (todo 12).
 
 	// sbin_codex: UVMGateIDs is the pre-registered gate ID set for UVM
 	// block/unblock commands (todo 8 of mgpusim-uvm-manager). The topology
 	// registers one entry per gate; the CP aggregates one matching ack per
 	// gate.
 	UVMGateIDs []uint64
+
+	// sbin_codex: GMMUControl is the GMMU control port remote that the UVM
+	// middleware targets for block/unblock commands (todo 12 of
+	// mgpusim-uvm-manager). The topology builder registers it alongside the
+	// ToGMMU seam.
+	GMMUControl sim.RemotePort
 
 	currShootdownRequest *protocol.ShootDownCommand
 	currFlushRequest     *protocol.FlushReq
@@ -61,8 +68,18 @@ type CommandProcessor struct {
 	bottomMemCopyH2DReqIDToTopReqMap   map[string]*protocol.MemCopyH2DReq
 	bottomMemCopyD2HReqIDToTopReqMap   map[string]*protocol.MemCopyD2HReq
 
+	// sbin_codex: UVM routing state (todo 12 of mgpusim-uvm-manager).
+	activeUVMBlocks               map[uint64]*uvmBlockState
+	activeUVMTLBInvalidates       map[string]*uvmTLBInvalidateState
+	activeUVMCacheFlushes         map[string]*uvmCacheFlushState
+	uvmTLBInvalidateFanout        map[string]string
+	uvmCacheFlushFanout           map[string]string
+	uvmReplayRangeIDToDriverReqID map[string]string
+	counterResetPending           bool
+
 	middleware     *cpMiddleware
 	ctrlMiddleware *ctrlMiddleware
+	uvmMiddleware  *uvmMiddleware // sbin_codex
 }
 
 // TranslatorControlGroup is a lifecycle phase's ordered translator controls. // sbin_codex
@@ -116,6 +133,7 @@ func (p *CommandProcessor) processReqFromDriver() bool {
 
 	madeProgress = p.middleware.Tick() || madeProgress
 	madeProgress = p.ctrlMiddleware.Tick() || madeProgress
+	madeProgress = p.uvmMiddleware.Tick() || madeProgress // sbin_codex
 
 	if !madeProgress {
 		return false
@@ -128,6 +146,7 @@ func (p *CommandProcessor) processRspFromInternal() bool {
 
 	madeProgress = p.middleware.Tick() || madeProgress
 	madeProgress = p.ctrlMiddleware.Tick() || madeProgress
+	madeProgress = p.uvmMiddleware.Tick() || madeProgress // sbin_codex
 
 	return madeProgress
 }
