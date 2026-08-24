@@ -277,6 +277,9 @@ func (b *Builder) connectCP() {
 	b.internalConn.PlugIn(b.cp.ToAddressTranslators)
 	b.internalConn.PlugIn(b.cp.ToRDMA)
 	b.internalConn.PlugIn(b.cp.ToPMC)
+	b.internalConn.PlugIn(b.cp.ToGMMU) // sbin_codex: UVM GMMU control seam.
+	b.internalConn.PlugIn(b.gmmu.GetPortByName("Control")) // sbin_codex
+	b.internalConn.PlugIn(b.gmmu.GetPortByName("CommandProcessor")) // sbin_codex
 
 	b.cp.RDMA = b.rdmaEngine.CtrlPort
 	b.internalConn.PlugIn(b.cp.RDMA)
@@ -287,6 +290,12 @@ func (b *Builder) connectCP() {
 	pmcControlPort := b.pmc.GetPortByName("Control")
 	b.cp.PMC = pmcControlPort
 	b.internalConn.PlugIn(pmcControlPort)
+
+	// sbin_codex: the CP pre-registers the GMMU translation gate for UVM
+	// block/unblock commands and the GMMU targets the CP for typed faults and
+	// replay commands (todo 8 of mgpusim-uvm-manager).
+	b.gmmu.SetCommandProcessor(b.cp.ToGMMU)
+	b.cp.UVMGateIDs = append(b.cp.UVMGateIDs, gmmu.TranslationGateID)
 
 	b.connectCPWithCUs()
 	// b.connectCPWithAddressTranslators()

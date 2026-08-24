@@ -132,6 +132,11 @@ func (b Builder) configureInternalStates(c *Comp) {
 	c.log2PageSize = b.log2PageSize               // sbin_codex
 	c.state = gmmuStateEnable                     // sbin_codex
 	c.addressToPortMapper = b.addressToPortMapper // sbin_gmmu
+	// sbin_codex: UVM fault/replay and translation-gate state (todo 8 of
+	// mgpusim-uvm-manager).
+	c.gate.gateID = TranslationGateID
+	c.pendingRegions = make(map[uint64]bool)
+	c.regionReplayTokens = make(map[uint64]vm.ReplayToken)
 }
 
 func (b Builder) createPageWalkCache(name string, c *Comp) {
@@ -182,4 +187,11 @@ func (b Builder) createPorts(name string, c *Comp) {
 		4096, 4096,
 		name+".ControlPort")
 	c.AddPort("Control", c.controlPort)
+
+	// sbin_codex: the command-processor port carries typed faults to the CP
+	// and replay commands back (todo 8 of mgpusim-uvm-manager).
+	c.commandProcessor = sim.NewPort(c,
+		4096, 4096,
+		name+".CommandProcessor")
+	c.AddPort("CommandProcessor", c.commandProcessor)
 }

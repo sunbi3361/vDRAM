@@ -37,6 +37,13 @@ type CommandProcessor struct {
 	ToCaches             sim.Port
 	ToRDMA               sim.Port
 	ToPMC                sim.Port
+	ToGMMU               sim.Port // sbin_codex: UVM GMMU control seam (todo 8).
+
+	// sbin_codex: UVMGateIDs is the pre-registered gate ID set for UVM
+	// block/unblock commands (todo 8 of mgpusim-uvm-manager). The topology
+	// registers one entry per gate; the CP aggregates one matching ack per
+	// gate.
+	UVMGateIDs []uint64
 
 	currShootdownRequest *protocol.ShootDownCommand
 	currFlushRequest     *protocol.FlushReq

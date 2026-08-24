@@ -2,6 +2,8 @@ package vm
 
 import (
 	"fmt"
+
+	"github.com/sarchlab/akita/v4/sim"
 )
 
 // sbin_codex: explicit UVM translation and control contracts (todo 2 of plan
@@ -114,32 +116,177 @@ type WaiterDelta struct {
 // BlockRange is the block contract for a UVM mapping transition. It carries
 // only the command ID, the process ID, and the virtual range to block.
 type BlockRange struct {
+	sim.MsgMeta
+
 	CommandID uint64
 	PID       PID
 	StartVA   uint64
 	Size      uint64
 }
 
+// Meta returns the meta data associated with the message.
+func (m *BlockRange) Meta() *sim.MsgMeta {
+	return &m.MsgMeta
+}
+
+// Clone returns a clone of the BlockRange with a different ID.
+func (m *BlockRange) Clone() sim.Msg {
+	cloneMsg := *m
+	cloneMsg.ID = sim.GetIDGenerator().Generate()
+
+	return &cloneMsg
+}
+
 // BlockAck is the acknowledgement for a BlockRange. It carries only the
 // command ID, the gate ID that reached the watermark, and the local watermark.
 type BlockAck struct {
+	sim.MsgMeta
+
 	CommandID uint64
 	GateID    uint64
 	Watermark uint64
+}
+
+// Meta returns the meta data associated with the message.
+func (m *BlockAck) Meta() *sim.MsgMeta {
+	return &m.MsgMeta
+}
+
+// Clone returns a clone of the BlockAck with a different ID.
+func (m *BlockAck) Clone() sim.Msg {
+	cloneMsg := *m
+	cloneMsg.ID = sim.GetIDGenerator().Generate()
+
+	return &cloneMsg
 }
 
 // UnblockRange is the unblock contract for a UVM mapping transition. It
 // mirrors BlockRange and carries only the command ID, the process ID, and the
 // virtual range to unblock.
 type UnblockRange struct {
+	sim.MsgMeta
+
 	CommandID uint64
 	PID       PID
 	StartVA   uint64
 	Size      uint64
 }
 
+// Meta returns the meta data associated with the message.
+func (m *UnblockRange) Meta() *sim.MsgMeta {
+	return &m.MsgMeta
+}
+
+// Clone returns a clone of the UnblockRange with a different ID.
+func (m *UnblockRange) Clone() sim.Msg {
+	cloneMsg := *m
+	cloneMsg.ID = sim.GetIDGenerator().Generate()
+
+	return &cloneMsg
+}
+
 // UnblockAck is the acknowledgement for an UnblockRange. It carries only the
 // command ID.
 type UnblockAck struct {
+	sim.MsgMeta
+
 	CommandID uint64
+}
+
+// Meta returns the meta data associated with the message.
+func (m *UnblockAck) Meta() *sim.MsgMeta {
+	return &m.MsgMeta
+}
+
+// Clone returns a clone of the UnblockAck with a different ID.
+func (m *UnblockAck) Clone() sim.Msg {
+	cloneMsg := *m
+	cloneMsg.ID = sim.GetIDGenerator().Generate()
+
+	return &cloneMsg
+}
+
+// FaultNotification is the typed fault that the GMMU sends to the command
+// processor when a managed translation faults (uvm-manager.md §8.2). The CP
+// forwards it to the UVM driver as a page-fault request. The GMMU assigns the
+// fault-pending token per stalled request and the replay token per 64 KB
+// fault-service region; the driver returns the replay token with the replay
+// command so the GMMU can match the replay to the serviced region (§22). // sbin_codex
+type FaultNotification struct {
+	sim.MsgMeta
+
+	PID               PID
+	GPU               uint64
+	VAddr             uint64
+	AccessKind        AccessKind
+	FaultPendingToken FaultPendingToken
+	ReplayToken       ReplayToken
+	WaiterDelta       WaiterDelta
+}
+
+// Meta returns the meta data associated with the message.
+func (m *FaultNotification) Meta() *sim.MsgMeta {
+	return &m.MsgMeta
+}
+
+// Clone returns a clone of the FaultNotification with a different ID.
+func (m *FaultNotification) Clone() sim.Msg {
+	cloneMsg := *m
+	cloneMsg.ID = sim.GetIDGenerator().Generate()
+
+	return &cloneMsg
+}
+
+// ReplayRange tells the GMMU to replay the stalled translation requests for a
+// serviced managed range (uvm-manager.md §22). The GMMU owns the replay
+// records; the driver returns the replay token so the GMMU can match the
+// replay to the serviced region. // sbin_codex
+type ReplayRange struct {
+	sim.MsgMeta
+
+	PID         PID
+	GPU         uint64
+	StartVA     uint64
+	Size        uint64
+	ReplayToken ReplayToken
+}
+
+// Meta returns the meta data associated with the message.
+func (m *ReplayRange) Meta() *sim.MsgMeta {
+	return &m.MsgMeta
+}
+
+// Clone returns a clone of the ReplayRange with a different ID.
+func (m *ReplayRange) Clone() sim.Msg {
+	cloneMsg := *m
+	cloneMsg.ID = sim.GetIDGenerator().Generate()
+
+	return &cloneMsg
+}
+
+// ReplayAck is the completion response for a ReplayRange. It echoes the replay
+// token so the CP can match the acknowledgement to the command. // sbin_codex
+type ReplayAck struct {
+	sim.MsgMeta
+
+	RspTo       string
+	ReplayToken ReplayToken
+}
+
+// Meta returns the meta data associated with the message.
+func (m *ReplayAck) Meta() *sim.MsgMeta {
+	return &m.MsgMeta
+}
+
+// Clone returns a clone of the ReplayAck with a different ID.
+func (m *ReplayAck) Clone() sim.Msg {
+	cloneMsg := *m
+	cloneMsg.ID = sim.GetIDGenerator().Generate()
+
+	return &cloneMsg
+}
+
+// GetRspTo returns the request ID that the response replies to.
+func (m *ReplayAck) GetRspTo() string {
+	return m.RspTo
 }

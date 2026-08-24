@@ -155,6 +155,7 @@ func (Builder) createPorts(cp *CommandProcessor, name string) {
 	cp.ToAddressTranslators = sim.NewPort(cp, 4096, 4096,
 		name+".ToAddressTranslators")
 	cp.ToCaches = sim.NewPort(cp, 4096, 4096, name+".ToCaches")
+	cp.ToGMMU = sim.NewPort(cp, 4096, 4096, name+".ToGMMU") // sbin_codex
 
 	cp.AddPort("ToDriver", cp.ToDriver)
 	cp.AddPort("ToDispatcher", cp.ToDMA)
@@ -164,6 +165,7 @@ func (Builder) createPorts(cp *CommandProcessor, name string) {
 	cp.AddPort("ToPMC", cp.ToPMC)
 	cp.AddPort("ToAddressTranslators", cp.ToAddressTranslators)
 	cp.AddPort("ToCaches", cp.ToCaches)
+	cp.AddPort("ToGMMU", cp.ToGMMU) // sbin_codex
 }
 
 func (b Builder) buildDispatchers(cp *CommandProcessor) {
