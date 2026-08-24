@@ -38,6 +38,10 @@ type Comp struct {
 	transactions             []*transaction
 	postCoalesceTransactions []*transaction
 
+	// sbin_codex: virtual-caching mode for UVM range operations (plan todo 13
+	// of mgpusim-uvm-manager): virtual caches match by PID+VA.
+	uvmRangeVirtual bool
+
 	isPaused bool
 }
 

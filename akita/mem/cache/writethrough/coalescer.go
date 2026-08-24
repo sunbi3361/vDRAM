@@ -4,6 +4,7 @@ import (
 	"log"
 	"reflect"
 
+	"github.com/sarchlab/akita/v4/mem/cache" // sbin_codex: UVM range admission gate (plan todo 13).
 	"github.com/sarchlab/akita/v4/mem/mem"
 	"github.com/sarchlab/akita/v4/sim"
 	"github.com/sarchlab/akita/v4/tracing"
@@ -31,6 +32,17 @@ func (c *coalescer) processReq(
 	req mem.AccessReq,
 ) bool {
 	if len(c.cache.transactions) >= c.cache.maxNumConcurrentTrans {
+		return false
+	}
+
+	// sbin_codex: block new matching admissions while a UVM range flush is
+	// active so drained lines are not repopulated (plan todo 13 of
+	// mgpusim-uvm-manager, uvm-manager.md section 19.1). Unrelated traffic
+	// keeps flowing.
+	if c.cache.controlStage != nil &&
+		c.cache.controlStage.currRangeFlush != nil &&
+		c.cache.controlStage.currRangeFlush.matcher.MatchAccess(
+			req.GetPID(), req.GetAddress(), cache.ResolveAnnotation(req)) {
 		return false
 	}
 

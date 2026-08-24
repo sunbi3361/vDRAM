@@ -34,6 +34,10 @@ type Builder struct {
 	bankLatency int
 
 	addressMapperType string
+
+	// sbin_codex: virtual-caching mode for UVM range operations (plan todo 13
+	// of mgpusim-uvm-manager).
+	uvmRangeVirtual bool
 }
 
 // MakeBuilder creates a new builder with default configurations.
@@ -153,6 +157,14 @@ func (b Builder) WithAddressMapperType(t string) Builder {
 	return b
 }
 
+// WithUVMRangeVirtual sets the UVM range-operation matching mode of the cache
+// to build: virtual caches match by PID+VA and write back to the stored
+// annotation HBM PA; baseline caches match by physical runs. // sbin_codex
+func (b Builder) WithUVMRangeVirtual(virtual bool) Builder {
+	b.uvmRangeVirtual = virtual
+	return b
+}
+
 func (b Builder) WithRemotePorts(ports ...sim.RemotePort) Builder {
 	if b.addressMapperType == "single" {
 		if len(ports) != 1 {
@@ -223,6 +235,7 @@ func (b *Builder) configureCache(cacheModule *Comp) {
 	cacheModule.addressToPortMapper = b.addressToPortMapper
 	cacheModule.state = cacheStateRunning
 	cacheModule.evictingList = make(map[uint64]bool)
+	cacheModule.uvmRangeVirtual = b.uvmRangeVirtual // sbin_codex: UVM range-operation mode (plan todo 13).
 }
 
 func (b *Builder) createPorts(cache *Comp) {
@@ -248,6 +261,7 @@ func (b *Builder) createInternalStages(cache *Comp) {
 	b.buildBankStages(cache)
 	cache.mshrStage = &mshrStage{cache: cache}
 	cache.flusher = &flusher{cache: cache}
+	cache.uvmRangeFlusher = &uvmRangeFlusher{cache: cache} // sbin_codex: range-scoped UVM stage (plan todo 13).
 	cache.writeBuffer = &writeBufferStage{
 		cache:               cache,
 		writeBufferCapacity: b.writeBufferCapacity,

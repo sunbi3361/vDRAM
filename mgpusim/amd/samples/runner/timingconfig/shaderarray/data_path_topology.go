@@ -12,6 +12,9 @@ type DataPathTopology interface {
 	build(*Builder)
 	addExternalPorts(*Builder)
 	connect(*Builder)
+	// uvmRangeVirtual reports whether the data caches are virtually
+	// addressed, which selects PID+VA matching for UVM range operations. // sbin_codex
+	uvmRangeVirtual() bool
 }
 
 // sbin_codex: baseline UVM access-gate ID base (todo 9 of
@@ -36,6 +39,9 @@ func NewBaselineDataPathTopology() DataPathTopology {
 func NewVirtualDataPathTopology() DataPathTopology {
 	return virtualDataPathTopology{}
 }
+
+func (baselineDataPathTopology) uvmRangeVirtual() bool { return false } // sbin_codex
+func (virtualDataPathTopology) uvmRangeVirtual() bool  { return true }  // sbin_codex
 
 func (baselineDataPathTopology) build(b *Builder) {
 	b.buildL1VAddressTranslators()

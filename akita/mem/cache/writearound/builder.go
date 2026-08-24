@@ -28,6 +28,10 @@ type Builder struct {
 
 	addressMapperType string
 	remotePorts       []sim.RemotePort
+
+	// sbin_codex: virtual-caching mode for UVM range operations (plan todo 13
+	// of mgpusim-uvm-manager).
+	uvmRangeVirtual bool
 }
 
 // MakeBuilder creates a builder with default parameter setting
@@ -144,6 +148,14 @@ func (b Builder) WithRemotePorts(ports ...sim.RemotePort) Builder {
 	return b
 }
 
+// WithUVMRangeVirtual sets the UVM range-operation matching mode of the cache
+// to build: virtual caches match by PID+VA; baseline caches match by physical
+// runs. // sbin_codex
+func (b Builder) WithUVMRangeVirtual(virtual bool) Builder {
+	b.uvmRangeVirtual = virtual
+	return b
+}
+
 // Build returns a new cache unit
 func (b Builder) Build(name string) *Comp {
 	b.assertAllRequiredInformationIsAvailable()
@@ -185,6 +197,7 @@ func (b Builder) Build(name string) *Comp {
 	c.bankLatency = b.bankLatency
 	c.wayAssociativity = b.wayAssociativity
 	c.maxNumConcurrentTrans = b.maxNumConcurrentTrans
+	c.uvmRangeVirtual = b.uvmRangeVirtual // sbin_codex: UVM range-operation mode (plan todo 13).
 
 	b.configureAddressMapper(c)
 

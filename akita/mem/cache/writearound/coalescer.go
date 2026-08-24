@@ -33,6 +33,17 @@ func (c *coalescer) processReq(req mem.AccessReq) bool {
 		return false
 	}
 
+	// sbin_codex: block new matching admissions while a UVM range flush is
+	// active so drained lines are not repopulated (plan todo 13 of
+	// mgpusim-uvm-manager, uvm-manager.md section 19.1). Unrelated traffic
+	// keeps flowing.
+	if c.cache.controlStage != nil &&
+		c.cache.controlStage.currRangeFlush != nil &&
+		c.cache.controlStage.currRangeFlush.matcher.MatchAccess(
+			req.GetPID(), req.GetAddress(), cache.ResolveAnnotation(req)) {
+		return false
+	}
+
 	if c.isReqLastInWave(req) {
 		if len(c.toCoalesce) == 0 || c.canReqCoalesce(req) {
 			return c.processReqLastInWaveCoalescable(req)

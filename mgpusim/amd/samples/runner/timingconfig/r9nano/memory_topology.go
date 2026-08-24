@@ -14,6 +14,9 @@ type MemoryTopology interface {
 	connectL2AndDRAM(*Builder)
 	connectTranslationClients(*Builder, *directconnection.Comp)
 	connectCP(*Builder)
+	// uvmRangeVirtual reports whether the L2 data cache is virtually
+	// addressed, which selects PID+VA matching for UVM range operations. // sbin_codex
+	uvmRangeVirtual() bool
 }
 
 type baselineMemoryTopology struct{} // sbin_codex
@@ -24,6 +27,9 @@ func NewBaselineMemoryTopology() MemoryTopology { return baselineMemoryTopology{
 
 // NewVirtualMemoryTopology returns translated L2-to-DRAM wiring. // sbin_codex
 func NewVirtualMemoryTopology() MemoryTopology { return virtualMemoryTopology{} }
+
+func (baselineMemoryTopology) uvmRangeVirtual() bool { return false } // sbin_codex
+func (virtualMemoryTopology) uvmRangeVirtual() bool  { return true }  // sbin_codex
 
 func (baselineMemoryTopology) buildBoundary(*Builder) {} // sbin_codex
 

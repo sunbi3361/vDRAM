@@ -490,7 +490,8 @@ func (b *Builder) buildL2Caches() {
 		WithWayAssociativity(16).
 		WithByteSize(byteSize).
 		WithNumMSHREntry(64).
-		WithNumReqPerCycle(16)
+		WithNumReqPerCycle(16).
+		WithUVMRangeVirtual(b.memoryTopology.uvmRangeVirtual()) // sbin_codex: UVM range-operation mode (plan todo 13).
 
 	for i := 0; i < b.numMemoryBank; i++ {
 		cacheName := fmt.Sprintf("%s.L2Cache[%d]", b.name, i)

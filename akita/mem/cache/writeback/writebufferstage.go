@@ -253,8 +253,16 @@ func (wb *writeBufferStage) write() bool {
 	wb.pendingEvictions = wb.pendingEvictions[1:]
 	wb.inflightEviction = append(wb.inflightEviction, trans)
 
-	tracing.TraceReqInitiate(write, wb.cache,
-		tracing.MsgIDAtReceiver(trans.req(), wb.cache))
+	// Original tracing call (commented per AGENTS.md convention):
+	// tracing.TraceReqInitiate(write, wb.cache,
+	// 	tracing.MsgIDAtReceiver(trans.req(), wb.cache))
+	// sbin_codex: the range-flush writeback transaction carries no driving
+	// access request (plan todo 13 of mgpusim-uvm-manager); trace only
+	// stage-driven writebacks.
+	if trans.req() != nil {
+		tracing.TraceReqInitiate(write, wb.cache,
+			tracing.MsgIDAtReceiver(trans.req(), wb.cache))
+	}
 
 	// log.Printf("%.10f, %s, wb write to bottom， "+
 	// " %s, %04X, %04X, (%d, %d), %v\n",

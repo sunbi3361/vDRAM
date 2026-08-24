@@ -17,6 +17,16 @@ type controlStage struct {
 	bankStages   []*bankStage
 
 	currFlushReq *cache.FlushReq
+	// sbin_codex: the active scoped UVM range flush (plan todo 13 of
+	// mgpusim-uvm-manager). Write-through caches degenerate to drain +
+	// invalidate: no dirty lines can be held.
+	currRangeFlush *uvmRangeFlushState
+}
+
+type uvmRangeFlushState struct {
+	req     *cache.UVMCacheRangeFlushReq
+	matcher *cache.UVMRangeMatcher
+	phase   cache.UVMRangeFlushPhase
 }
 
 func (s *controlStage) Tick() bool {
@@ -24,6 +34,7 @@ func (s *controlStage) Tick() bool {
 
 	madeProgress = s.processNewRequest() || madeProgress
 	madeProgress = s.processCurrentFlush() || madeProgress
+	madeProgress = s.processCurrentRangeFlush() || madeProgress // sbin_codex
 
 	return madeProgress
 }
@@ -101,6 +112,8 @@ func (s *controlStage) processNewRequest() bool {
 		return s.startCacheFlush(req)
 	case *cache.RestartReq:
 		return s.doCacheRestart(req)
+	case *cache.UVMCacheRangeFlushReq: // sbin_codex: scoped UVM range flush (plan todo 13).
+		return s.startRangeFlush(req)
 	default:
 		log.Panicf("cannot handle request of type %s ",
 			reflect.TypeOf(req))
@@ -112,6 +125,12 @@ func (s *controlStage) processNewRequest() bool {
 func (s *controlStage) startCacheFlush(
 	req *cache.FlushReq,
 ) bool {
+	// sbin_codex: a range flush owns the control path; defer the global
+	// flush until it completes (plan todo 13 of mgpusim-uvm-manager).
+	if s.currRangeFlush != nil {
+		return false
+	}
+
 	if s.currFlushReq != nil {
 		return false
 	}
@@ -120,6 +139,135 @@ func (s *controlStage) startCacheFlush(
 	s.ctrlPort.RetrieveIncoming()
 
 	return true
+}
+
+// startRangeFlush accepts a validated UVM range flush command; malformed
+// commands are rejected with an ack and no cache mutation. // sbin_codex
+func (s *controlStage) startRangeFlush(req *cache.UVMCacheRangeFlushReq) bool {
+	if s.currFlushReq != nil || s.currRangeFlush != nil {
+		return false
+	}
+
+	if err := cache.ValidateUVMCacheRangeFlushReq(req); err != nil {
+		return s.rejectMalformedRangeFlush(req)
+	}
+
+	s.currRangeFlush = &uvmRangeFlushState{
+		req:     req,
+		matcher: cache.NewUVMRangeMatcher(req, s.cache.uvmRangeVirtual),
+		phase:   cache.UVMRangeFlushDrain,
+	}
+	s.ctrlPort.RetrieveIncoming()
+
+	return true
+}
+
+// rejectMalformedRangeFlush acks a malformed command without mutating any
+// cache state. // sbin_codex
+func (s *controlStage) rejectMalformedRangeFlush(
+	req *cache.UVMCacheRangeFlushReq,
+) bool {
+	if !s.ctrlPort.CanSend() {
+		return false
+	}
+
+	rsp := cache.UVMCacheRangeFlushRspBuilder{}.
+		WithSrc(s.ctrlPort.AsRemote()).
+		WithDst(req.Src).
+		WithRspTo(req.ID).
+		Build()
+	if err := s.ctrlPort.Send(rsp); err != nil {
+		return false
+	}
+
+	s.ctrlPort.RetrieveIncoming()
+
+	return true
+}
+
+// processCurrentRangeFlush drains matching in-flight transactions, then
+// invalidates matching lines only for WRITEBACK_INVALIDATE, and acks. // sbin_codex
+func (s *controlStage) processCurrentRangeFlush() bool {
+	if s.currRangeFlush == nil {
+		return false
+	}
+
+	switch s.currRangeFlush.phase {
+	case cache.UVMRangeFlushDrain:
+		if s.matchingInflight() {
+			return false
+		}
+		s.currRangeFlush.phase = cache.UVMRangeFlushFinalize
+		return true
+	case cache.UVMRangeFlushFinalize:
+		return s.finalizeRangeFlush()
+	}
+
+	return false
+}
+
+// matchingInflight reports whether any accepted matching transaction or
+// pending matching refill is still in flight. // sbin_codex
+func (s *controlStage) matchingInflight() bool {
+	for _, t := range *s.transactions {
+		if t.accessReq() != nil {
+			req := t.accessReq()
+			if s.currRangeFlush.matcher.MatchAccess(
+				req.GetPID(), req.GetAddress(), cache.ResolveAnnotation(req)) {
+				return true
+			}
+		}
+	}
+
+	for _, entry := range s.cache.mshr.AllEntries() {
+		if s.currRangeFlush.matcher.MatchMSHR(entry) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// finalizeRangeFlush invalidates matching lines for WRITEBACK_INVALIDATE
+// (write-through caches hold no dirty data, so WRITEBACK_ONLY degenerates to
+// drain only) and sends the completion ack. // sbin_codex
+func (s *controlStage) finalizeRangeFlush() bool {
+	if !s.ctrlPort.CanSend() {
+		return false
+	}
+
+	if s.currRangeFlush.req.Operation ==
+		cache.UVMCacheRangeFlushWritebackInvalidate {
+		s.invalidateMatching()
+	}
+
+	rsp := cache.UVMCacheRangeFlushRspBuilder{}.
+		WithSrc(s.ctrlPort.AsRemote()).
+		WithDst(s.currRangeFlush.req.Src).
+		WithRspTo(s.currRangeFlush.req.ID).
+		Build()
+	if err := s.ctrlPort.Send(rsp); err != nil {
+		return false
+	}
+
+	s.currRangeFlush = nil
+
+	return true
+}
+
+func (s *controlStage) invalidateMatching() {
+	for _, set := range s.cache.directory.GetSets() {
+		for _, block := range set.Blocks {
+			if s.currRangeFlush.matcher.MatchBlock(block) {
+				block.IsValid = false
+				block.IsLocked = false
+				block.ReadCount = 0
+				block.IsDirty = false
+				block.DirtyMask = nil
+				block.Annotation = nil
+			}
+		}
+	}
 }
 
 func (s *controlStage) doCacheRestart(req *cache.RestartReq) bool {

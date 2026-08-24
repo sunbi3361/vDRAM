@@ -38,6 +38,9 @@ type Comp struct {
 	bankStages  []*bankStage
 	mshrStage   *mshrStage
 	flusher     *flusher
+	// sbin_codex: the range-scoped UVM writeback/invalidation stage (plan
+	// todo 13 of mgpusim-uvm-manager).
+	uvmRangeFlusher *uvmRangeFlusher
 
 	storage             *mem.Storage
 	addressToPortMapper mem.AddressToPortMapper
@@ -45,6 +48,11 @@ type Comp struct {
 	mshr                cache.MSHR
 	log2BlockSize       uint64
 	numReqPerCycle      int
+
+	// sbin_codex: virtual-caching mode flag for UVM range operations (plan
+	// todo 13): virtual caches match by PID+VA and write back to the stored
+	// annotation HBM PA; baseline caches match by physical runs.
+	uvmRangeVirtual bool
 
 	state                cacheState
 	inFlightTransactions []*transaction
@@ -73,6 +81,10 @@ func (m *middleware) Tick() bool {
 	}
 
 	madeProgress = m.flusher.Tick() || madeProgress
+
+	// sbin_codex: the range-scoped UVM writeback/invalidation stage (plan
+	// todo 13 of mgpusim-uvm-manager).
+	madeProgress = m.uvmRangeFlusher.Tick() || madeProgress
 
 	return madeProgress
 }

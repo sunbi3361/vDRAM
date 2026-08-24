@@ -550,7 +550,8 @@ func (b *Builder) buildL1VCaches() {
 		WithNumReqsPerCycle(8).
 		WithMaxNumConcurrentTrans(128).
 		WithTotalByteSize(l1vSize).
-		WithAddressToPortMapper(b.l1AddressMapper)
+		WithAddressToPortMapper(b.l1AddressMapper).
+		WithUVMRangeVirtual(b.dataPathTopology.uvmRangeVirtual()) // sbin_codex: UVM range-operation mode (plan todo 13).
 
 	for i := 0; i < b.numCUs; i++ {
 		name := fmt.Sprintf("%s.L1VCache[%d]", b.name, i)
@@ -638,7 +639,8 @@ func (b *Builder) buildL1SCache() {
 		WithNumMSHREntry(128).
 		WithNumReqsPerCycle(32).
 		WithTotalByteSize(16 * mem.KB).
-		WithAddressToPortMapper(b.l1AddressMapper)
+		WithAddressToPortMapper(b.l1AddressMapper).
+		WithUVMRangeVirtual(b.dataPathTopology.uvmRangeVirtual()) // sbin_codex: UVM range-operation mode (plan todo 13).
 
 	name := fmt.Sprintf("%s.L1SCache", b.name)
 	cache := builder.Build(name)

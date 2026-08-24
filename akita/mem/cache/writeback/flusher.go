@@ -98,11 +98,30 @@ func (f *flusher) extractFromPort() bool {
 		return false
 	}
 
+	// Original dispatch (commented per AGENTS.md convention):
+	// switch req := item.(type) {
+	// case *cache.FlushReq:
+	// 	return f.startProcessingFlush(req)
+	// case *cache.RestartReq:
+	// 	return f.handleCacheRestart(req)
+	// default:
+	// 	log.Panicf("Cannot process request of %s", reflect.TypeOf(req))
+	// }
+
+	// sbin_codex: range-scoped UVM flush dispatch (plan todo 13 of
+	// mgpusim-uvm-manager). The UVMCacheRangeFlushReq is handled by the
+	// dedicated range flusher stage; a global flush defers while a range
+	// flush owns the control path.
 	switch req := item.(type) {
 	case *cache.FlushReq:
+		if f.cache.uvmRangeFlusher.active != nil {
+			return false
+		}
 		return f.startProcessingFlush(req)
 	case *cache.RestartReq:
 		return f.handleCacheRestart(req)
+	case *cache.UVMCacheRangeFlushReq:
+		return false
 	default:
 		log.Panicf("Cannot process request of %s", reflect.TypeOf(req))
 	}
