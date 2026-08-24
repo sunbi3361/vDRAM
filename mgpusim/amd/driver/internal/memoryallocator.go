@@ -28,6 +28,14 @@ type MemoryAllocator interface {
 	AllocateManaged(pid vm.PID, byteSize uint64) ManagedAllocationResult // sbin_uvm: allocate managed memory.
 }
 
+// ManagedAccessCounterSetter is an optional capability implemented by the
+// default allocator. The driver sets the Access Counter mode before a managed
+// allocation so the allocator publishes the correct initial per-GPU PTE state
+// (INVALID when off, CPU_REMOTE when on). sbin_codex
+type ManagedAccessCounterSetter interface {
+	SetManagedAccessCounter(on bool)
+}
+
 // NewMemoryAllocator creates a new memory allocator.
 func NewMemoryAllocator(
 	pageTable vm.PageTable,
@@ -77,6 +85,7 @@ type memoryAllocatorImpl struct {
 	livePageCount        uint64 // sbin_codex: physical footprint tracer state.
 	peakPageCount        uint64 // sbin_codex: physical footprint tracer state.
 	totalPageCount       uint64 // sbin_codex: physical footprint tracer state.
+	managedAccessCounter bool   // sbin_codex: Access Counter mode for managed allocations.
 }
 
 func (a *memoryAllocatorImpl) RegisterDevice(device *Device) {
@@ -235,6 +244,15 @@ func (a *memoryAllocatorImpl) allocatePages(
 	return nextVAddr
 }
 
+// SetManagedAccessCounter selects the Access Counter mode used for the
+// initial per-GPU PTE state of subsequent managed allocations. sbin_codex
+func (a *memoryAllocatorImpl) SetManagedAccessCounter(on bool) {
+	a.Lock()
+	defer a.Unlock()
+
+	a.managedAccessCounter = on
+}
+
 // sbin_uvm: AllocateManaged allocates a chunck of managed memory.
 // Allocation is done on CPU and can be migrated to GPU.
 func (a *memoryAllocatorImpl) AllocateManaged(
@@ -259,7 +277,7 @@ func (a *memoryAllocatorImpl) allocateManagedPages(
 	byteSize uint64,
 	pid vm.PID,
 	deviceID int,
-) ManagedAllocationResult {
+) (result ManagedAllocationResult) {
 	pState, found := a.processMemoryStates[pid]
 	if !found {
 		a.processMemoryStates[pid] = &processMemoryState{
@@ -273,7 +291,7 @@ func (a *memoryAllocatorImpl) allocateManagedPages(
 	pageSize := uint64(1 << a.log2PageSize)
 	nextVAddr := pState.nextVAddr
 
-	result := ManagedAllocationResult{
+	result = ManagedAllocationResult{
 		Base:            nextVAddr,
 		Size:            byteSize,
 		PageCount:       uint64(numPages),
@@ -282,11 +300,26 @@ func (a *memoryAllocatorImpl) allocateManagedPages(
 		PIDs:            make([]vm.PID, 0, numPages),
 	}
 
+	// sbin_codex: any failure mid-allocation (CPU backing exhaustion or a
+	// PTE insertion collision) rolls the whole allocation back; the result
+	// is committed only after every page is published.
+	committed := false
+	defer func() {
+		if !committed {
+			a.rollbackManagedAllocation(pid, nextVAddr, pageSize, result.CPUBackingPages)
+		}
+	}()
+
 	for i := 0; i < numPages; i++ {
 		vAddr := nextVAddr + uint64(i)*pageSize
 		cpuPAddr := device.allocatePage()
 
-		page := vm.Page{
+		result.CPUBackingPages = append(result.CPUBackingPages, cpuPAddr)
+		result.PIDs = append(result.PIDs, pid)
+
+		// sbin_codex: the CPU table owns the authoritative backing truth;
+		// the untyped CPU mapping is never mirrored into the GPU tables.
+		truth := vm.Page{
 			DeviceID:    uint64(0), // sbin_uvm: managed memory is allocated on CPU.
 			PID:         pid,
 			VAddr:       vAddr,
@@ -295,22 +328,72 @@ func (a *memoryAllocatorImpl) allocateManagedPages(
 			Valid:       true,
 			Unified:     false,
 			Managed:     true, // sbin_uvm: managed memory is marked as managed.
+			Location:    vm.MemoryLocationCPU_REMOTE,
 			IsPinned:    false,
 			IsMigrating: false,
 		}
 
-		// fmt.Printf("page.addr is %x piage Device ID is %d \n", page.PAddr, page.DeviceID)
-		// debug.PrintStack()
-		a.insertPage(page) // sbin_codex: driver owns CPU/GPU page-table synchronization.
-		a.vAddrToPageMapping[page.VAddr] = page
-		result.CPUBackingPages = append(result.CPUBackingPages, cpuPAddr)
-		result.PIDs = append(result.PIDs, pid)
+		a.pageTable.Insert(truth)
+		a.insertManagedGPUPTEs(truth)
+		a.vAddrToPageMapping[vAddr] = truth
 	}
 	a.recordAllocation(numPages) // sbin_codex: update physical footprint counters.
 
 	pState.nextVAddr += pageSize * uint64(numPages)
+	committed = true
 
 	return result
+}
+
+// insertManagedGPUPTEs publishes the initial per-GPU PTE state for a managed
+// page. With the Access Counter enabled the GPU table maps the page remotely
+// to the authoritative CPU backing PA; with the counter disabled the GPU
+// table holds an INVALID PTE (Valid=false, PAddr=0, no consumable address).
+// sbin_codex
+func (a *memoryAllocatorImpl) insertManagedGPUPTEs(truth vm.Page) {
+	for deviceID, gpuPageTable := range a.gpuPageTables {
+		gpuPTE := truth
+		gpuPTE.DeviceID = uint64(deviceID)
+		if a.managedAccessCounter {
+			gpuPTE.Location = vm.MemoryLocationCPU_REMOTE
+			gpuPTE.PAddr = truth.PAddr
+			gpuPTE.Valid = true
+		} else {
+			gpuPTE.Location = vm.MemoryLocationINVALID
+			gpuPTE.PAddr = 0
+			gpuPTE.Valid = false
+		}
+		gpuPageTable.Insert(gpuPTE)
+	}
+}
+
+// rollbackManagedAllocation reverts a failed managed allocation: every
+// published table entry is removed and every CPU backing frame is returned.
+// It tolerates partially published state (a mid-loop PTE insertion failure).
+// sbin_codex
+func (a *memoryAllocatorImpl) rollbackManagedAllocation(
+	pid vm.PID,
+	base, pageSize uint64,
+	cpuPages []uint64,
+) {
+	for i, cpuPAddr := range cpuPages {
+		vAddr := base + uint64(i)*pageSize
+
+		if _, found := a.pageTable.Find(pid, vAddr); found {
+			a.pageTable.Remove(pid, vAddr)
+		}
+		for _, gpuPageTable := range a.gpuPageTables {
+			if _, found := gpuPageTable.Find(pid, vAddr); found {
+				gpuPageTable.Remove(pid, vAddr)
+			}
+		}
+		delete(a.vAddrToPageMapping, vAddr)
+
+		if cpuPAddr != 0 {
+			devID := a.deviceIDByPAddr(cpuPAddr)
+			a.devices[devID].MemState.addSinglePAddr(cpuPAddr)
+		}
+	}
 }
 
 func (a *memoryAllocatorImpl) Remap(
@@ -361,8 +444,34 @@ func (a *memoryAllocatorImpl) UpdatePage(page vm.Page) {
 	a.Lock()
 	defer a.Unlock()
 
+	// sbin_codex: managed pages split the CPU truth from the GPU mappings;
+	// the CPU table keeps the backing truth while the GPU tables receive the
+	// published location (e.g. GPU_LOCAL after migration).
+	if page.Managed {
+		a.updateManagedPage(page)
+		return
+	}
+
 	a.vAddrToPageMapping[page.VAddr] = page
 	a.updatePage(page)
+}
+
+// updateManagedPage publishes a managed page's location to every GPU table
+// without touching the CPU-table truth. sbin_codex
+func (a *memoryAllocatorImpl) updateManagedPage(page vm.Page) {
+	truth, found := a.vAddrToPageMapping[page.VAddr]
+	if !found {
+		// No recorded truth (externally constructed page): fall back to the
+		// legacy full mirror so the caller never sees a silent gap.
+		a.vAddrToPageMapping[page.VAddr] = page
+		a.updatePage(page)
+		return
+	}
+
+	for _, gpuPageTable := range a.gpuPageTables {
+		gpuPageTable.Update(page)
+	}
+	a.pageTable.Update(truth)
 }
 
 func (a *memoryAllocatorImpl) AllocatePageWithGivenVAddr(

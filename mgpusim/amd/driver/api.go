@@ -176,8 +176,17 @@ func (d *Driver) AllocateManagedMemory(
 		log.Panic("AllocateManaged called without -uvm enabled")
 	}
 
+	// sbin_codex: the allocator publishes the initial per-GPU PTE state from
+	// the Access Counter mode; the driver owns the validated config.
+	if setter, ok := d.memAllocator.(internal.ManagedAccessCounterSetter); ok {
+		setter.SetManagedAccessCounter(d.uvm.config.AccessCounter)
+	}
+
 	result := d.memAllocator.AllocateManaged(ctx.pid, byteSize)
-	d.uvm.RegisterManagedAllocation(ctx.pid, result) // sbin_uvm
+	if err := d.uvm.RegisterManagedAllocation(ctx.pid, result); err != nil {
+		d.rollbackManagedAllocation(result) // sbin_codex: no partial pages or frames survive.
+		log.Panicf("uvm: managed allocation registration failed: %v", err)
+	}
 
 	ptr := Ptr(result.Base)
 	ctx.buffers = append(ctx.buffers, &buffer{
@@ -188,6 +197,14 @@ func (d *Driver) AllocateManagedMemory(
 	})
 
 	return ptr
+}
+
+// rollbackManagedAllocation releases every page of a managed allocation whose
+// registration failed. sbin_codex
+func (d *Driver) rollbackManagedAllocation(res internal.ManagedAllocationResult) {
+	for i := uint64(0); i < res.PageCount; i++ {
+		d.memAllocator.Free(res.Base + i*res.PageSize)
+	}
 }
 
 // Remap keeps the virtual address unchanged and moves the physical address to
