@@ -54,6 +54,12 @@ type faultTransaction struct {
 	tlbReqs    []*protocol.UVMTLBInvalidateReq
 	pendingTLB int
 	replayReq  *protocol.UVMFaultReplayReq
+
+	// sbin_codex (todo 17): prefetchPages are the TBN-selected prefetch pages
+	// of this transaction's migration (uvm-manager.md §11.8), set by
+	// recomputeTBN at service time. Their GPU residency carries the
+	// prefetched-provenance mark (§11.11).
+	prefetchPages []uint64
 }
 
 // faultMigrationPage is one page a fault service transfers. // sbin_codex
@@ -210,9 +216,23 @@ func (m *faultServiceMiddleware) driveActive() bool {
 
 // service re-reads the demand residency from the current masks: a fully
 // local demand issues zero DMA/PTE/TLB work and replays; a partial demand
-// recomputes the missing pages and migrates only those. // sbin_codex
+// recomputes TBN from the current masks and migrates only the missing pages
+// plus the TBN-selected prefetch pages. // sbin_codex
+// sbin_codex (todo 17): the migration set now comes from recomputeTBN, which
+// recomputes the NVIDIA-style TBN selection over the current occupancy masks
+// (uvm-manager.md §11): the missing demand pages plus the actual prefetch
+// pages of the selected region, with resident/in-flight duplicates
+// suppressed.
+// func (m *faultServiceMiddleware) service(tx *faultTransaction) {
+// 	missing := m.driver.uvm.missingDemandPages(tx)
+// 	if len(missing) == 0 {
+// 		m.startReplay(tx)
+// 		return
+// 	}
+// 	m.startMigration(tx, missing)
+// }
 func (m *faultServiceMiddleware) service(tx *faultTransaction) {
-	missing := m.driver.uvm.missingDemandPages(tx)
+	missing := m.driver.uvm.recomputeTBN(tx)
 	if len(missing) == 0 {
 		m.startReplay(tx)
 		return
@@ -275,6 +295,10 @@ func (m *faultServiceMiddleware) rollbackMigration(tx *faultTransaction) {
 
 // completeMigration publishes residency and GPU PTEs for the migrated pages,
 // commits the admission, and starts the 64 KB TLB invalidation. // sbin_codex
+// sbin_codex (todo 17): after the fault region's admission completion, the
+// TBN-prefetched regions touched by the migration publish GPU_RESIDENT
+// (completePrefetchRegions) and the prefetched pages carry the
+// prefetched-provenance mark (markPrefetched, §11.11).
 func (m *faultServiceMiddleware) completeMigration(tx *faultTransaction) {
 	pages, err := m.driver.uvm.commitFaultMigration(tx)
 	if err != nil {
@@ -294,6 +318,13 @@ func (m *faultServiceMiddleware) completeMigration(tx *faultTransaction) {
 	if err := m.driver.uvm.completeFaultMigration(
 		tx, uint64(len(tx.missingPages))*basePageSize,
 		m.driver.Engine.CurrentTime()); err != nil {
+		panic(err)
+	}
+	// sbin_codex (todo 17): TBN-prefetched region completion and provenance
+	// marking.
+	m.driver.uvm.markPrefetched(tx)
+	if err := m.driver.uvm.completePrefetchRegions(
+		tx, m.driver.Engine.CurrentTime()); err != nil {
 		panic(err)
 	}
 	m.startTLBI(tx)

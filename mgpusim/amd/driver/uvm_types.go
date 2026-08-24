@@ -52,6 +52,13 @@ type ManagedAllocationRegistration struct {
 	InFlightMask []uint64
 	DirtyMask    []uint64
 	ValidMask    []uint64
+
+	// sbin_codex (todo 17): PrefetchedMask marks pages whose GPU residency
+	// came from a TBN prefetch (uvm-manager.md §11.11). It is set when a
+	// prefetch migration commits and cleared when a later fault resolves the
+	// outcome: useful (still resident when demanded) or unused (left the GPU
+	// before any demand) (§11.12). It is NOT part of the TBN occupancy mask.
+	PrefetchedMask []uint64
 }
 
 // basePageSize is the 4 KB UVM base-page granularity (uvm-manager.md §4).

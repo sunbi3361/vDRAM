@@ -30,6 +30,7 @@ func buildTestRegistration(pid vm.PID, base, pageCount uint64) *ManagedAllocatio
 		InFlightMask:    make([]uint64, numWords),
 		DirtyMask:       make([]uint64, numWords),
 		ValidMask:       make([]uint64, numWords),
+		PrefetchedMask:  make([]uint64, numWords), // sbin_codex (todo 17)
 		CPUBackingPages: make([]uint64, pageCount),
 	}
 	for w := uint64(0); w < numWords; w++ {

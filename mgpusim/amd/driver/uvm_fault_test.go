@@ -246,12 +246,39 @@ func TestUVMFaultFIFOABA(t *testing.T) {
 	mw.Handle(txB.latencyEvent)
 	mw.Tick()
 	reqs = drainRequests(d)
+	// B's demand is fully local, but the TBN occupancy (31 of 32 valid
+	// pages) expands to the 2 MB block and prefetches the one remaining
+	// page 31 (uvm-manager.md §11.6-style expansion). // sbin_codex (todo 17)
 	if len(reqs) != 1 {
-		t.Fatalf("B service requests = %d, want 1 replay", len(reqs))
+		t.Fatalf("B service requests = %d, want 1 DMA (TBN prefetch of page 31)",
+			len(reqs))
+	}
+	h2dB, ok := reqs[0].(*protocol.MemCopyH2DReq)
+	if !ok {
+		t.Fatalf("B service request = %T, want MemCopyH2DReq", reqs[0])
+	}
+	if len(h2dB.SrcBuffer) != basePageSize {
+		t.Errorf("B DMA bytes = %d, want 1 page", len(h2dB.SrcBuffer))
+	}
+	deliverGeneralRsp(t, d, h2dB)
+	mw.Tick()
+	reqs = drainRequests(d)
+	if len(reqs) != 1 {
+		t.Fatalf("post-DMA requests = %d, want 1 TLB invalidate", len(reqs))
+	}
+	tlbB, ok := reqs[0].(*protocol.UVMTLBInvalidateReq)
+	if !ok {
+		t.Fatalf("post-DMA request = %T, want UVMTLBInvalidateReq", reqs[0])
+	}
+	deliverTLBAck(t, d, tlbB)
+	mw.Tick()
+	reqs = drainRequests(d)
+	if len(reqs) != 1 {
+		t.Fatalf("post-TLB requests = %d, want 1 replay", len(reqs))
 	}
 	replayB, ok := reqs[0].(*protocol.UVMFaultReplayReq)
 	if !ok {
-		t.Fatalf("B service request = %T, want UVMFaultReplayReq", reqs[0])
+		t.Fatalf("post-TLB request = %T, want UVMFaultReplayReq", reqs[0])
 	}
 	deliverReplayAck(t, d, replayB)
 	mw.Tick()
@@ -412,10 +439,41 @@ func TestUVMFaultQueuedSatisfiedByTBN(t *testing.T) {
 	mw.Handle(txA.latencyEvent)
 	mw.Tick()
 	reqs := drainRequests(d)
+	// sbin_codex (todo 17): A's demand is fully local, but the TBN occupancy
+	// (31 of 32 valid pages) expands to the 2 MB block and prefetches the
+	// one remaining page 31 before the replay.
 	if len(reqs) != 1 {
-		t.Fatalf("A service requests = %d, want 1 replay", len(reqs))
+		t.Fatalf("A service requests = %d, want 1 DMA (TBN prefetch of page 31)",
+			len(reqs))
 	}
-	deliverReplayAck(t, d, reqs[0].(*protocol.UVMFaultReplayReq))
+	h2dA, ok := reqs[0].(*protocol.MemCopyH2DReq)
+	if !ok {
+		t.Fatalf("A service request = %T, want MemCopyH2DReq", reqs[0])
+	}
+	if len(h2dA.SrcBuffer) != basePageSize {
+		t.Errorf("A DMA bytes = %d, want 1 page", len(h2dA.SrcBuffer))
+	}
+	deliverGeneralRsp(t, d, h2dA)
+	mw.Tick()
+	reqs = drainRequests(d)
+	if len(reqs) != 1 {
+		t.Fatalf("post-DMA requests = %d, want 1 TLB invalidate", len(reqs))
+	}
+	tlbA, ok := reqs[0].(*protocol.UVMTLBInvalidateReq)
+	if !ok {
+		t.Fatalf("post-DMA request = %T, want UVMTLBInvalidateReq", reqs[0])
+	}
+	deliverTLBAck(t, d, tlbA)
+	mw.Tick()
+	reqs = drainRequests(d)
+	if len(reqs) != 1 {
+		t.Fatalf("post-TLB requests = %d, want 1 replay", len(reqs))
+	}
+	replayA, ok := reqs[0].(*protocol.UVMFaultReplayReq)
+	if !ok {
+		t.Fatalf("post-TLB request = %T, want UVMFaultReplayReq", reqs[0])
+	}
+	deliverReplayAck(t, d, replayA)
 	mw.Tick()
 
 	if mw.active != txB {
@@ -539,15 +597,17 @@ func TestUVMFaultQueuedPartiallySatisfiedByTBN(t *testing.T) {
 
 	// Missing-page-only DMA: exactly the 9 non-resident pages 22..30, emitted
 	// as ONE maximal run (contiguous CPU backing PAs AND contiguous
-	// pre-assigned destination frames -> one superior MemCopyH2DReq). // sbin_codex (todo 16)
+	// pre-assigned destination frames -> one superior MemCopyH2DReq).
+	// sbin_codex (todo 17): the TBN occupancy (31 of 32 valid pages) expands
+	// to the 2 MB block and prefetches page 31 as a second run.
 	reqs = drainRequests(d)
-	if len(reqs) != 1 {
-		t.Fatalf("B DMA reqs = %d, want 1 (one maximal run of the 9 missing pages)",
+	if len(reqs) != 2 {
+		t.Fatalf("B DMA reqs = %d, want 2 (run 22..30 + TBN prefetch page 31)",
 			len(reqs))
 	}
 	h2d, ok := reqs[0].(*protocol.MemCopyH2DReq)
 	if !ok {
-		t.Fatalf("B req = %T, want MemCopyH2DReq", reqs[0])
+		t.Fatalf("B req 0 = %T, want MemCopyH2DReq", reqs[0])
 	}
 	wantPA := uint64(0x2_0000_0000) + 22*basePageSize
 	if h2d.DstAddress != wantPA {
@@ -561,18 +621,26 @@ func TestUVMFaultQueuedPartiallySatisfiedByTBN(t *testing.T) {
 		t.Errorf("B DMA payload mismatch: %d bytes, want the 9 pages 22..30",
 			len(h2d.SrcBuffer))
 	}
+	h2d31, ok := reqs[1].(*protocol.MemCopyH2DReq)
+	if !ok {
+		t.Fatalf("B req 1 = %T, want MemCopyH2DReq", reqs[1])
+	}
+	if h2d31.DstAddress != uint64(4096)+4*mem.GB || len(h2d31.SrcBuffer) != basePageSize {
+		t.Errorf("B prefetch run = %#x+%d, want the first GPU frame + 1 page",
+			h2d31.DstAddress, len(h2d31.SrcBuffer))
+	}
 	for page := uint64(15); page <= 21; page++ {
 		if maskBit(reg.InFlightMask, page) {
 			t.Errorf("pre-resident page %d marked in flight", page)
 		}
 	}
-	for page := uint64(22); page <= 30; page++ {
+	for page := uint64(22); page <= 31; page++ {
 		if !maskBit(reg.InFlightMask, page) {
 			t.Errorf("missing page %d not marked in flight", page)
 		}
 	}
-	if got := d.uvm.Reservation().ReservedBytes(); got != 9*basePageSize {
-		t.Errorf("reserved N = %d, want 9 pages", got)
+	if got := d.uvm.Reservation().ReservedBytes(); got != 10*basePageSize {
+		t.Errorf("reserved N = %d, want 10 pages", got)
 	}
 	if txB.phase != faultPhaseMigrating {
 		t.Errorf("B phase = %v, want migrating", txB.phase)
@@ -595,7 +663,7 @@ func TestUVMFaultQueuedPartiallySatisfiedByTBN(t *testing.T) {
 	if tlbReq.StartVA != 64*mem.KB || tlbReq.Size != 64*mem.KB {
 		t.Errorf("TLB invalidate = %#x+%d, want 64KB+64KB", tlbReq.StartVA, tlbReq.Size)
 	}
-	for page := uint64(15); page <= 30; page++ {
+	for page := uint64(15); page <= 31; page++ {
 		if !maskBit(reg.ResidentMask, page) {
 			t.Errorf("page %d not resident after migration", page)
 		}
@@ -603,7 +671,7 @@ func TestUVMFaultQueuedPartiallySatisfiedByTBN(t *testing.T) {
 			t.Errorf("page %d still in flight after migration", page)
 		}
 	}
-	for page := uint64(22); page <= 30; page++ {
+	for page := uint64(22); page <= 31; page++ {
 		pte, found := gpuTables[0].Find(pid, reg.Base+page*basePageSize)
 		if !found || pte.Location != vm.MemoryLocationGPU_LOCAL {
 			t.Errorf("migrated page %d PTE = %+v/%v, want GPU_LOCAL", page, pte, found)
@@ -618,8 +686,10 @@ func TestUVMFaultQueuedPartiallySatisfiedByTBN(t *testing.T) {
 	if region.State != RegionGPUResident {
 		t.Errorf("region state = %s, want GPU_RESIDENT", region.State)
 	}
-	if got := d.uvm.Reservation().ResidentBytes(); got != 128*mem.KB {
-		t.Errorf("resident R = %d, want 128KB (A region + all of B region)", got)
+	// sbin_codex (todo 17): R = region 0 (64 KB) + 7 pre-resident pages of
+	// region 1 + B's 10 migrated pages (9 demand + TBN prefetch page 31).
+	if got := d.uvm.Reservation().ResidentBytes(); got != 132*mem.KB {
+		t.Errorf("resident R = %d, want 132KB (region 0 + all of B region + prefetch)", got)
 	}
 	if got := d.uvm.Reservation().ReservedBytes(); got != 0 {
 		t.Errorf("reserved N = %d, want 0 after commit", got)
@@ -647,6 +717,18 @@ func TestUVMFaultQueuedPartiallySatisfiedByTBN(t *testing.T) {
 	}
 }
 
+// findManagedCopyMiddleware locates the managed copy handler by type (the
+// middleware list gained the migration service, so positional indexing is
+// brittle). // sbin_codex (todo 18)
+func findManagedCopyMiddleware(d *Driver) *managedMemoryCopyMiddleware {
+	for _, mw := range d.middlewares {
+		if dm, ok := mw.(*defaultMemoryCopyMiddleware); ok {
+			return dm.managed
+		}
+	}
+	return nil
+}
+
 // TestUVMFaultCopyFaultOwnershipRace proves the shared ownership table
 // contract: a COPY-owned region queues the later fault without duplicate
 // service or ownership cycles, and an earlier active fault transition
@@ -656,7 +738,7 @@ func TestUVMFaultCopyFaultOwnershipRace(t *testing.T) {
 	ctx := d.Init()
 	pid := ctx.pid
 	ptr := d.AllocateManagedMemory(ctx, 64*mem.KB)
-	copyMw := d.middlewares[1].(*defaultMemoryCopyMiddleware).managed
+	copyMw := findManagedCopyMiddleware(d)
 
 	// The copy claims the region first.
 	q := d.CreateCommandQueue(ctx)
@@ -729,13 +811,20 @@ func TestUVMFaultCopyFaultOwnershipRace(t *testing.T) {
 		t.Errorf("owner = %v/%d, want FAULT/%d", typ, owner, txFault.Ticket)
 	}
 	reqs = drainRequests(d)
-	if len(reqs) != 1 {
-		t.Fatalf("fault DMA reqs = %d, want 1 (one maximal run of the 15 demand pages)",
+	// sbin_codex (todo 17): the TBN selection (15/16 valid pages occupied)
+	// expands to the 2 MB block and prefetches page 15 as a second run.
+	if len(reqs) != 2 {
+		t.Fatalf("fault DMA reqs = %d, want 2 (run 0..14 + TBN prefetch page 15)",
 			len(reqs))
 	}
 	if h2d, ok := reqs[0].(*protocol.MemCopyH2DReq); !ok ||
 		h2d.DstAddress != 0x2_0000_0000 || len(h2d.SrcBuffer) != 15*basePageSize {
-		t.Fatalf("fault DMA req = %+v, want one 60 KB run at 0x2_0000_0000", reqs[0])
+		t.Fatalf("fault DMA req 0 = %+v, want one 60 KB run at 0x2_0000_0000", reqs[0])
+	}
+	if h2d, ok := reqs[1].(*protocol.MemCopyH2DReq); !ok ||
+		h2d.DstAddress != uint64(4096)+4*mem.GB || len(h2d.SrcBuffer) != basePageSize {
+		t.Fatalf("fault DMA req 1 = %+v, want one 4 KB prefetch run at the first GPU frame",
+			reqs[1])
 	}
 
 	// Scenario B: an earlier active fault transition completes before a
@@ -745,7 +834,7 @@ func TestUVMFaultCopyFaultOwnershipRace(t *testing.T) {
 	pid2 := ctx2.pid
 	ptr2 := d2.AllocateManagedMemory(ctx2, 64*mem.KB)
 	reg2 := d2.uvm.registrations[0]
-	copyMw2 := d2.middlewares[1].(*defaultMemoryCopyMiddleware).managed
+	copyMw2 := findManagedCopyMiddleware(d2)
 
 	intakeFault(t, d2, pid2, 1, uint64(ptr2))
 	txF2 := mw2.queue[0]
@@ -754,8 +843,31 @@ func TestUVMFaultCopyFaultOwnershipRace(t *testing.T) {
 	mw2.Handle(txF2.latencyEvent)
 	mw2.Tick()
 	reqs = drainRequests(d2)
+	// sbin_codex (todo 17): the TBN occupancy (15/16 valid pages) expands to
+	// the 2 MB block and prefetches page 15 before the replay.
 	if len(reqs) != 1 {
-		t.Fatalf("fault service requests = %d, want 1 replay", len(reqs))
+		t.Fatalf("fault service requests = %d, want 1 DMA (TBN prefetch of page 15)",
+			len(reqs))
+	}
+	h2dF2, ok := reqs[0].(*protocol.MemCopyH2DReq)
+	if !ok {
+		t.Fatalf("fault service request = %T, want MemCopyH2DReq", reqs[0])
+	}
+	deliverGeneralRsp(t, d2, h2dF2)
+	mw2.Tick()
+	reqs = drainRequests(d2)
+	if len(reqs) != 1 {
+		t.Fatalf("post-DMA requests = %d, want 1 TLB invalidate", len(reqs))
+	}
+	tlbF2, ok := reqs[0].(*protocol.UVMTLBInvalidateReq)
+	if !ok {
+		t.Fatalf("post-DMA request = %T, want UVMTLBInvalidateReq", reqs[0])
+	}
+	deliverTLBAck(t, d2, tlbF2)
+	mw2.Tick()
+	reqs = drainRequests(d2)
+	if len(reqs) != 1 {
+		t.Fatalf("post-TLB requests = %d, want 1 replay", len(reqs))
 	}
 	replay := reqs[0].(*protocol.UVMFaultReplayReq)
 
@@ -811,8 +923,31 @@ func TestUVMFaultDuplicateCompletion(t *testing.T) {
 	mw.Handle(tx.latencyEvent)
 	mw.Tick()
 	reqs := drainRequests(d)
+	// sbin_codex (todo 17): the TBN occupancy (15/16 valid pages) expands to
+	// the 2 MB block and prefetches page 15 before the replay.
 	if len(reqs) != 1 {
-		t.Fatalf("service requests = %d, want 1 replay", len(reqs))
+		t.Fatalf("service requests = %d, want 1 DMA (TBN prefetch of page 15)",
+			len(reqs))
+	}
+	h2d, ok := reqs[0].(*protocol.MemCopyH2DReq)
+	if !ok {
+		t.Fatalf("service request = %T, want MemCopyH2DReq", reqs[0])
+	}
+	deliverGeneralRsp(t, d, h2d)
+	mw.Tick()
+	reqs = drainRequests(d)
+	if len(reqs) != 1 {
+		t.Fatalf("post-DMA requests = %d, want 1 TLB invalidate", len(reqs))
+	}
+	tlb, ok := reqs[0].(*protocol.UVMTLBInvalidateReq)
+	if !ok {
+		t.Fatalf("post-DMA request = %T, want UVMTLBInvalidateReq", reqs[0])
+	}
+	deliverTLBAck(t, d, tlb)
+	mw.Tick()
+	reqs = drainRequests(d)
+	if len(reqs) != 1 {
+		t.Fatalf("post-TLB requests = %d, want 1 replay", len(reqs))
 	}
 	replay := reqs[0].(*protocol.UVMFaultReplayReq)
 

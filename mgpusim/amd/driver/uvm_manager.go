@@ -77,6 +77,10 @@ type UVMManager struct {
 	// driver), installed after construction. prepareFaultMigration allocates
 	// destination PFNs through it and rollbackFaultMigration returns them.
 	frames migrationFrameAllocator
+
+	// sbin_codex (todo 17): TBN selection statistics (uvm-manager.md §11.12),
+	// recorded by recomputeTBN at every fault service.
+	tbnStats tbnStatistics
 }
 
 // NewUVMManager constructs a UVM manager for an enabled UVM configuration.
@@ -190,6 +194,9 @@ func newManagedAllocationRegistration(
 		InFlightMask: make([]uint64, numWords),
 		DirtyMask:    make([]uint64, numWords),
 		ValidMask:    make([]uint64, numWords),
+		// sbin_codex (todo 17): the TBN prefetch-provenance mask (uvm-manager.md
+		// §11.11) starts empty: no page is prefetched at allocation.
+		PrefetchedMask: make([]uint64, numWords),
 		// sbin_codex (todo 4): copy the CPU backing frames so the VA-block
 		// model can publish per-page CPU physical addresses.
 		CPUBackingPages: append([]uint64(nil), res.CPUBackingPages...),
@@ -737,6 +744,44 @@ func (m *UVMManager) missingDemandPages(tx *faultTransaction) []uint64 {
 
 // beginFaultMigration reserves admission for the migrated bytes and
 // transitions the fault region to MIGRATING_TO_GPU. // sbin_codex
+// sbin_codex (todo 17): the transition now covers every region touched by
+// the migration: the fault region advances from FAULT_PENDING and each
+// TBN-prefetched region admits without a pending fault (§23
+// IDLE/CPU_RESIDENT -> MIGRATING_TO_GPU).
+// func (m *UVMManager) beginFaultMigration(
+// 	tx *faultTransaction,
+// 	bytes uint64,
+// 	now sim.VTimeInSec,
+// ) error {
+// 	m.Lock()
+// 	defer m.Unlock()
+//
+// 	// sbin_codex (todo 16): the admission reservation now happens in
+// 	// prepareFaultMigration BEFORE any DMA is emitted (uvm-manager.md §17.1
+// 	// "Reserve required GPU pages before H2D"); beginFaultMigration only
+// 	// performs the FAULT_PENDING -> MIGRATING_TO_GPU transition.
+// 	// if err := m.reservation.ReserveAdmission(bytes); err != nil {
+// 	// 	return err
+// 	// }
+// 	reg := tx.reg
+// 	if reg == nil {
+// 		return fmt.Errorf("uvm: fault migration without a registration")
+// 	}
+// 	sm := m.faultRegionMachineLocked(reg, tx.GPU, tx.RegionBase)
+// 	switch sm.Region.State {
+// 	case RegionFaultPending:
+// 		if err := sm.Transition(RegionMigratingToGPU, now); err != nil {
+// 			return err
+// 		}
+// 	case RegionMigratingToGPU:
+// 		// An earlier migration (prefetch / access-counter) is already in
+// 		// flight; this transaction's DMA joins it.
+// 	default:
+// 		return fmt.Errorf(
+// 			"uvm: fault service in illegal region state %s", sm.Region.State)
+// 	}
+// 	return nil
+// }
 func (m *UVMManager) beginFaultMigration(
 	tx *faultTransaction,
 	bytes uint64,
@@ -748,7 +793,7 @@ func (m *UVMManager) beginFaultMigration(
 	// sbin_codex (todo 16): the admission reservation now happens in
 	// prepareFaultMigration BEFORE any DMA is emitted (uvm-manager.md §17.1
 	// "Reserve required GPU pages before H2D"); beginFaultMigration only
-	// performs the FAULT_PENDING -> MIGRATING_TO_GPU transition.
+	// performs the region transitions.
 	// if err := m.reservation.ReserveAdmission(bytes); err != nil {
 	// 	return err
 	// }
@@ -756,37 +801,93 @@ func (m *UVMManager) beginFaultMigration(
 	if reg == nil {
 		return fmt.Errorf("uvm: fault migration without a registration")
 	}
-	sm := m.faultRegionMachineLocked(reg, tx.GPU, tx.RegionBase)
-	switch sm.Region.State {
-	case RegionFaultPending:
-		if err := sm.Transition(RegionMigratingToGPU, now); err != nil {
-			return err
+	if tx.plan == nil {
+		return fmt.Errorf("uvm: fault migration begin without a plan")
+	}
+	// sbin_codex (todo 17): transition the fault region and every region
+	// touched by the migration to MIGRATING_TO_GPU. A region already
+	// migrating (an earlier prefetch / access-counter migration) joins the
+	// in-flight migration.
+	regions := m.regionsTouchedByPlanLocked(reg, tx)
+	regions[tx.RegionBase] = true
+	for regionBase := range regions {
+		sm := m.faultRegionMachineLocked(reg, tx.GPU, regionBase)
+		switch sm.Region.State {
+		case RegionFaultPending, RegionIDLE, RegionCPUResident:
+			if err := sm.Transition(RegionMigratingToGPU, now); err != nil {
+				return err
+			}
+		case RegionMigratingToGPU:
+			// An earlier migration (prefetch / access-counter) is already in
+			// flight; this transaction's DMA joins it.
+		case RegionGPUResident:
+			// The fault region is already fully resident (its demand was
+			// satisfied before this service); the TBN prefetch DMA for the
+			// other regions needs no transition here.
+		default:
+			return fmt.Errorf(
+				"uvm: fault service in illegal region state %s", sm.Region.State)
 		}
-	case RegionMigratingToGPU:
-		// An earlier migration (prefetch / access-counter) is already in
-		// flight; this transaction's DMA joins it.
-	default:
-		return fmt.Errorf(
-			"uvm: fault service in illegal region state %s", sm.Region.State)
 	}
 	return nil
 }
 
 // completeFaultMigration commits the migrated bytes to resident and
 // transitions the region to GPU_RESIDENT. // sbin_codex
+// sbin_codex (todo 18): delegates to the generic completeMigrationAdmission
+// so AC/write migration transactions reuse the same admission completion.
+// sbin_codex (todo 17): the TBN-prefetched regions touched by the migration
+// are completed separately by completePrefetchRegions (uvm_tbn.go).
+// func (m *UVMManager) completeFaultMigration(
+// 	tx *faultTransaction,
+// 	bytes uint64,
+// 	now sim.VTimeInSec,
+// ) error {
+// 	m.Lock()
+// 	defer m.Unlock()
+//
+// 	reg := tx.reg
+// 	if reg == nil {
+// 		return fmt.Errorf("uvm: fault migration commit without a registration")
+// 	}
+// 	if tx.plan == nil {
+// 		return fmt.Errorf("uvm: fault migration commit without a plan")
+// 	}
+// 	regions := m.regionsTouchedByPlanLocked(reg, tx)
+// 	regions[tx.RegionBase] = true
+// 	for regionBase := range regions {
+// 		if err := m.completeRegionAdmissionLocked(reg, tx.GPU, regionBase, now); err != nil {
+// 			return err
+// 		}
+// 	}
+// 	m.reservation.CommitAdmission(bytes)
+// 	return nil
+// }
 func (m *UVMManager) completeFaultMigration(
 	tx *faultTransaction,
+	bytes uint64,
+	now sim.VTimeInSec,
+) error {
+	return m.completeMigrationAdmission(tx.reg, tx.GPU, tx.RegionBase, bytes, now)
+}
+
+// completeMigrationAdmission commits the migrated bytes to resident and
+// transitions the region to GPU_RESIDENT (recency updated on admission only,
+// §31.2). // sbin_codex
+func (m *UVMManager) completeMigrationAdmission(
+	reg *ManagedAllocationRegistration,
+	gpu int,
+	regionBase uint64,
 	bytes uint64,
 	now sim.VTimeInSec,
 ) error {
 	m.Lock()
 	defer m.Unlock()
 
-	reg := tx.reg
 	if reg == nil {
-		return fmt.Errorf("uvm: fault migration commit without a registration")
+		return fmt.Errorf("uvm: migration admission commit without a registration")
 	}
-	sm := m.faultRegionMachineLocked(reg, tx.GPU, tx.RegionBase)
+	sm := m.faultRegionMachineLocked(reg, gpu, regionBase)
 	switch sm.Region.State {
 	case RegionMigratingToGPU:
 		if err := sm.Transition(RegionGPUResident, now); err != nil {

@@ -256,6 +256,12 @@ func (m *UVMManager) rollbackFaultMigration(
 				setMaskBit(reg.InFlightMask, page, false)
 			}
 		}
+		// sbin_codex (todo 17): a rolled-back TBN prefetch never published
+		// the prefetched mark; clear it defensively so a retry re-accounts
+		// the prefetch outcome exactly once (§11.12).
+		for _, page := range tx.prefetchPages {
+			setMaskBit(reg.PrefetchedMask, page, false)
+		}
 		for _, page := range plan.allocatedPages {
 			m.pageStateLocked(reg, page).GPUPhysicalPage = 0
 		}

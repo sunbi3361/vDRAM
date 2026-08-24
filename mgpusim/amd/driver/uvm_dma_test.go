@@ -75,17 +75,21 @@ func TestUVMDMARunCoalescing(t *testing.T) {
 	reg := d.uvm.registrations[0]
 
 	// Distinct CPU backing bytes so the coalesced DMA payload is observable.
-	cpuData := make([]byte, 15*basePageSize)
+	// sbin_codex (todo 17): the TBN selection (15/16 valid pages occupied)
+	// expands to the 2 MB block, so the migration also prefetches page 15:
+	// 16 pages in one maximal run.
+	cpuData := make([]byte, 16*basePageSize)
 	for i := range cpuData {
 		cpuData[i] = byte(i * 7)
 	}
-	for i := 0; i < 15; i++ {
+	for i := 0; i < 16; i++ {
 		d.globalStorage.Write(reg.CPUBackingPages[i],
 			cpuData[i*basePageSize:(i+1)*basePageSize])
 	}
 
 	// A fault on region 0: 15 demand pages, no pre-assigned destination
-	// frames, so the migration allocates 15 contiguous GPU frames.
+	// frames, so the migration allocates 16 contiguous GPU frames (15 demand
+	// + 1 TBN prefetch).
 	intakeFault(t, d, pid, 1, uint64(ptr))
 	tx := mw.queue[0]
 	mw.Tick()
@@ -93,7 +97,7 @@ func TestUVMDMARunCoalescing(t *testing.T) {
 	mw.Tick()
 
 	reqs := drainRequests(d)
-	// Maximal runs map one-to-one to superior requests: the 15 pages have
+	// Maximal runs map one-to-one to superior requests: the 16 pages have
 	// contiguous CPU backing PAs AND contiguous allocated destination frames
 	// -> exactly one MemCopyH2DReq covering the whole run.
 	if len(reqs) != 1 {
@@ -103,8 +107,8 @@ func TestUVMDMARunCoalescing(t *testing.T) {
 	if !ok {
 		t.Fatalf("req = %T, want MemCopyH2DReq", reqs[0])
 	}
-	if len(h2d.SrcBuffer) != 15*basePageSize {
-		t.Errorf("run bytes = %d, want %d", len(h2d.SrcBuffer), 15*basePageSize)
+	if len(h2d.SrcBuffer) != 16*basePageSize {
+		t.Errorf("run bytes = %d, want %d", len(h2d.SrcBuffer), 16*basePageSize)
 	}
 	// The destination PFNs were allocated from the GPU device (contiguous,
 	// starting at the GPU device's first frame).
@@ -116,11 +120,11 @@ func TestUVMDMARunCoalescing(t *testing.T) {
 	if !bytes.Equal(h2d.SrcBuffer, cpuData) {
 		t.Error("coalesced payload mismatch")
 	}
-	// Reservation accounting: N = 15 pages reserved before the DMA.
-	if got := d.uvm.Reservation().ReservedBytes(); got != 15*basePageSize {
-		t.Errorf("reserved N = %d, want %d", got, 15*basePageSize)
+	// Reservation accounting: N = 16 pages reserved before the DMA.
+	if got := d.uvm.Reservation().ReservedBytes(); got != 16*basePageSize {
+		t.Errorf("reserved N = %d, want %d", got, 16*basePageSize)
 	}
-	for page := uint64(0); page < 15; page++ {
+	for page := uint64(0); page < 16; page++ {
 		if !maskBit(reg.InFlightMask, page) {
 			t.Errorf("page %d not marked in flight", page)
 		}
@@ -144,7 +148,7 @@ func TestUVMDMARunCoalescing(t *testing.T) {
 	if tlbReq.StartVA != 0 || tlbReq.Size != 64*mem.KB {
 		t.Errorf("TLB invalidate = %#x+%d, want 0+64KB", tlbReq.StartVA, tlbReq.Size)
 	}
-	for page := uint64(0); page < 15; page++ {
+	for page := uint64(0); page < 16; page++ {
 		if !maskBit(reg.ResidentMask, page) {
 			t.Errorf("page %d not resident after migration", page)
 		}
@@ -156,8 +160,8 @@ func TestUVMDMARunCoalescing(t *testing.T) {
 			t.Errorf("page %d PTE = %+v/%v, want GPU_LOCAL", page, pte, found)
 		}
 	}
-	if got := d.uvm.Reservation().ResidentBytes(); got != 15*basePageSize {
-		t.Errorf("resident R = %d, want %d", got, 15*basePageSize)
+	if got := d.uvm.Reservation().ResidentBytes(); got != 16*basePageSize {
+		t.Errorf("resident R = %d, want %d", got, 16*basePageSize)
 	}
 	if got := d.uvm.Reservation().ReservedBytes(); got != 0 {
 		t.Errorf("reserved N = %d, want 0 after commit", got)
@@ -229,6 +233,8 @@ func TestUVMFragmentedRuns(t *testing.T) {
 	// pre-assigned frames at 0x2_0000_0000+; pages 5..14 get freshly
 	// allocated frames (contiguous, starting at the GPU device's first
 	// frame). The two groups are non-contiguous -> two maximal runs.
+	// sbin_codex (todo 17): the TBN selection expands to the 2 MB block, so
+	// page 15 joins the fresh-frame group: run 1 covers pages 5..15.
 	block := reg.VABlocks[0]
 	for page := uint64(0); page <= 4; page++ {
 		blockLocal := (reg.Base + page*basePageSize - block.StartVA) / basePageSize
@@ -254,9 +260,9 @@ func TestUVMFragmentedRuns(t *testing.T) {
 		t.Errorf("run 0 = %#x+%d, want 0x2_0000_0000+%d",
 			run0.DstAddress, len(run0.SrcBuffer), 5*basePageSize)
 	}
-	if run1.DstAddress != uint64(4096)+4*mem.GB || len(run1.SrcBuffer) != 10*basePageSize {
+	if run1.DstAddress != uint64(4096)+4*mem.GB || len(run1.SrcBuffer) != 11*basePageSize {
 		t.Errorf("run 1 = %#x+%d, want first GPU frame+%d",
-			run1.DstAddress, len(run1.SrcBuffer), 10*basePageSize)
+			run1.DstAddress, len(run1.SrcBuffer), 11*basePageSize)
 	}
 	// The two runs' payloads are the CPU backing bytes of their pages.
 	want0 := make([]byte, 0, 5*basePageSize)
@@ -279,14 +285,16 @@ func TestUVMFragmentedRuns(t *testing.T) {
 	if _, ok := reqs[0].(*protocol.UVMTLBInvalidateReq); !ok {
 		t.Fatalf("post-DMA request = %T, want UVMTLBInvalidateReq", reqs[0])
 	}
-	for page := uint64(0); page < 15; page++ {
+	for page := uint64(0); page < 16; page++ {
 		if !maskBit(reg.ResidentMask, page) {
 			t.Errorf("page %d not resident", page)
 		}
 	}
 
 	// Fixture B: resident holes. Pages 3 and 7 are already resident; the
-	// missing pages form runs [0..2], [4..6], [8..14].
+	// missing pages form runs [0..2], [4..6], [8..14]. sbin_codex (todo 17):
+	// the TBN selection expands to the 2 MB block and prefetches page 15, so
+	// the last run covers [8..15].
 	d2, mw2, _ := buildFaultDriver(t, false)
 	ctx2 := d2.Init()
 	pid2 := ctx2.pid
@@ -311,9 +319,9 @@ func TestUVMFragmentedRuns(t *testing.T) {
 
 	reqs = drainRequests(d2)
 	if len(reqs) != 3 {
-		t.Fatalf("DMA reqs = %d, want 3 (runs [0..2], [4..6], [8..14])", len(reqs))
+		t.Fatalf("DMA reqs = %d, want 3 (runs [0..2], [4..6], [8..15])", len(reqs))
 	}
-	for i, wantLen := range []int{3, 3, 7} {
+	for i, wantLen := range []int{3, 3, 8} {
 		h2d, ok := reqs[i].(*protocol.MemCopyH2DReq)
 		if !ok {
 			t.Fatalf("run %d = %T, want MemCopyH2DReq", i, reqs[i])
@@ -542,7 +550,9 @@ func TestUVMSecondRunRollback(t *testing.T) {
 
 	// Two maximal runs: pages 0..4 have pre-assigned frames at
 	// 0x2_0000_0000+; pages 5..14 get allocated frames (non-contiguous with
-	// the pre-assigned group).
+	// the pre-assigned group). sbin_codex (todo 17): the TBN selection
+	// expands to the 2 MB block, so page 15 joins the fresh-frame group:
+	// run 1 covers pages 5..15 (11 pages).
 	block := reg.VABlocks[0]
 	for page := uint64(0); page <= 4; page++ {
 		blockLocal := (reg.Base + page*basePageSize - block.StartVA) / basePageSize
@@ -574,7 +584,7 @@ func TestUVMSecondRunRollback(t *testing.T) {
 	if got := d.uvm.Reservation().ReservedBytes(); got != 0 {
 		t.Errorf("reserved N = %d after rollback, want 0", got)
 	}
-	for page := uint64(0); page < 15; page++ {
+	for page := uint64(0); page < 16; page++ {
 		if maskBit(reg.InFlightMask, page) {
 			t.Errorf("page %d still in flight after rollback", page)
 		}
@@ -582,7 +592,7 @@ func TestUVMSecondRunRollback(t *testing.T) {
 			t.Errorf("page %d resident despite failed migration", page)
 		}
 	}
-	for page := uint64(5); page <= 14; page++ {
+	for page := uint64(5); page <= 15; page++ {
 		blockLocal := (reg.Base + page*basePageSize - block.StartVA) / basePageSize
 		if block.Pages[blockLocal].GPUPhysicalPage != 0 {
 			t.Errorf("page %d destination frame not released after rollback", page)
@@ -600,8 +610,8 @@ func TestUVMSecondRunRollback(t *testing.T) {
 	if len(reqs) != 2 {
 		t.Fatalf("retry reqs = %d, want 2 (both runs)", len(reqs))
 	}
-	if got := d.uvm.Reservation().ReservedBytes(); got != 15*basePageSize {
-		t.Errorf("reserved N = %d after retry, want %d", got, 15*basePageSize)
+	if got := d.uvm.Reservation().ReservedBytes(); got != 16*basePageSize {
+		t.Errorf("reserved N = %d after retry, want %d", got, 16*basePageSize)
 	}
 
 	// Complete both runs -> residency + PTE + one TLB invalidation.
@@ -616,13 +626,13 @@ func TestUVMSecondRunRollback(t *testing.T) {
 	if _, ok := reqs[0].(*protocol.UVMTLBInvalidateReq); !ok {
 		t.Fatalf("post-DMA request = %T, want UVMTLBInvalidateReq", reqs[0])
 	}
-	for page := uint64(0); page < 15; page++ {
+	for page := uint64(0); page < 16; page++ {
 		if !maskBit(reg.ResidentMask, page) {
 			t.Errorf("page %d not resident after retry", page)
 		}
 	}
-	if got := d.uvm.Reservation().ResidentBytes(); got != 15*basePageSize {
-		t.Errorf("resident R = %d, want %d", got, 15*basePageSize)
+	if got := d.uvm.Reservation().ResidentBytes(); got != 16*basePageSize {
+		t.Errorf("resident R = %d, want %d", got, 16*basePageSize)
 	}
 	if got := d.uvm.Reservation().ReservedBytes(); got != 0 {
 		t.Errorf("reserved N = %d, want 0 after commit", got)
