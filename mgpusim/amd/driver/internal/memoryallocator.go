@@ -175,6 +175,24 @@ func (a *memoryAllocatorImpl) AllocateUnified(
 	return a.allocatePages(int(numPages), pid, 1, true)
 }
 
+// sbin_uvm: AllocateManaged allocates a chunck of managed memory.
+// Allocation is done on CPU and can be migrated to GPU.
+func (a *memoryAllocatorImpl) AllocateManaged(
+	pid vm.PID,
+	byteSize uint64,
+) uint64 {
+	if byteSize == 0 {
+		panic("Allocating 0 bytes.")
+	}
+
+	a.Lock()
+	defer a.Unlock()
+
+	pageSize := uint64(1 << a.log2PageSize)
+	numPages := (byteSize-1)/pageSize + 1
+	return a.allocatePages(int(numPages), pid, 0, true)
+}
+
 func (a *memoryAllocatorImpl) allocatePages(
 	numPages int,
 	pid vm.PID,

@@ -164,6 +164,23 @@ func (d *Driver) AllocateUnifiedMemory(
 	return ptr
 }
 
+// sbin_uvm: AllocateManagedMemory allocates a managed memory. Allocation is done on CPU
+func (d *Driver) AllocateManagedMemory(
+	ctx *Context,
+	byteSize uint64,
+) Ptr {
+	ptr := Ptr(d.memAllocator.AllocateManaged(ctx.pid, byteSize))
+
+	ctx.buffers = append(ctx.buffers, &buffer{
+		vAddr:   ptr,
+		size:    byteSize,
+		freed:   false,
+		l2Dirty: false,
+	})
+
+	return ptr
+}
+
 // Remap keeps the virtual address unchanged and moves the physical address to
 // another GPU
 func (d *Driver) Remap(ctx *Context, addr, size uint64, deviceID int) {
