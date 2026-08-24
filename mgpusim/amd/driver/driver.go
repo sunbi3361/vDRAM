@@ -174,7 +174,8 @@ func (d *Driver) RegisterGPU(
 func (d *Driver) Tick() bool {
 	madeProgress := false
 
-	madeProgress = d.sendToGPUs() || madeProgress
+	// madeProgress = d.sendToGPUs() || madeProgress // sbin_codex
+	madeProgress = d.sendPendingAccessCounterReset() || d.sendToGPUs() || madeProgress // sbin_codex
 	madeProgress = d.sendToMMU() || madeProgress
 	madeProgress = d.sendMigrationReqToCP() || madeProgress
 
@@ -204,7 +205,7 @@ func (d *Driver) parseFromUVM() bool {
 	case *vm.PageFaultReq:
 		d.processUVMFaultReq(req)
 		return true
-	case *vm.AccessCounterNotifyReq: // sbin_codex: GPU-side counter threshold.
+	case *vm.AccessCounterNotifyReq: // sbin_codex: PCIe counter threshold.
 		if d.uvm != nil {
 			d.uvm.onAccessCounterNotify(req.PID, req.RegionBase, req.DeviceID)
 		}
@@ -625,6 +626,12 @@ func (d *Driver) initiateRDMADrain() bool {
 func (d *Driver) processRDMADrainRsp(
 	req *protocol.RDMADrainRspToDriver,
 ) bool {
+	if d.uvm != nil && d.uvm.hasPendingMigrationDrain() { // sbin_codex
+		log.Printf("DEBUG Driver received UVM RDMA drain response")
+		d.uvm.processMigrationDrainComplete() // sbin_codex
+		return true
+	}
+
 	d.numRDMADrainACK--
 
 	if d.numRDMADrainACK == 0 {
@@ -654,14 +661,15 @@ func (d *Driver) sendShootDownReqs() bool {
 	pid := d.currentPageMigrationReq.PID
 	d.numShootDownACK = uint64(len(accessingGPUs))
 
-	for i := 0; i < len(accessingGPUs); i++ {
-		toShootdownGPU := accessingGPUs[i] - 1
-		shootDownReq := protocol.NewShootdownCommand(
-			d.gpuPort, d.GPUs[toShootdownGPU],
-			vAddr, pid)
-		// d.requestsToSend = append(d.requestsToSend, shootDownReq) // sbin_codex: queue writes must be synchronized.
-		d.enqueueRequestsToSend(shootDownReq) // sbin_codex
-	}
+	// for i := 0; i < len(accessingGPUs); i++ { // sbin_codex: shared with UVM migration quiescence.
+	// 	toShootdownGPU := accessingGPUs[i] - 1
+	// 	shootDownReq := protocol.NewShootdownCommand(
+	// 		d.gpuPort, d.GPUs[toShootdownGPU],
+	// 		vAddr, pid)
+	// 	// d.requestsToSend = append(d.requestsToSend, shootDownReq)
+	// 	d.enqueueRequestsToSend(shootDownReq)
+	// }
+	d.enqueueShootDownReqs(pid, vAddr, accessingGPUs) // sbin_codex
 
 	return true
 }
@@ -669,6 +677,12 @@ func (d *Driver) sendShootDownReqs() bool {
 func (d *Driver) processShootdownCompleteRsp(
 	req *protocol.ShootDownCompleteRsp,
 ) bool {
+	if d.uvm != nil && d.uvm.hasPendingMigrationQuiescence() { // sbin_codex
+		log.Printf("DEBUG Driver received UVM shootdown response")
+		d.uvm.finalizeMigrationQuiescence() // sbin_codex
+		return true
+	}
+
 	// sbin_codex: UVM eviction shootdown ACK: finalize the reserved evictions
 	// and resume the pending migration. The response was already retrieved by
 	// processReturnReq.
@@ -691,15 +705,13 @@ func (d *Driver) processShootdownCompleteRsp(
 		pageVaddrs := make(map[uint64][]uint64)
 
 		for i := 0; i < len(requestingGPUs); i++ {
-			pageVaddrs[requestingGPUs[i]] =
-				migrationInfo.GPUReqToVAddrMap[requestingGPUs[i]+1]
+			pageVaddrs[requestingGPUs[i]] = migrationInfo.GPUReqToVAddrMap[requestingGPUs[i]+1]
 		}
 
 		for gpuID, vAddrs := range pageVaddrs {
 			for i := 0; i < len(vAddrs); i++ {
 				vAddr := vAddrs[i]
-				page, oldPAddr :=
-					d.preparePageForMigration(vAddr, context, gpuID)
+				page, oldPAddr := d.preparePageForMigration(vAddr, context, gpuID)
 
 				req := protocol.NewPageMigrationReqToCP(d.gpuPort,
 					d.GPUs[gpuID])
@@ -848,6 +860,12 @@ func (d *Driver) preparePageMigrationRspToMMU() {
 func (d *Driver) handleGPURestartRsp(
 	req *protocol.GPURestartRsp,
 ) bool {
+	if d.uvm != nil && d.uvm.hasPendingMigrationGPURestart() { // sbin_codex
+		log.Printf("DEBUG Driver received UVM GPU restart response")
+		d.uvm.processMigrationGPURestartComplete() // sbin_codex
+		return true
+	}
+
 	d.numRestartACK--
 	if d.numRestartACK == 0 {
 		d.prepareRDMARestartReqs()
@@ -865,7 +883,14 @@ func (d *Driver) prepareRDMARestartReqs() {
 }
 
 func (d *Driver) processRDMARestartRspToDriver(
-	rsp *protocol.RDMARestartRspToDriver) bool {
+	rsp *protocol.RDMARestartRspToDriver,
+) bool {
+	if d.uvm != nil && d.uvm.hasPendingMigrationRDMARestart() { // sbin_codex
+		log.Printf("DEBUG Driver received UVM RDMA restart response")
+		d.uvm.processMigrationRDMARestartComplete() // sbin_codex
+		return true
+	}
+
 	d.numRDMARestartACK--
 
 	if d.numRDMARestartACK == 0 {

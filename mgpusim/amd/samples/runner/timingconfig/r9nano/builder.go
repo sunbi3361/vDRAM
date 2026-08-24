@@ -63,10 +63,13 @@ type Builder struct {
 	l1AddressMapper      *mem.InterleavedAddressPortMapper
 	l1DataAddressMapper  *mem.InterleavedAddressPortMapper // sbin_codex: selected by the injected data-path topology.
 	l1TLBAddressMapper   *mem.SinglePortMapper
+	// sbin_codex: late-bound to RDMA request ingress.
+	remoteMemoryProvider *mem.SinglePortMapper
 	l1tlbFactory         func(name string, engine sim.Engine, freq sim.Freq, pageTable vm.PageTable, mapper mem.AddressToPortMapper, numReqPerCycle int) sim.Component //nolint:lll // sbin_codex: ideal-L1-TLB factory injection (todo 5).
 	pmcAddressMapper     mem.AddressToPortMapper
+	driverPort           sim.Port       // sbin_codex: driver destination for CP control responses.
 	uvmServiceProvider   sim.RemotePort // sbin_codex: driver UVM fault service provider.
-	accessCounterThresh  uint64         // sbin_codex: GPU-side remote-access counter threshold.
+	// accessCounterThresh uint64 // sbin_codex
 }
 
 // MakeBuilder creates a new builder.
@@ -172,6 +175,12 @@ func (b Builder) WithPageTable(pageTable vm.PageTable) gpubuilder.GPUBuilder {
 	return b
 }
 
+// WithDriverPort sets the destination for command-processor control responses. // sbin_codex
+func (b Builder) WithDriverPort(port sim.Port) gpubuilder.GPUBuilder {
+	b.driverPort = port // sbin_codex
+	return b
+}
+
 // WithUVMServiceProvider sets the driver UVM fault service provider for the
 // GMMU. When empty, UVM demand-fault gating is disabled. // sbin_codex
 func (b Builder) WithUVMServiceProvider(provider sim.RemotePort) gpubuilder.GPUBuilder {
@@ -179,12 +188,10 @@ func (b Builder) WithUVMServiceProvider(provider sim.RemotePort) gpubuilder.GPUB
 	return b
 }
 
-// WithAccessCounterThreshold sets the GPU-side 64KB remote-access counter
-// threshold on the GMMU. // sbin_codex
-func (b Builder) WithAccessCounterThreshold(thresh uint64) gpubuilder.GPUBuilder {
-	b.accessCounterThresh = thresh
-	return b
-}
+// func (b Builder) WithAccessCounterThreshold(thresh uint64) gpubuilder.GPUBuilder { // sbin_codex
+// 	b.accessCounterThresh = thresh
+// 	return b
+// }
 
 // WithL1TLBFactory sets the factory that builds L1 TLBs for this GPU.
 // When nil, the default tlb.MakeBuilder is used. // sbin_codex
@@ -244,6 +251,7 @@ func (b Builder) Build(name string) *sim.Domain {
 	b.l1AddressMapper.UseAddressSpaceLimitation = true
 	b.dataPathTopology.initializeMapper(&b) // sbin_codex
 
+	b.remoteMemoryProvider = &mem.SinglePortMapper{} // sbin_codex: SAs are built before RDMA.
 	b.l1TLBAddressMapper = &mem.SinglePortMapper{}
 
 	b.buildSAs()
@@ -450,8 +458,9 @@ func (b *Builder) buildSAs() {
 						WithLog2CacheLineSize(b.log2CacheLineSize).
 						WithLog2PageSize(b.log2PageSize).
 						WithL1TLBAddressMapper(b.l1TLBAddressMapper).
-						WithPageTable(b.pageTable).      // sbin_codex: pass page table for ideal-L1-TLB factory (todo 5).
-						WithL1TLBFactory(b.l1tlbFactory) // sbin_codex: pass ideal-L1-TLB factory hook (todo 5).
+		// WithRemoteMemoryProviderMapper(b.remoteMemoryProvider). // sbin_codex: topology config owns data-path policy.
+		WithPageTable(b.pageTable).      // sbin_codex: pass page table for ideal-L1-TLB factory (todo 5).
+		WithL1TLBFactory(b.l1tlbFactory) // sbin_codex: pass ideal-L1-TLB factory hook (todo 5).
 	saBuilder = b.dataPathTopology.configureShaderArray(b, saBuilder) // sbin_codex
 
 	// if b.enableISADebugging {
@@ -591,6 +600,7 @@ func (b *Builder) buildRDMAEngine() {
 		Build(name)
 
 	b.rdmaEngine.RemoteRDMAAddressTable = b.rdmaAddressMapper
+	b.remoteMemoryProvider.Port = b.rdmaEngine.RDMARequestInside.AsRemote() // sbin_codex
 
 	b.simulation.RegisterComponent(b.rdmaEngine)
 }
@@ -621,6 +631,7 @@ func (b *Builder) buildCP() {
 		WithFreq(b.freq).
 		WithMonitor(b.simulation.GetMonitor()).
 		Build(b.name + ".CommandProcessor")
+	b.cp.Driver = b.driverPort // sbin_codex: RDMA/shootdown ACKs target Driver.GPU.
 
 	b.simulation.RegisterComponent(b.cp)
 
@@ -645,9 +656,9 @@ func (b *Builder) buildGMMU() {
 
 	if b.uvmServiceProvider != "" { // sbin_codex
 		gmmuBuilder = gmmuBuilder.WithUVMServiceProvider(b.uvmServiceProvider)
-		if b.accessCounterThresh > 0 {
-			gmmuBuilder = gmmuBuilder.WithAccessCounterThreshold(b.accessCounterThresh)
-		}
+		// if b.accessCounterThresh > 0 { // sbin_codex
+		// 	gmmuBuilder = gmmuBuilder.WithAccessCounterThreshold(b.accessCounterThresh)
+		// }
 	}
 
 	b.gmmu = gmmuBuilder.Build(b.name + ".GMMU")

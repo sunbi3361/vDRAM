@@ -95,24 +95,87 @@ var _ = ginkgo.Describe("UVMManager", func() {
 		gomega.Expect(driver.uvm.stats.CoalescedFaultReqs).To(gomega.Equal(uint64(2)))
 	})
 
-	ginkgo.It("should run a demand fault through migration and replay", func() {
+	// sbin_codex: old eager demand-migration expectations, replaced by the
+	// first-touch spec below (a cold first touch must not migrate).
+	// ginkgo.It("should run a demand fault through migration and replay", func() {
+	// 	ptr := driver.AllocateManaged(ctx, 128*1024)
+	// 	base := uint64(ptr)
+	// 	vAddr := base + 4096
+	// 	pid := ctx.pid
+	//
+	// 	driver.uvm.onManagedAccess(pid, vAddr, 1, "req1", "")
+	// 	engine.Run()
+	//
+	// 	gomega.Expect(driver.uvm.stats.UniquePageFaults).To(gomega.Equal(uint64(1)))
+	// 	gomega.Expect(driver.uvm.stats.CPUToGPUMigrations).To(gomega.Equal(uint64(1)))
+	// 	// The demanded page's 64KB region is fetched; the region contains up to
+	// 	// 16 pages but the allocation starts at 4KB so the first region holds 15.
+	// 	gomega.Expect(driver.uvm.stats.MigratedBytes).To(gomega.BeNumerically(">=", 15*4096))
+	//
+	// 	mp := driver.uvm.pages[PageKey{PID: pid, VAddr: vAddr}]
+	// 	gomega.Expect(mp.State).To(gomega.Equal(GPUResident))
+	// 	gomega.Expect(mp.GPUFrameValid).To(gomega.BeTrue())
+	// })
+
+	// sbin_codex: a cold page's first touch must NOT migrate. The GPU reads it
+	// remotely, so the page stays CPU-resident with a DeviceID=0/CPU-backed/
+	// RemoteAccessible PTE and no migration stats move. Migration is deferred to
+	// the access-counter path.
+	ginkgo.It("should leave a cold page CPU-resident on its first-touch", func() {
+		// Given: a cold managed allocation whose first 4KB page was never
+		// accessed, migrated, or evicted.
 		ptr := driver.AllocateManaged(ctx, 128*1024)
 		base := uint64(ptr)
-		vAddr := base + 4096
 		pid := ctx.pid
+		mp := driver.uvm.pages[PageKey{PID: pid, VAddr: base}]
+		gomega.Expect(mp).NotTo(gomega.BeNil())
+		gomega.Expect(mp.TimesMigrated).To(gomega.Equal(uint64(0)))
 
-		driver.uvm.onManagedAccess(pid, vAddr, 1, "req1", "")
+		// When: the GPU first touches the page and the engine drains the fault.
+		driver.uvm.onManagedAccess(pid, base, 1, "req1", "")
 		engine.Run()
 
-		gomega.Expect(driver.uvm.stats.UniquePageFaults).To(gomega.Equal(uint64(1)))
-		gomega.Expect(driver.uvm.stats.CPUToGPUMigrations).To(gomega.Equal(uint64(1)))
-		// The demanded page's 64KB region is fetched; the region contains up to
-		// 16 pages but the allocation starts at 4KB so the first region holds 15.
-		gomega.Expect(driver.uvm.stats.MigratedBytes).To(gomega.BeNumerically(">=", 15*4096))
+		// Then: the page remains CPU-resident and remotely accessible; no
+		// migration was performed.
+		gomega.Expect(mp.State).To(gomega.Equal(CPUResident))
+		gomega.Expect(mp.GPUFrameValid).To(gomega.BeFalse())
+		gomega.Expect(mp.TimesMigrated).To(gomega.Equal(uint64(0)))
+		gomega.Expect(driver.uvm.stats.CPUToGPUMigrations).To(gomega.Equal(uint64(0)))
+		gomega.Expect(driver.uvm.stats.MigratedPages).To(gomega.Equal(uint64(0)))
 
-		mp := driver.uvm.pages[PageKey{PID: pid, VAddr: vAddr}]
+		pte, ok := pageTable.Find(pid, base)
+		gomega.Expect(ok).To(gomega.BeTrue())
+		gomega.Expect(pte.DeviceID).To(gomega.Equal(uint64(0)))
+		gomega.Expect(pte.PAddr).To(gomega.Equal(mp.CPUBackingPAddr))
+		gomega.Expect(pte.RemoteAccessible).To(gomega.BeTrue())
+	})
+
+	// sbin_codex: the access-counter path must migrate a hot region even when
+	// its pages were never evicted (TimesMigrated stays 0). The first touch
+	// leaves the page CPU-resident; the counter notification then migrates it.
+	ginkgo.It("should migrate a never-evicted region on access-counter notify", func() {
+		// Given: a cold managed allocation; the first touch must not migrate.
+		ptr := driver.AllocateManaged(ctx, 128*1024)
+		base := uint64(ptr)
+		pid := ctx.pid
+		regionBase := base &^ (64*1024 - 1)
+
+		driver.uvm.onManagedAccess(pid, base, 1, "req1", "")
+		engine.Run()
+		mp := driver.uvm.pages[PageKey{PID: pid, VAddr: base}]
+		gomega.Expect(mp.TimesMigrated).To(gomega.Equal(uint64(0)))
+
+		// When: the GPU GMMU reaches the access-counter threshold for the
+		// page's 64KB region and notifies the driver.
+		driver.uvm.onAccessCounterNotify(pid, regionBase, 1)
+		engine.Run()
+		drainUVMTestQuiescence(driver, engine) // sbin_codex
+
+		// Then: the region migrates to the GPU without any prior eviction.
+		gomega.Expect(driver.uvm.stats.AccessCounterMigr).To(gomega.Equal(uint64(1)))
+		gomega.Expect(driver.uvm.stats.CPUToGPUMigrations).To(gomega.Equal(uint64(1)))
 		gomega.Expect(mp.State).To(gomega.Equal(GPUResident))
-		gomega.Expect(mp.GPUFrameValid).To(gomega.BeTrue())
+		gomega.Expect(mp.TimesMigrated).To(gomega.Equal(uint64(0)))
 	})
 
 	// sbin_codex: completion must clear demand ownership even when overlap leaves
@@ -174,15 +237,20 @@ var _ = ginkgo.Describe("UVMManager", func() {
 
 		// Touch one page per 64KB region, letting each fault complete before
 		// the next so eviction can find eligible (fault-free) victim regions.
+		// sbin_codex: first touch remote-maps the page; the explicit counter
+		// notification then migrates the region and exercises capacity.
 		for off := uint64(0); off < 192*1024*1024; off += 64 * 1024 {
 			driver.uvm.onManagedAccess(pid, base+off, 1, "req", "")
 			engine.Run()
+			driver.uvm.onAccessCounterNotify(pid, (base+off)&^(64*1024-1), 1) // sbin_codex
+			engine.Run()                                                      // sbin_codex
 			// sbin_codex: simulate the GPU TLB-shootdown ACK so the reserved
 			// eviction finalizes and the pending migration resumes.
-			if driver.uvm.hasPendingEvictions() {
-				driver.uvm.finalizeEviction()
-				engine.Run()
-			}
+			// if driver.uvm.hasPendingEvictions() { // sbin_codex: all UVM shootdowns now require ACKs.
+			// 	driver.uvm.finalizeEviction()
+			// 	engine.Run()
+			// }
+			drainUVMTestQuiescence(driver, engine) // sbin_codex
 		}
 
 		gomega.Expect(driver.uvm.stats.Evictions).To(gomega.BeNumerically(">", 0))
@@ -200,6 +268,7 @@ var _ = ginkgo.Describe("UVMManager", func() {
 		// the driver.
 		driver.uvm.onAccessCounterNotify(pid, regionBase, 1)
 		engine.Run()
+		drainUVMTestQuiescence(driver, engine) // sbin_codex
 
 		gomega.Expect(driver.uvm.stats.AccessCounterNotif).To(gomega.Equal(uint64(1)))
 		gomega.Expect(driver.uvm.stats.AccessCounterMigr).To(gomega.Equal(uint64(1)))
@@ -224,20 +293,26 @@ var _ = ginkgo.Describe("UVMManager", func() {
 		for off := uint64(0); off < 128*1024*1024; off += 64 * 1024 {
 			driver.uvm.onManagedAccess(pid, base+off, 1, "req", "")
 			engine.Run()
-			if driver.uvm.hasPendingEvictions() {
-				driver.uvm.finalizeEviction()
-				engine.Run()
-			}
+			driver.uvm.onAccessCounterNotify(pid, (base+off)&^(64*1024-1), 1) // sbin_codex
+			engine.Run()                                                      // sbin_codex
+			// if driver.uvm.hasPendingEvictions() { // sbin_codex: all UVM shootdowns now require ACKs.
+			// 	driver.uvm.finalizeEviction()
+			// 	engine.Run()
+			// }
+			drainUVMTestQuiescence(driver, engine) // sbin_codex
 		}
 		// Beyond capacity, consecutive faults must queue behind the pending
 		// eviction instead of being dropped.
 		for off := uint64(128 * 1024 * 1024); off < 192*1024*1024; off += 64 * 1024 {
 			driver.uvm.onManagedAccess(pid, base+off, 1, "req", "")
 			engine.Run()
-			if driver.uvm.hasPendingEvictions() {
-				driver.uvm.finalizeEviction()
-				engine.Run()
-			}
+			driver.uvm.onAccessCounterNotify(pid, (base+off)&^(64*1024-1), 1) // sbin_codex
+			engine.Run()                                                      // sbin_codex
+			// if driver.uvm.hasPendingEvictions() { // sbin_codex: all UVM shootdowns now require ACKs.
+			// 	driver.uvm.finalizeEviction()
+			// 	engine.Run()
+			// }
+			drainUVMTestQuiescence(driver, engine) // sbin_codex
 		}
 
 		gomega.Expect(driver.uvm.stats.Evictions).To(gomega.BeNumerically(">", 0))
@@ -253,28 +328,43 @@ var _ = ginkgo.Describe("UVMManager", func() {
 		ptr := driver.AllocateManaged(ctx, 192*1024*1024)
 		base := uint64(ptr)
 		pid := ctx.pid
-		thresh := driver.uvm.config.AccessCounterThreshold
+		// thresh := driver.uvm.config.AccessCounterThreshold
+		// sbin_codex: direct driver accesses do not model GPU-side counting.
 
 		for pass := 0; pass < 2; pass++ {
 			for off := uint64(0); off < 96*1024*1024; off += 64 * 1024 {
-				for i := uint64(0); i < thresh; i++ {
-					driver.uvm.onManagedAccess(pid, base+off, 1, "req", "")
+				// for i := uint64(0); i < thresh; i++ { // sbin_codex: replaced by first touch plus threshold notification.
+				// 	driver.uvm.onManagedAccess(pid, base+off, 1, "req", "")
+				// }
+				mp := driver.uvm.pages[PageKey{PID: pid, VAddr: base + off}] // sbin_codex
+				if !mp.RemoteMapped {                                        // sbin_codex: only cold pages need first-touch setup.
+					driver.uvm.onManagedAccess(pid, base+off, 1, "req", "") // sbin_codex
+					engine.Run()                                            // sbin_codex
 				}
-				engine.Run()
-				if driver.uvm.hasPendingEvictions() {
-					driver.uvm.finalizeEviction()
-					engine.Run()
-				}
+				driver.uvm.onAccessCounterNotify(pid, (base+off)&^(64*1024-1), 1) // sbin_codex
+				engine.Run()                                                      // sbin_codex
+				// if driver.uvm.hasPendingEvictions() { // sbin_codex: all UVM shootdowns now require ACKs.
+				// 	driver.uvm.finalizeEviction()
+				// 	engine.Run()
+				// }
+				drainUVMTestQuiescence(driver, engine) // sbin_codex
 			}
 			for off := uint64(96 * 1024 * 1024); off < 192*1024*1024; off += 64 * 1024 {
-				for i := uint64(0); i < thresh; i++ {
-					driver.uvm.onManagedAccess(pid, base+off, 1, "req", "")
+				// for i := uint64(0); i < thresh; i++ { // sbin_codex: replaced by first touch plus threshold notification.
+				// 	driver.uvm.onManagedAccess(pid, base+off, 1, "req", "")
+				// }
+				mp := driver.uvm.pages[PageKey{PID: pid, VAddr: base + off}] // sbin_codex
+				if !mp.RemoteMapped {                                        // sbin_codex: only cold pages need first-touch setup.
+					driver.uvm.onManagedAccess(pid, base+off, 1, "req", "") // sbin_codex
+					engine.Run()                                            // sbin_codex
 				}
-				engine.Run()
-				if driver.uvm.hasPendingEvictions() {
-					driver.uvm.finalizeEviction()
-					engine.Run()
-				}
+				driver.uvm.onAccessCounterNotify(pid, (base+off)&^(64*1024-1), 1) // sbin_codex
+				engine.Run()                                                      // sbin_codex
+				// if driver.uvm.hasPendingEvictions() { // sbin_codex: all UVM shootdowns now require ACKs.
+				// 	driver.uvm.finalizeEviction()
+				// 	engine.Run()
+				// }
+				drainUVMTestQuiescence(driver, engine) // sbin_codex
 			}
 		}
 

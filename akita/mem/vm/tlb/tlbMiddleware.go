@@ -338,16 +338,22 @@ func (m *tlbMiddleware) parseBottom() bool {
 		m.bottomPort.RetrieveIncoming()
 		return true
 	}
-	setID := m.vAddrToSetID(page.VAddr)
-	set := m.sets[setID]
-	wayID, ok := m.sets[setID].Evict()
-
-	if !ok {
-		panic("failed to evict")
+	// setID := m.vAddrToSetID(page.VAddr) // sbin_codex: pre-edit unconditional admission.
+	// set := m.sets[setID]
+	// wayID, ok := m.sets[setID].Evict()
+	// if !ok { panic("failed to evict") }
+	// set.Update(wayID, page)
+	// set.Visit(wayID)
+	if m.pageAdmissionPredicate(page) { // sbin_codex: admission affects storage only.
+		setID := m.vAddrToSetID(page.VAddr)
+		set := m.sets[setID]
+		wayID, ok := set.Evict()
+		if !ok {
+			panic("failed to evict")
+		}
+		set.Update(wayID, page)
+		set.Visit(wayID)
 	}
-
-	set.Update(wayID, page)
-	set.Visit(wayID)
 
 	mshrEntry := m.mshr.GetEntry(rsp.Page.PID, rsp.Page.VAddr)
 	m.respondingMSHREntry = mshrEntry

@@ -17,8 +17,10 @@ type DataPathTopology interface {
 	connectCP(*Builder)
 }
 
-type baselineDataPathTopology struct{} // sbin_codex
-type virtualDataPathTopology struct{}  // sbin_codex
+type (
+	baselineDataPathTopology struct{} // sbin_codex
+	virtualDataPathTopology  struct{} // sbin_codex
+)
 
 // NewBaselineDataPathTopology returns the physical translated L1 topology. // sbin_codex
 func NewBaselineDataPathTopology() DataPathTopology { return baselineDataPathTopology{} }
@@ -41,6 +43,7 @@ func (baselineDataPathTopology) configureShaderArray(
 ) shaderarray.Builder {
 	return saBuilder.
 		WithL1AddressMapper(b.l1DataAddressMapper).
+		WithRemoteMemoryProviderMapper(b.remoteMemoryProvider).         // sbin_codex
 		WithDataPathTopology(shaderarray.NewBaselineDataPathTopology()) // sbin_codex
 }
 
@@ -51,13 +54,17 @@ func (virtualDataPathTopology) configureShaderArray(
 	return saBuilder.
 		WithL1AddressMapper(b.l1DataAddressMapper).
 		WithL1IAddressMapper(b.l1AddressMapper).
+		WithRemoteMemoryProviderMapper(b.remoteMemoryProvider).        // sbin_codex
+		WithVirtualAddressForLocalMemory().                            // sbin_codex
 		WithDataPathTopology(shaderarray.NewVirtualDataPathTopology()) // sbin_codex: L1I remains baseline.
 }
 
 func (baselineDataPathTopology) connectL1ToL2(b *Builder) {
 	conn := directconnection.MakeBuilder().WithEngine(b.simulation.GetEngine()).
 		WithFreq(b.freq).Build(b.name + ".L1ToL2")
-	b.plugL1ToL2(conn) // sbin_codex: baseline connection intentionally remains unregistered.
+	// b.plugL1ToL2(conn) // sbin_codex: pre-edit unregistered connection.
+	b.simulation.RegisterComponent(conn) // sbin_codex
+	b.plugL1ToL2(conn)                   // sbin_codex
 }
 
 func (virtualDataPathTopology) connectL1ToL2(b *Builder) {
@@ -74,6 +81,7 @@ func (virtualDataPathTopology) connectL1ToL2(b *Builder) {
 func (baselineDataPathTopology) connectTranslation(b *Builder) {
 	conn := directconnection.MakeBuilder().WithEngine(b.simulation.GetEngine()).
 		WithFreq(b.freq).Build(b.name + ".L1TLBToL2TLB")
+	b.simulation.RegisterComponent(conn) // sbin_codex
 	conn.PlugIn(b.l2TLBs[0].GetPortByName("Top"))
 	for _, sa := range b.sas {
 		for i := range b.numCUPerShaderArray {
@@ -91,6 +99,10 @@ func (virtualDataPathTopology) connectTranslation(b *Builder) {
 	b.simulation.RegisterComponent(conn)
 	conn.PlugIn(b.l2TLBs[0].GetPortByName("Top"))
 	for _, sa := range b.sas {
+		for i := range b.numCUPerShaderArray {
+			conn.PlugIn(sa.GetPortByName(fmt.Sprintf("L1VTLBBottom[%d]", i))) // sbin_codex
+		}
+		conn.PlugIn(sa.GetPortByName("L1STLBBottom")) // sbin_codex
 		conn.PlugIn(sa.GetPortByName("L1ITLBBottom"))
 	}
 	b.memoryTopology.connectTranslationClients(b, conn) // sbin_codex
@@ -111,11 +123,13 @@ func (baselineDataPathTopology) connectCP(b *Builder) {
 }
 
 func (virtualDataPathTopology) connectCP(b *Builder) {
-	for _, sa := range b.sas {
-		b.addPreCacheTranslator(sa.GetPortByName("L1IAddrTransCtrl"))
-		b.addTLB(sa.GetPortByName("L1ITLBCtrl"))
-	}
-	b.addSharedL2TLBs() // sbin_codex
+	// Pre-edit code (commented per AGENTS.md convention):
+	// for _, sa := range b.sas {
+	// 	b.addPreCacheTranslator(sa.GetPortByName("L1IAddrTransCtrl"))
+	// 	b.addTLB(sa.GetPortByName("L1ITLBCtrl"))
+	// }
+	// b.addSharedL2TLBs()
+	baselineDataPathTopology{}.connectCP(b) // sbin_codex
 }
 
 func (b *Builder) plugL1ToL2(conn *directconnection.Comp) { // sbin_codex
@@ -129,8 +143,10 @@ func (b *Builder) plugL1ToL2(conn *directconnection.Comp) { // sbin_codex
 	for _, sa := range b.sas {
 		for i := range b.numCUPerShaderArray {
 			conn.PlugIn(sa.GetPortByName(fmt.Sprintf("L1VCacheBottom[%d]", i)))
+			conn.PlugIn(sa.GetPortByName(fmt.Sprintf("L1VAddrTransRemoteBottom[%d]", i))) // sbin_codex
 		}
 		conn.PlugIn(sa.GetPortByName("L1SCacheBottom"))
+		conn.PlugIn(sa.GetPortByName("L1SAddrTransRemoteBottom")) // sbin_codex
 		conn.PlugIn(sa.GetPortByName("L1ICacheBottom"))
 	}
 }

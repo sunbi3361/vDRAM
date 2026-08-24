@@ -79,28 +79,4 @@ func (d *Driver) processUVMFaultReq(req *vm.PageFaultReq) {
 		req.PID, req.VAddr, req.DeviceID, req.WaitRequestID, req.Src)
 }
 
-// resetGPUAccessCounters sends access-counter reset requests to the GMMU of
-// the migration's device for every distinct 64KB region in the migration. // sbin_codex
-func (m *UVMManager) resetGPUAccessCounters(mig *Migration) {
-	d := m.d
-	if d.uvmPort == nil || mig.GMMUPort == "" {
-		return
-	}
-	seen := make(map[uint64]bool)
-	for _, pk := range mig.Pages {
-		regionBase := m.config.alignDown(pk.VAddr, m.config.RegionSize)
-		key := (uint64(pk.PID) << 32) | (regionBase >> 16)
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		req := vm.NewAccessCounterResetReq(
-			d.uvmPort.AsRemote(), mig.GMMUPort)
-		req.PID = pk.PID
-		req.RegionBase = regionBase
-		req.DeviceID = mig.DeviceID
-		if err := d.uvmPort.Send(req); err != nil {
-			return
-		}
-	}
-}
+// func (m *UVMManager) resetGPUAccessCounters(mig *Migration) {} // sbin_codex

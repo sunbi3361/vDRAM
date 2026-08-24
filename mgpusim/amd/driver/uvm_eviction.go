@@ -58,7 +58,8 @@ func (m *UVMManager) hasPendingEvictions() bool {
 // pending, further capacity requests queue and re-evaluate capacity when
 // resumed. // sbin_codex
 func (m *UVMManager) withCapacity(required uint64, exclude map[PageKey]bool, migrate func()) {
-	if m.evictACK > 0 {
+	// if m.evictACK > 0 { // sbin_codex: migration shootdowns share the serialization gate.
+	if m.quiescencePendingLocked() { // sbin_codex
 		m.pendingResumes = append(m.pendingResumes, func() {
 			m.withCapacity(required, exclude, migrate)
 		})
@@ -79,7 +80,8 @@ func (m *UVMManager) withCapacity(required uint64, exclude map[PageKey]bool, mig
 // onDone resumes the migration that triggered the eviction. While an eviction
 // is pending, further eviction requests queue their resumptions. // sbin_codex
 func (m *UVMManager) beginEviction(victims []*RegionState, onDone func()) {
-	if m.evictACK > 0 {
+	// if m.evictACK > 0 { // sbin_codex: do not overlap eviction and migration shootdowns.
+	if m.quiescencePendingLocked() { // sbin_codex
 		m.pendingResumes = append(m.pendingResumes, onDone)
 		return
 	}
@@ -179,19 +181,8 @@ func (m *UVMManager) evictRegion(region *RegionState) uint64 {
 
 	m.removeLRU(region.Key)
 
-	ack := AccessCounterKey{
-		PID:        region.Key.PID,
-		RegionBase: region.Key.Base,
-		DeviceID:   region.Key.DeviceID,
-	}
-	cs := m.accessCounts[ack]
-	if cs == nil {
-		cs = &AccessCounterState{}
-		m.accessCounts[ack] = cs
-	}
-	cs.Count = 0
-	cs.Epoch++
-	cs.Notification = false
+	// ack := AccessCounterKey{PID: region.Key.PID, RegionBase: region.Key.Base,
+	// DeviceID: region.Key.DeviceID} // sbin_codex
 
 	region.Generation++
 	m.stats.GPUResidentPages -= evicted

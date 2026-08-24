@@ -38,6 +38,7 @@ type Builder struct {
 	platform          *sim.Domain
 	globalStorage     *mem.Storage
 	rdmaAddressMapper *mem.BankedAddressPortMapper
+	cpuRemoteTop      sim.Port       // sbin_codex
 	cpuPageTable      vm.PageTable   // sbin_codex: authoritative CPU-side page table.
 	gpuPageTables     []vm.PageTable // sbin_codex: one isolated page table per GPU GMMU.
 
@@ -124,10 +125,11 @@ func (b Builder) Build() *sim.Domain {
 	mmuComp := b.createMMU(b.cpuPageTable) // sbin_codex: CPU MMU uses only the CPU table.
 	gpuDriver := b.buildGPUDriver(
 		b.cpuPageTable, b.gpuPageTables) // sbin_codex: driver owns CPU/GPU table synchronization.
+	b.buildCPURemoteMemory(gpuDriver) // sbin_codex
+	b.createRDMAAddressMapper()       // sbin_codex: CPU endpoint exists before mapper construction.
 
 	gpuBuilder := b.createGPUBuilder(mmuComp)
-	pcieConnector, rootComplexID :=
-		b.createConnection(gpuDriver, mmuComp)
+	pcieConnector, rootComplexID := b.createConnection(gpuDriver, mmuComp)
 
 	mmuComp.MigrationServiceProvider = gpuDriver.GetPortByName("MMU").AsRemote()
 
@@ -224,7 +226,7 @@ func (b *Builder) buildGPUDriver(
 func (b *Builder) createGPUBuilder(
 	mmuComponent *mmu.Comp,
 ) gpubuilder.GPUBuilder {
-	b.createRDMAAddressMapper()
+	// b.createRDMAAddressMapper() // sbin_codex: pre-edit construction occurred before CPU endpoint wiring.
 
 	switch b.gpuType {
 	case "ideal-l1tlb": // sbin_codex: ideal-L1TLB GPU config (todo 7).
@@ -302,6 +304,7 @@ func (b *Builder) createConnection(
 	if b.uvmEnabled && !b.uvmIdeal { // sbin_codex: UVM faults over PCIe in normal mode.
 		rootComplexPorts = append(rootComplexPorts, gpuDriver.GetPortByName("UVM"))
 	}
+	rootComplexPorts = append(rootComplexPorts, b.cpuRemoteTop) // sbin_codex
 	rootComplexID := pcieConnector.AddRootComplex(rootComplexPorts)
 
 	return pcieConnector, rootComplexID
@@ -310,8 +313,11 @@ func (b *Builder) createConnection(
 func (b *Builder) createRDMAAddressMapper() {
 	b.rdmaAddressMapper = new(mem.BankedAddressPortMapper)
 	b.rdmaAddressMapper.BankSize = b.gpuMemSize
-	b.rdmaAddressMapper.LowModules = append(b.rdmaAddressMapper.LowModules,
-		sim.RemotePort("CPU"))
+	// Pre-edit code (commented per AGENTS.md convention):
+	// b.rdmaAddressMapper.LowModules = append(b.rdmaAddressMapper.LowModules,
+	// 	sim.RemotePort("CPU"))
+	b.rdmaAddressMapper.LowModules = append( // sbin_codex
+		b.rdmaAddressMapper.LowModules, b.cpuRemoteTop.AsRemote())
 }
 
 func (b *Builder) createGPU(
@@ -328,11 +334,12 @@ func (b *Builder) createGPU(
 		WithGPUID(uint64(index)).
 		WithMemAddrOffset(memAddrOffset).
 		WithRDMAAddressMapper(b.rdmaAddressMapper).
-		WithPageTable(b.gpuPageTables[index-1]) // sbin_codex: bind GPU N to its driver-managed table.
+		WithDriverPort(gpuDriver.GetPortByName("GPU")). // sbin_codex
+		WithPageTable(b.gpuPageTables[index-1])         // sbin_codex: bind GPU N to its driver-managed table.
 	if b.uvmEnabled { // sbin_codex: GMMU faults route to the driver UVM manager.
 		builder = builder.WithUVMServiceProvider(
 			gpuDriver.GetPortByName("UVM").AsRemote())
-		builder = builder.WithAccessCounterThreshold(b.uvmACThresh)
+		// builder = builder.WithAccessCounterThreshold(b.uvmACThresh) // sbin_codex
 	}
 	gpu := builder.Build(name)
 

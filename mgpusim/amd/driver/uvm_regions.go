@@ -7,7 +7,8 @@ import (
 // RemoteAccessible reports whether a CPU-resident managed page may be returned
 // to the GPU for a remote access instead of faulting.
 func (mp *ManagedPage) RemoteAccessible() bool {
-	return mp.State == CPUResident && mp.TimesMigrated > 0
+	// return mp.State == CPUResident && mp.TimesMigrated > 0 // sbin_codex: pre-first-touch behavior retained.
+	return mp.State == CPUResident && (mp.RemoteMapped || mp.TimesMigrated > 0) // sbin_codex
 }
 
 // regionForKey returns the 64KB region state for a key, or nil.
@@ -21,7 +22,7 @@ func (m *UVMManager) blockForKey(key BlockKey) *VABlock {
 }
 
 // onAccessCounterNotify handles a GPU-side 64KB access-counter threshold
-// notification. The GPU GMMU counts remote (PCIe) accesses to a
+// notification. The PCIe accesscounter counts remote accesses to a
 // CPU-resident region; at the threshold it asks the driver to migrate the
 // region to the GPU. // sbin_codex
 func (m *UVMManager) onAccessCounterNotify(pid vm.PID, regionBase uint64, deviceID uint64) {
@@ -117,6 +118,8 @@ func (m *UVMManager) finishAccessCounterMigration(key AccessCounterKey, pages []
 	m.stats.MigratedBytes += mig.Bytes
 	m.stats.AccessCounterMigr++
 
-	m.migrateData(mig)
-	m.updateResidencyPeak()
+	// m.migrateData(mig) // sbin_codex: access-counter migrations also quiesce before copying.
+	// m.updateResidencyPeak()
+	m.publishMigratingPagesLocked(mig)    // sbin_codex
+	m.beginMigrationQuiescenceLocked(mig) // sbin_codex
 }

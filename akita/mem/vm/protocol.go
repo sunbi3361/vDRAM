@@ -379,9 +379,8 @@ func NewAccessCounterNotifyReq(src, dst sim.RemotePort) *AccessCounterNotifyReq 
 	return cmd
 }
 
-// AccessCounterResetReq is sent by the driver to a GPU GMMU after a
-// 64KB region migrates to the GPU, resetting its remote-access counter for
-// the new residency epoch. // sbin_codex
+// AccessCounterResetReq is sent by the driver to the PCIe accesscounter after
+// a 64KB region migrates to the GPU, re-arming that region. // sbin_codex
 type AccessCounterResetReq struct {
 	sim.MsgMeta
 

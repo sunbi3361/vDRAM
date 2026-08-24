@@ -15,13 +15,15 @@ type Builder struct {
 	log2PageSize   uint64
 	deviceID       uint64
 
-	memPortMapper              mem.AddressToPortMapper
-	memPortMapperType          string
-	memRemotePorts             []sim.RemotePort
-	translationPortMapper      mem.AddressToPortMapper
-	translationPortMapperType  string
-	translationRemotePorts     []sim.RemotePort
-	physicalAddressPassthrough bool // sbin_codex: explicit mixed-address boundary mode.
+	memPortMapper                mem.AddressToPortMapper
+	remoteMemPortMapper          mem.AddressToPortMapper // sbin_codex
+	memPortMapperType            string
+	memRemotePorts               []sim.RemotePort
+	translationPortMapper        mem.AddressToPortMapper
+	translationPortMapperType    string
+	translationRemotePorts       []sim.RemotePort
+	physicalAddressPassthrough   bool // sbin_codex: explicit mixed-address boundary mode.
+	virtualAddressForLocalMemory bool // sbin_codex
 }
 
 // MakeBuilder creates a new builder
@@ -90,6 +92,20 @@ func (b Builder) WithAddressToPortMapper(f mem.AddressToPortMapper) Builder {
 // address translators where to send the memory access request to.
 func (b Builder) WithMemoryProviderMapper(f mem.AddressToPortMapper) Builder {
 	b.memPortMapper = f
+	return b
+}
+
+// WithRemoteMemoryProviderMapper enables a separate egress for pages marked
+// RemoteAccessible. // sbin_codex
+func (b Builder) WithRemoteMemoryProviderMapper(f mem.AddressToPortMapper) Builder {
+	b.remoteMemPortMapper = f
+	return b
+}
+
+// WithVirtualAddressForLocalMemory preserves the original virtual address and
+// PID on local-memory requests. // sbin_codex
+func (b Builder) WithVirtualAddressForLocalMemory() Builder {
+	b.virtualAddressForLocalMemory = true
 	return b
 }
 
@@ -171,7 +187,10 @@ func (b Builder) Build(name string) *Comp {
 	t.numReqPerCycle = b.numReqPerCycle
 	t.log2PageSize = b.log2PageSize
 	t.deviceID = b.deviceID
-	t.physicalAddressPassthrough = b.physicalAddressPassthrough // sbin_codex
+	// t.physicalAddressPassthrough = b.physicalAddressPassthrough // sbin_codex: pre-edit assignment.
+	t.physicalAddressPassthrough = b.physicalAddressPassthrough
+	t.remoteMemoryPortMapper = b.remoteMemPortMapper                // sbin_codex
+	t.virtualAddressForLocalMemory = b.virtualAddressForLocalMemory // sbin_codex
 
 	middleware := &middleware{Comp: t}
 	t.AddMiddleware(middleware)
@@ -242,6 +261,12 @@ func (b Builder) createPorts(name string, t *Comp) {
 	t.bottomPort = sim.NewPort(t, b.numReqPerCycle, b.numReqPerCycle,
 		name+".BottomPort")
 	t.AddPort("Bottom", t.bottomPort)
+
+	if b.remoteMemPortMapper != nil { // sbin_codex: remote egress is opt-in.
+		t.remoteBottomPort = sim.NewPort(t, b.numReqPerCycle, b.numReqPerCycle,
+			name+".RemoteBottomPort")
+		t.AddPort("RemoteBottom", t.remoteBottomPort)
+	}
 
 	t.translationPort = sim.NewPort(t, b.numReqPerCycle, b.numReqPerCycle,
 		name+".TranslationPort")

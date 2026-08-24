@@ -1,5 +1,7 @@
 package driver
 
+// allow: SIZE_OK - cohesive UVM fault/migration state machine; broad splitting is out of scope. // sbin_codex
+
 import (
 	"github.com/sarchlab/akita/v4/mem/vm"
 	"github.com/sarchlab/akita/v4/sim"
@@ -185,6 +187,52 @@ func (m *UVMManager) coalesceFault(pageKey PageKey, deviceID uint64, requestID s
 	m.d.Engine.Schedule(newFaultHandlingCompleteEvent(readyAt, m.d, fault.ID))
 }
 
+// mp := m.pages[fault.Key.Page] // sbin_codex: pre-extraction first-touch block retained.
+// if mp != nil && mp.State == CPUResident && !mp.GPUFrameValid &&
+// 	mp.TimesMigrated == 0 && !mp.RemoteMapped {
+// 	mp.RemoteMapped = true
+// 	m.d.memAllocator.UpdatePage(vm.Page{
+// 		PID:              mp.Key.PID,
+// 		VAddr:            mp.Key.VAddr,
+// 		PAddr:            mp.CPUBackingPAddr,
+// 		PageSize:         m.config.PageSize,
+// 		Valid:            true,
+// 		DeviceID:         0,
+// 		Unified:          false,
+// 		Managed:          true,
+// 		IsMigrating:      false,
+// 		RemoteAccessible: true,
+// 	})
+// 	m.replayFault(fault.ID)
+// 	return
+// }
+
+// remoteMapFirstTouch performs the explicit cold-page first-touch state transition. // sbin_codex
+func (m *UVMManager) remoteMapFirstTouch(fault *PageFault) bool { // sbin_codex
+	mp := m.pages[fault.Key.Page]
+	if mp == nil || mp.State != CPUResident || mp.GPUFrameValid ||
+		mp.TimesMigrated != 0 || mp.RemoteMapped {
+		return false
+	}
+
+	mp.RemoteMapped = true
+	m.d.memAllocator.UpdatePage(vm.Page{
+		PID:              mp.Key.PID,
+		VAddr:            mp.Key.VAddr,
+		PAddr:            mp.CPUBackingPAddr,
+		PageSize:         m.config.PageSize,
+		Valid:            true,
+		DeviceID:         0,
+		Unified:          false,
+		Managed:          true,
+		IsMigrating:      false,
+		RemoteAccessible: true,
+	})
+	m.replayFault(fault.ID)
+
+	return true
+}
+
 // handleFaultReady runs the fault-ready stage: TBN selection, capacity check,
 // eviction, and migration.
 func (m *UVMManager) handleFaultReady(faultID string) {
@@ -196,6 +244,11 @@ func (m *UVMManager) handleFaultReady(faultID string) {
 		return
 	}
 	fault.State = FaultReady
+
+	// sbin_codex: only the demanded cold 4KB page is remotely mapped.
+	if m.remoteMapFirstTouch(fault) { // sbin_codex
+		return
+	}
 
 	block := m.blocks[BlockKey{PID: fault.Key.Page.PID, Base: fault.VABlockBase}]
 	if block == nil {
@@ -253,10 +306,7 @@ func (m *UVMManager) startCPUGPUMigration(fault *PageFault, sel tbnSelection) {
 	m.migrations[mig.ID] = mig
 	m.pageToMig[fault.Key.Page] = mig.ID
 	mig.FaultIDs = append(mig.FaultIDs, fault.ID)
-	// sbin_codex: remember the requesting GMMU for access-counter resets.
-	if len(fault.Waiters) > 0 {
-		mig.GMMUPort = fault.Waiters[0].ReplyTo
-	}
+	// if len(fault.Waiters) > 0 { mig.GMMUPort = fault.Waiters[0].ReplyTo } // sbin_codex
 
 	// Reserve GPU frames and set pages to MigratingToGPU.
 	for _, pk := range sel.pageKeys {
@@ -295,8 +345,10 @@ func (m *UVMManager) startCPUGPUMigration(fault *PageFault, sel tbnSelection) {
 	m.stats.MigratedBytes += mig.Bytes
 
 	// Migration data transfer (CPU -> GPU). In ideal mode this is zero-latency.
-	m.migrateData(mig)
-	m.updateResidencyPeak()
+	// m.migrateData(mig) // sbin_codex: the CP shootdown ACK now gates the copy.
+	// m.updateResidencyPeak()
+	m.publishMigratingPagesLocked(mig)    // sbin_codex
+	m.beginMigrationQuiescenceLocked(mig) // sbin_codex
 }
 
 // migrateData performs the data plane for a migration. In normal mode it
@@ -367,7 +419,11 @@ func (m *UVMManager) completeMigration(migID string) {
 		mp.State = GPUResident
 
 		// sbin_codex: the region joins the driver LRU list on GPU residency.
-		m.addLRU(RegionKey{PID: mp.Key.PID, Base: m.config.alignDown(mp.Key.VAddr, m.config.RegionSize), DeviceID: mig.DeviceID})
+		m.addLRU(RegionKey{
+			PID:      mp.Key.PID,
+			Base:     m.config.alignDown(mp.Key.VAddr, m.config.RegionSize),
+			DeviceID: mig.DeviceID,
+		})
 
 		page := vm.Page{
 			PID:              mp.Key.PID,
@@ -383,20 +439,12 @@ func (m *UVMManager) completeMigration(migID string) {
 		}
 		m.d.memAllocator.UpdatePage(page)
 
-		// Reset the access counter for the region.
-		regionBase := m.config.alignDown(mp.Key.VAddr, m.config.RegionSize)
-		ack := AccessCounterKey{PID: mp.Key.PID, RegionBase: regionBase, DeviceID: mig.DeviceID}
-		if cs := m.accessCounts[ack]; cs != nil {
-			cs.Count = 0
-			cs.Epoch++
-			cs.Notification = false
-			m.stats.AccessCounterResets++
-		}
+		// ack := AccessCounterKey{PID: mp.Key.PID, RegionBase: regionBase, DeviceID: mig.DeviceID} // sbin_codex
 	}
+	m.beginMigrationRestartLocked(mig) // sbin_codex
 
-	// sbin_codex: sync the GPU-side access counter with the driver: clear the
-	// counters of the migrated regions so the new residency epoch starts clean.
-	m.resetGPUAccessCounters(mig)
+	// m.resetGPUAccessCounters(mig) // sbin_codex
+	m.queueAccessCounterResets(mig) // sbin_codex: stateMu is already held.
 
 	// Replay waiters.
 	for _, fid := range mig.FaultIDs {

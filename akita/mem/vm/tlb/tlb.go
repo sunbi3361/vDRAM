@@ -2,6 +2,7 @@ package tlb
 
 import (
 	"github.com/sarchlab/akita/v4/mem/mem"
+	"github.com/sarchlab/akita/v4/mem/vm" // sbin_codex
 	"github.com/sarchlab/akita/v4/mem/vm/tlb/internal"
 	"github.com/sarchlab/akita/v4/pipelining"
 	"github.com/sarchlab/akita/v4/sim"
@@ -26,11 +27,12 @@ type Comp struct {
 
 	addressMapper mem.AddressToPortMapper
 
-	numSets        int
-	numWays        int
-	pageSize       uint64
-	numReqPerCycle int
-	state          int
+	numSets                int
+	numWays                int
+	pageSize               uint64
+	numReqPerCycle         int
+	state                  int
+	pageAdmissionPredicate func(vm.Page) bool // sbin_codex
 
 	sets []internal.Set
 

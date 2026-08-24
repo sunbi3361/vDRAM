@@ -7,9 +7,11 @@ import (
 	"github.com/sarchlab/akita/v4/sim"
 )
 
-var accessReqByteOverhead = 12
-var accessRspByteOverhead = 4
-var controlMsgByteOverhead = 4
+var (
+	accessReqByteOverhead  = 12
+	accessRspByteOverhead  = 4
+	controlMsgByteOverhead = 4
+)
 
 // AccessReq abstracts read and write requests that are sent to the
 // cache modules or memory controllers.
@@ -26,6 +28,14 @@ type AccessRsp interface {
 	sim.Rsp
 }
 
+// RemoteDemandInfo identifies the original virtual demand behind a remote
+// physical memory request. // sbin_codex
+type RemoteDemandInfo struct {
+	PID      vm.PID
+	VAddr    uint64
+	DeviceID uint64
+}
+
 // A ReadReq is a request sent to a memory controller to fetch data
 type ReadReq struct {
 	sim.MsgMeta
@@ -34,7 +44,9 @@ type ReadReq struct {
 	AccessByteSize     uint64
 	PID                vm.PID
 	CanWaitForCoalesce bool
-	Info               interface{}
+	// Info interface{} // sbin_codex: pre-edit field retained for compatibility below.
+	Info             interface{}
+	RemoteDemandInfo *RemoteDemandInfo // sbin_codex: nil for ordinary memory requests.
 }
 
 // Meta returns the message meta.
@@ -83,7 +95,9 @@ type ReadReqBuilder struct {
 	pid                vm.PID
 	address, byteSize  uint64
 	canWaitForCoalesce bool
-	info               interface{}
+	// info interface{} // sbin_codex: pre-edit builder field retained below.
+	info             interface{}
+	remoteDemandInfo *RemoteDemandInfo // sbin_codex
 }
 
 // WithSrc sets the source of the request to build.
@@ -107,6 +121,12 @@ func (b ReadReqBuilder) WithPID(pid vm.PID) ReadReqBuilder {
 // WithInfo sets the Info of the request to build.
 func (b ReadReqBuilder) WithInfo(info interface{}) ReadReqBuilder {
 	b.info = info
+	return b
+}
+
+// WithRemoteDemandInfo attaches typed UVM remote-demand metadata. // sbin_codex
+func (b ReadReqBuilder) WithRemoteDemandInfo(info RemoteDemandInfo) ReadReqBuilder {
+	b.remoteDemandInfo = &info
 	return b
 }
 
@@ -137,7 +157,9 @@ func (b ReadReqBuilder) Build() *ReadReq {
 	r.TrafficBytes = accessReqByteOverhead
 	r.Address = b.address
 	r.PID = b.pid
+	// r.Info = b.info // sbin_codex: pre-edit assignment.
 	r.Info = b.info
+	r.RemoteDemandInfo = b.remoteDemandInfo // sbin_codex
 	r.AccessByteSize = b.byteSize
 	r.CanWaitForCoalesce = b.canWaitForCoalesce
 	r.TrafficClass = reflect.TypeOf(ReadReq{}).String()
@@ -154,7 +176,9 @@ type WriteReq struct {
 	DirtyMask          []bool
 	PID                vm.PID
 	CanWaitForCoalesce bool
-	Info               interface{}
+	// Info interface{} // sbin_codex: pre-edit field retained for compatibility below.
+	Info             interface{}
+	RemoteDemandInfo *RemoteDemandInfo // sbin_codex: nil for ordinary memory requests.
 }
 
 // Meta returns the meta data attached to a request.
@@ -198,9 +222,11 @@ func (r *WriteReq) GetPID() vm.PID {
 
 // WriteReqBuilder can build read requests.
 type WriteReqBuilder struct {
-	src, dst           sim.RemotePort
-	pid                vm.PID
+	src, dst sim.RemotePort
+	pid      vm.PID
+	// info interface{} // sbin_codex: pre-edit builder field retained below.
 	info               interface{}
+	remoteDemandInfo   *RemoteDemandInfo // sbin_codex
 	address            uint64
 	data               []byte
 	dirtyMask          []bool
@@ -228,6 +254,12 @@ func (b WriteReqBuilder) WithPID(pid vm.PID) WriteReqBuilder {
 // WithInfo sets the information attached to the request to build.
 func (b WriteReqBuilder) WithInfo(info interface{}) WriteReqBuilder {
 	b.info = info
+	return b
+}
+
+// WithRemoteDemandInfo attaches typed UVM remote-demand metadata. // sbin_codex
+func (b WriteReqBuilder) WithRemoteDemandInfo(info RemoteDemandInfo) WriteReqBuilder {
+	b.remoteDemandInfo = &info
 	return b
 }
 
@@ -262,7 +294,9 @@ func (b WriteReqBuilder) Build() *WriteReq {
 	r.Src = b.src
 	r.Dst = b.dst
 	r.PID = b.pid
+	// r.Info = b.info // sbin_codex: pre-edit assignment.
 	r.Info = b.info
+	r.RemoteDemandInfo = b.remoteDemandInfo // sbin_codex
 	r.Address = b.address
 	r.Data = b.data
 	r.TrafficBytes = len(r.Data) + accessReqByteOverhead

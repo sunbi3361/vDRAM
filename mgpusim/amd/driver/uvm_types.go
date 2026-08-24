@@ -38,6 +38,17 @@ type AccessCounterKey struct {
 	DeviceID   uint64
 }
 
+// AccessCounterResetKey identifies one PCIe counter reset target. // sbin_codex
+type AccessCounterResetKey struct {
+	PID        vm.PID
+	RegionBase uint64
+}
+
+type pendingAccessCounterReset struct { // sbin_codex
+	Key      AccessCounterResetKey
+	DeviceID uint64
+}
+
 // ResidencyState is the residency of a managed page.
 type ResidencyState int
 
@@ -55,6 +66,7 @@ type ManagedPage struct {
 	CPUBackingPAddr uint64
 	GPUFramePAddr   uint64
 	GPUFrameValid   bool
+	RemoteMapped    bool // sbin_codex: the cold CPU page completed its first-touch remote mapping.
 	State           ResidencyState
 	RegionBase      uint64
 	VABlockBase     uint64
@@ -135,9 +147,7 @@ type Migration struct {
 	DataStartedAt  sim.VTimeInSec
 	DataFinishedAt sim.VTimeInSec
 	FaultIDs       []string
-	// GMMUPort is the UVM port of the GMMU that requested the migration,
-	// used to send access-counter reset requests. // sbin_codex
-	GMMUPort sim.RemotePort
+	// GMMUPort sim.RemotePort // sbin_codex
 }
 
 // RegionState tracks the 64KB UVM region for residency and LRU.
@@ -160,10 +170,9 @@ type VABlock struct {
 	Activity     []uint32
 }
 
-// AccessCounterState is the 64KB remote-access counter.
-type AccessCounterState struct {
-	Count        uint64
-	Epoch        uint64
-	Notification bool
-	LastAccess   sim.VTimeInSec
-}
+// type AccessCounterState struct { // sbin_codex
+// 	Count uint64
+// 	Epoch uint64
+// 	Notification bool
+// 	LastAccess sim.VTimeInSec
+// }

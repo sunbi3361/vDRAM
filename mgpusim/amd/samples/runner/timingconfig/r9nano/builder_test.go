@@ -50,13 +50,14 @@ var _ = Describe("R9 Nano builder", func() {
 		))
 		Expect(componentNames.gmmus).To(ConsistOf("GPU.GMMU"))
 		Expect(componentNames.connections).To(ContainElements(
+			"GPU.L1ToL2",       // sbin_codex
+			"GPU.L1TLBToL2TLB", // sbin_codex
 			"GPU.L2ToDRAM",
 			"GPU.L2TLBToGMMU",
 		))
-		Expect(componentNames.connections).NotTo(ContainElement(
-			"GPU.L1TLBToL2TLB"))
-		Expect(componentNames.connections).NotTo(ContainElement(
-			"GPU.L1ToL2")) // sbin_codex: baseline keeps this unregistered.
+		// Pre-edit code (commented per AGENTS.md convention):
+		// Expect(componentNames.connections).NotTo(ContainElement("GPU.L1TLBToL2TLB"))
+		// Expect(componentNames.connections).NotTo(ContainElement("GPU.L1ToL2"))
 		probeConnection := directconnection.MakeBuilder().
 			WithEngine(testSimulation.GetEngine()).
 			WithFreq(1 * sim.GHz).
@@ -123,12 +124,27 @@ var _ = Describe("R9 Nano builder", func() {
 
 		// Then
 		componentNames := componentNamesByType(testSimulation.Components())
+		// Pre-edit code (commented per AGENTS.md convention):
+		// Expect(componentNames.addressTranslators).To(ConsistOf(
+		// 	"GPU.SA[0].L1IAddrTrans",
+		// 	"GPU.L2AddrTrans[0]",
+		// 	"GPU.L2AddrTrans[1]",
+		// ))
 		Expect(componentNames.addressTranslators).To(ConsistOf(
+			"GPU.SA[0].L1VAddrTrans[0]", // sbin_codex
+			"GPU.SA[0].L1SAddrTrans",    // sbin_codex
 			"GPU.SA[0].L1IAddrTrans",
 			"GPU.L2AddrTrans[0]",
 			"GPU.L2AddrTrans[1]",
 		))
+		// Pre-edit code (commented per AGENTS.md convention):
+		// Expect(componentNames.tlbs).To(ConsistOf(
+		// 	"GPU.SA[0].L1ITLB",
+		// 	"GPU.L2TLB",
+		// ))
 		Expect(componentNames.tlbs).To(ConsistOf(
+			"GPU.SA[0].L1VTLB[0]", // sbin_codex
+			"GPU.SA[0].L1STLB",    // sbin_codex
 			"GPU.SA[0].L1ITLB",
 			"GPU.L2TLB",
 		))
@@ -145,14 +161,23 @@ var _ = Describe("R9 Nano builder", func() {
 
 		commandProcessor := testSimulation.GetComponentByName(
 			"GPU.CommandProcessor").(*cp.CommandProcessor)
+		// Pre-edit code (commented per AGENTS.md convention):
+		// Expect(componentNamesForPorts(commandProcessor.PreCacheTranslators.Ports)).To(
+		// 	ConsistOf("GPU.SA[0].L1IAddrTrans"))
 		Expect(componentNamesForPorts(commandProcessor.PreCacheTranslators.Ports)).To(
-			ConsistOf("GPU.SA[0].L1IAddrTrans")) // sbin_codex: L1 ATs remain distinct.
+			ConsistOf(
+				"GPU.SA[0].L1VAddrTrans[0]",
+				"GPU.SA[0].L1SAddrTrans",
+				"GPU.SA[0].L1IAddrTrans",
+			)) // sbin_codex
 		Expect(componentNamesForPorts(commandProcessor.PostCacheTranslators.Ports)).To(
 			ConsistOf(
 				"GPU.L2AddrTrans[0]",
 				"GPU.L2AddrTrans[1]",
 			)) // sbin_codex: every per-slice L2 AT is tracked separately.
 		Expect(componentNamesForPorts(commandProcessor.TLBs)).To(ConsistOf(
+			"GPU.SA[0].L1VTLB[0]", // sbin_codex
+			"GPU.SA[0].L1STLB",    // sbin_codex
 			"GPU.SA[0].L1ITLB",
 			"GPU.L2TLB",
 		))
@@ -181,6 +206,10 @@ var _ = Describe("R9 Nano builder", func() {
 		}) // sbin_codex: L1I retains physical-range/RDMA mapping in virtual mode.
 
 		sharedTranslationPorts := []sim.Port{
+			testSimulation.GetComponentByName(
+				"GPU.SA[0].L1VTLB[0]").GetPortByName("Bottom"), // sbin_codex
+			testSimulation.GetComponentByName(
+				"GPU.SA[0].L1STLB").GetPortByName("Bottom"), // sbin_codex
 			testSimulation.GetComponentByName(
 				"GPU.SA[0].L1ITLB").GetPortByName("Bottom"),
 			testSimulation.GetComponentByName(

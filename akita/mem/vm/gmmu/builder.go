@@ -26,7 +26,7 @@ type Builder struct {
 	rpcacheLineSize     uint64
 	rpcacheBytesPerChip uint64
 	uvmServiceProvider  sim.RemotePort // sbin_codex: UVM fault service provider.
-	accessCounterThresh uint64         // sbin_codex: remote-access counter threshold.
+	// accessCounterThresh uint64 // sbin_codex
 }
 
 // MakeBuilder creates a new builder
@@ -108,12 +108,10 @@ func (b Builder) WithUVMServiceProvider(provider sim.RemotePort) Builder {
 	return b
 }
 
-// WithAccessCounterThreshold sets the 64KB remote-access counter threshold
-// that triggers a migration notification. Zero disables counting. // sbin_codex
-func (b Builder) WithAccessCounterThreshold(thresh uint64) Builder {
-	b.accessCounterThresh = thresh
-	return b
-}
+// func (b Builder) WithAccessCounterThreshold(thresh uint64) Builder { // sbin_codex
+// 	b.accessCounterThresh = thresh
+// 	return b
+// }
 
 func (b Builder) Build(name string) *Comp {
 	// sbin_codex: reject a latency that cannot represent a cycle countdown.
@@ -149,9 +147,9 @@ func (b Builder) configureInternalStates(c *Comp) {
 	c.state = gmmuStateEnable                     // sbin_codex
 	c.addressToPortMapper = b.addressToPortMapper // sbin_gmmu
 	c.UVMServiceProvider = b.uvmServiceProvider   // sbin_codex
-	c.accessCounterThreshold = b.accessCounterThresh
-	c.accessCounters = make(map[uint64]uint64)
-	c.accessCounterNotified = make(map[uint64]bool)
+	// c.accessCounterThreshold = b.accessCounterThresh // sbin_codex
+	// c.accessCounters = make(map[uint64]uint64)
+	// c.accessCounterNotified = make(map[uint64]bool)
 }
 
 func (b Builder) createPageWalkCache(name string, c *Comp) {

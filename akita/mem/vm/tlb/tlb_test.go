@@ -14,7 +14,6 @@ import (
 )
 
 var _ = Describe("TLB", func() {
-
 	var (
 		mockCtrl      *gomock.Controller
 		engine        *MockEngine
@@ -256,6 +255,47 @@ var _ = Describe("TLB", func() {
 				To(Equal(false))
 		})
 
+		It("replies to waiters without storing a rejected page", func() { // sbin_codex
+			// Given // sbin_codex
+			remotePage := page
+			remotePage.RemoteAccessible = true
+			remoteRsp := vm.TranslationRspBuilder{}.
+				WithRspTo(fetchBottom.ID).
+				WithPage(remotePage).
+				Build()
+			selectiveTLB := MakeBuilder().
+				WithEngine(engine).
+				WithTranslationProviderMapper(addressMapper).
+				WithPageAdmissionPredicate(func(page vm.Page) bool {
+					return !page.RemoteAccessible
+				}).
+				Build("SelectiveTLB")
+			selectiveTLB.topPort = topPort
+			selectiveTLB.bottomPort = bottomPort
+			selectiveTLB.sets = []internal.Set{set}
+			selectiveMW := selectiveTLB.Middlewares()[1].(*tlbMiddleware)
+			mshrEntry := selectiveTLB.mshr.Add(1, 0x100)
+			mshrEntry.Requests = append(mshrEntry.Requests, req)
+			mshrEntry.reqToBottom = fetchBottom
+			bottomPort.EXPECT().PeekIncoming().Return(remoteRsp)
+			bottomPort.EXPECT().RetrieveIncoming()
+			topPort.EXPECT().Send(gomock.Any()).DoAndReturn(
+				func(rsp *vm.TranslationRsp) *sim.SendError {
+					Expect(rsp.Page).To(Equal(remotePage))
+					return nil
+				})
+
+			// When // sbin_codex
+			parsed := selectiveMW.parseBottom()
+			responded := selectiveMW.respondMSHREntry()
+
+			// Then // sbin_codex
+			Expect(parsed).To(BeTrue())
+			Expect(responded).To(BeTrue())
+			Expect(selectiveTLB.respondingMSHREntry).To(BeNil())
+			Expect(selectiveTLB.mshr.IsEntryPresent(1, 0x100)).To(BeFalse())
+		})
+
 		It("should respond", func() {
 			mshrEntry := tlb.mshr.Add(1, 0x100)
 			mshrEntry.Requests = append(mshrEntry.Requests, req)
@@ -272,7 +312,6 @@ var _ = Describe("TLB", func() {
 	})
 
 	Context("flush related handling", func() {
-
 		It("should do nothing if no req", func() {
 			controlPort.EXPECT().PeekIncoming().Return(nil)
 			madeProgress := tlbCtrlMW.performCtrlReq()

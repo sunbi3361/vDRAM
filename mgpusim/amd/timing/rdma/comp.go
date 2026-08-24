@@ -106,7 +106,6 @@ func (c *Comp) processRDMARestartReq() bool {
 		WithDst(c.currentDrainReq.Src).
 		Build()
 	err := c.CtrlPort.Send(restartCompleteRsp)
-
 	if err != nil {
 		return false
 	}
@@ -228,9 +227,8 @@ func (c *Comp) processRspFromL2(
 
 		c.traceOutsideInEnd(trans)
 
-		c.transactionsFromOutside =
-			append(c.transactionsFromOutside[:transactionIndex],
-				c.transactionsFromOutside[transactionIndex+1:]...)
+		c.transactionsFromOutside = append(c.transactionsFromOutside[:transactionIndex],
+			c.transactionsFromOutside[transactionIndex+1:]...)
 		return true
 	}
 	return false
@@ -276,9 +274,8 @@ func (c *Comp) processRspFromRDMARequestOutside(
 
 		c.traceInsideOutEnd(trans)
 
-		c.transactionsFromInside =
-			append(c.transactionsFromInside[:transactionIndex],
-				c.transactionsFromInside[transactionIndex+1:]...)
+		c.transactionsFromInside = append(c.transactionsFromInside[:transactionIndex],
+			c.transactionsFromInside[transactionIndex+1:]...)
 
 		return true
 	}
@@ -325,8 +322,7 @@ func (c *Comp) processReqFromRDMADataOutside(
 			fromOutside: req,
 			toInside:    cloned,
 		}
-		c.transactionsFromOutside =
-			append(c.transactionsFromOutside, trans)
+		c.transactionsFromOutside = append(c.transactionsFromOutside, trans)
 		return true
 	}
 	return false
@@ -353,22 +349,30 @@ func (c *Comp) findTransactionByRspToID(
 func (c *Comp) cloneReq(origin mem.AccessReq) mem.AccessReq {
 	switch origin := origin.(type) {
 	case *mem.ReadReq:
-		read := mem.ReadReqBuilder{}.
-			WithSrc(origin.Src).
-			WithDst(origin.Dst).
-			WithAddress(origin.Address).
-			WithByteSize(origin.AccessByteSize).
-			Build()
-		return read
+		// read := mem.ReadReqBuilder{}. // sbin_codex: pre-edit code.
+		// 	WithSrc(origin.Src).
+		// 	WithDst(origin.Dst).
+		// 	WithAddress(origin.Address).
+		// 	WithByteSize(origin.AccessByteSize).
+		// 	Build()
+		// return read
+		// sbin_codex: Clone preserves every semantically relevant field (PID,
+		// Info, CanWaitForCoalesce, RemoteDemandInfo); callers rewrite
+		// Src/Dst and the fresh ID provides the RDMA correlation handle.
+		return origin.Clone().(*mem.ReadReq)
 	case *mem.WriteReq:
-		write := mem.WriteReqBuilder{}.
-			WithSrc(origin.Src).
-			WithDst(origin.Dst).
-			WithAddress(origin.Address).
-			WithData(origin.Data).
-			WithDirtyMask(origin.DirtyMask).
-			Build()
-		return write
+		// write := mem.WriteReqBuilder{}. // sbin_codex: pre-edit code.
+		// 	WithSrc(origin.Src).
+		// 	WithDst(origin.Dst).
+		// 	WithAddress(origin.Address).
+		// 	WithData(origin.Data).
+		// 	WithDirtyMask(origin.DirtyMask).
+		// 	Build()
+		// return write
+		// sbin_codex: Clone preserves every semantically relevant field (PID,
+		// Info, CanWaitForCoalesce, RemoteDemandInfo); callers rewrite
+		// Src/Dst and the fresh ID provides the RDMA correlation handle.
+		return origin.Clone().(*mem.WriteReq)
 	default:
 		log.Panicf("cannot clone request of type %s",
 			reflect.TypeOf(origin))

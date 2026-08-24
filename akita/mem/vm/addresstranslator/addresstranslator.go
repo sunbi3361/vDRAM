@@ -28,17 +28,20 @@ type Comp struct {
 	*sim.TickingComponent
 	sim.MiddlewareHolder
 
-	topPort         sim.Port
-	bottomPort      sim.Port
-	translationPort sim.Port
-	ctrlPort        sim.Port
+	topPort          sim.Port
+	bottomPort       sim.Port
+	remoteBottomPort sim.Port // sbin_codex
+	translationPort  sim.Port
+	ctrlPort         sim.Port
 
-	log2PageSize               uint64
-	deviceID                   uint64
-	numReqPerCycle             int
-	memoryPortMapper           mem.AddressToPortMapper
-	translationPortMapper      mem.AddressToPortMapper
-	physicalAddressPassthrough bool // sbin_codex: PID zero is already physical only at an explicit boundary.
+	log2PageSize                 uint64
+	deviceID                     uint64
+	numReqPerCycle               int
+	memoryPortMapper             mem.AddressToPortMapper
+	remoteMemoryPortMapper       mem.AddressToPortMapper // sbin_codex
+	translationPortMapper        mem.AddressToPortMapper
+	physicalAddressPassthrough   bool // sbin_codex: PID zero is already physical only at an explicit boundary.
+	virtualAddressForLocalMemory bool // sbin_codex
 
 	isFlushing bool
 
@@ -97,12 +100,12 @@ func (m *middleware) translate() bool {
 
 	req := item.(mem.AccessReq)
 	if m.physicalAddressPassthrough && req.GetPID() == 0 {
-		pageBase := req.GetAddress() &^ ((uint64(1) << m.log2PageSize) - 1)
-		forwarded := m.createTranslatedReq(req, vm.Page{
-			PAddr:    pageBase,
-			VAddr:    pageBase,
-			PageSize: 1 << m.log2PageSize,
-		}) // sbin_codex: preserve physical L1I page base and apply offset once.
+		// pageBase := req.GetAddress() &^ ((uint64(1) << m.log2PageSize) - 1) // sbin_codex: pre-edit helper input.
+		// forwarded := m.createTranslatedReq(req, vm.Page{PAddr: pageBase, VAddr: pageBase, PageSize: 1 << m.log2PageSize}) // sbin_codex: pre-edit helper signature.
+		forwarded := m.createTranslatedReq(req, translationRoute{ // sbin_codex
+			port: m.bottomPort, mapper: m.memoryPortMapper,
+			address: req.GetAddress(), pid: req.GetPID(),
+		})
 		if err := m.bottomPort.Send(forwarded); err != nil {
 			return false
 		}
@@ -167,11 +170,11 @@ func (m *middleware) parseTranslation() bool {
 	transaction.translationDone = true
 
 	reqFromTop := transaction.incomingReqs[0]
-	translatedReq := m.createTranslatedReq(
-		reqFromTop,
-		transaction.translationRsp.Page)
-
-	err := m.bottomPort.Send(translatedReq)
+	// translatedReq := m.createTranslatedReq(reqFromTop, transaction.translationRsp.Page) // sbin_codex: pre-edit local-only route.
+	// err := m.bottomPort.Send(translatedReq)
+	route := m.routeTranslation(reqFromTop, transaction.translationRsp.Page) // sbin_codex
+	translatedReq := m.createTranslatedReq(reqFromTop, route)
+	err := route.port.Send(translatedReq)
 	if err != nil {
 		return false
 	}
@@ -179,7 +182,8 @@ func (m *middleware) parseTranslation() bool {
 	tracing.AddMilestone(
 		tracing.MsgIDAtReceiver(translatedReq, m.Comp),
 		tracing.MilestoneKindNetworkBusy,
-		m.bottomPort.Name(),
+		// m.bottomPort.Name(), // sbin_codex: pre-edit local-only milestone.
+		route.port.Name(), // sbin_codex
 		m.Comp.Name(),
 		m.Comp,
 	)
@@ -214,7 +218,13 @@ func (m *middleware) parseTranslation() bool {
 
 //nolint:funlen,gocyclo
 func (m *middleware) respond() bool {
-	rsp := m.bottomPort.PeekIncoming()
+	// rsp := m.bottomPort.PeekIncoming() // sbin_codex: pre-edit local-only response.
+	rspPort := m.bottomPort // sbin_codex
+	rsp := rspPort.PeekIncoming()
+	if rsp == nil && m.remoteBottomPort != nil { // sbin_codex
+		rspPort = m.remoteBottomPort
+		rsp = rspPort.PeekIncoming()
+	}
 	if rsp == nil {
 		return false
 	}
@@ -290,64 +300,14 @@ func (m *middleware) respond() bool {
 		tracing.TraceReqComplete(reqToBottomCombo.reqFromTop, m.Comp)
 	}
 
-	m.bottomPort.RetrieveIncoming()
+	// m.bottomPort.RetrieveIncoming() // sbin_codex: pre-edit local-only dequeue.
+	rspPort.RetrieveIncoming() // sbin_codex
 
 	return true
 }
 
-func (m *middleware) createTranslatedReq(
-	req mem.AccessReq,
-	page vm.Page,
-) mem.AccessReq {
-	switch req := req.(type) {
-	case *mem.ReadReq:
-		return m.createTranslatedReadReq(req, page)
-	case *mem.WriteReq:
-		return m.createTranslatedWriteReq(req, page)
-	default:
-		log.Panicf("cannot translate request of type %s", reflect.TypeOf(req))
-		return nil
-	}
-}
-
-func (m *middleware) createTranslatedReadReq(
-	req *mem.ReadReq,
-	page vm.Page,
-) *mem.ReadReq {
-	offset := req.Address % (1 << m.log2PageSize)
-	addr := page.PAddr + offset
-	clone := mem.ReadReqBuilder{}.
-		WithSrc(m.bottomPort.AsRemote()).
-		WithDst(m.memoryPortMapper.Find(addr)).
-		WithAddress(addr).
-		WithByteSize(req.AccessByteSize).
-		WithPID(0).
-		WithInfo(req.Info).
-		Build()
-	clone.CanWaitForCoalesce = req.CanWaitForCoalesce
-
-	return clone
-}
-
-func (m *middleware) createTranslatedWriteReq(
-	req *mem.WriteReq,
-	page vm.Page,
-) *mem.WriteReq {
-	offset := req.Address % (1 << m.log2PageSize)
-	addr := page.PAddr + offset
-	clone := mem.WriteReqBuilder{}.
-		WithSrc(m.bottomPort.AsRemote()).
-		WithDst(m.memoryPortMapper.Find(addr)).
-		WithData(req.Data).
-		WithDirtyMask(req.DirtyMask).
-		WithAddress(addr).
-		WithPID(0).
-		WithInfo(req.Info).
-		Build()
-	clone.CanWaitForCoalesce = req.CanWaitForCoalesce
-
-	return clone
-}
+// sbin_codex: pre-edit createTranslatedReq/read/write helpers moved to routing.go
+// so dual-egress route selection remains isolated from pipeline control.
 
 func (m *middleware) addrToPageID(addr uint64) uint64 {
 	return (addr >> m.log2PageSize) << m.log2PageSize
@@ -458,7 +418,6 @@ func (m *middleware) handleRestartReq(
 		Build()
 
 	err := m.ctrlPort.Send(rsp)
-
 	if err != nil {
 		return false
 	}
@@ -467,6 +426,10 @@ func (m *middleware) handleRestartReq(
 	}
 
 	for m.bottomPort.RetrieveIncoming() != nil {
+	}
+	if m.remoteBottomPort != nil { // sbin_codex
+		for m.remoteBottomPort.RetrieveIncoming() != nil {
+		}
 	}
 
 	for m.translationPort.RetrieveIncoming() != nil {

@@ -14,8 +14,10 @@ type DataPathTopology interface {
 	connect(*Builder)
 }
 
-type baselineDataPathTopology struct{} // sbin_codex
-type virtualDataPathTopology struct{}  // sbin_codex
+type (
+	baselineDataPathTopology struct{} // sbin_codex
+	virtualDataPathTopology  struct{} // sbin_codex
+)
 
 // NewBaselineDataPathTopology returns the default translated L1 data path. // sbin_codex
 func NewBaselineDataPathTopology() DataPathTopology {
@@ -37,19 +39,23 @@ func (baselineDataPathTopology) build(b *Builder) {
 }
 
 func (virtualDataPathTopology) build(b *Builder) {
-	b.buildL1VCaches()
-	b.buildL1SCache()
+	// Pre-edit code (commented per AGENTS.md convention):
+	// b.buildL1VCaches()
+	// b.buildL1SCache()
+	baselineDataPathTopology{}.build(b) // sbin_codex
 }
 
 func (baselineDataPathTopology) addExternalPorts(b *Builder) {
 	for i := range b.numCUs {
 		b.sa.AddPort(fmt.Sprintf("L1VAddrTransCtrl[%d]", i), b.l1vATs[i].GetPortByName("Control"))
+		b.sa.AddPort(fmt.Sprintf("L1VAddrTransRemoteBottom[%d]", i), b.l1vATs[i].GetPortByName("RemoteBottom")) // sbin_codex
 		b.sa.AddPort(fmt.Sprintf("L1VTLBCtrl[%d]", i), b.l1vTLBs[i].GetPortByName("Control"))
 		b.sa.AddPort(fmt.Sprintf("L1VCacheCtrl[%d]", i), b.l1vCaches[i].GetPortByName("Control"))
 		b.sa.AddPort(fmt.Sprintf("L1VCacheBottom[%d]", i), b.l1vCaches[i].GetPortByName("Bottom"))
 		b.sa.AddPort(fmt.Sprintf("L1VTLBBottom[%d]", i), b.l1vTLBs[i].GetPortByName("Bottom"))
 	}
 	b.sa.AddPort("L1SAddrTransCtrl", b.l1sAT.GetPortByName("Control"))
+	b.sa.AddPort("L1SAddrTransRemoteBottom", b.l1sAT.GetPortByName("RemoteBottom")) // sbin_codex
 	b.sa.AddPort("L1STLBCtrl", b.l1sTLB.GetPortByName("Control"))
 	b.sa.AddPort("L1SCacheCtrl", b.l1sCache.GetPortByName("Control"))
 	b.sa.AddPort("L1SCacheBottom", b.l1sCache.GetPortByName("Bottom"))
@@ -57,12 +63,14 @@ func (baselineDataPathTopology) addExternalPorts(b *Builder) {
 }
 
 func (virtualDataPathTopology) addExternalPorts(b *Builder) {
-	for i := range b.numCUs {
-		b.sa.AddPort(fmt.Sprintf("L1VCacheCtrl[%d]", i), b.l1vCaches[i].GetPortByName("Control"))
-		b.sa.AddPort(fmt.Sprintf("L1VCacheBottom[%d]", i), b.l1vCaches[i].GetPortByName("Bottom"))
-	}
-	b.sa.AddPort("L1SCacheCtrl", b.l1sCache.GetPortByName("Control"))
-	b.sa.AddPort("L1SCacheBottom", b.l1sCache.GetPortByName("Bottom"))
+	// Pre-edit code (commented per AGENTS.md convention):
+	// for i := range b.numCUs {
+	// 	b.sa.AddPort(fmt.Sprintf("L1VCacheCtrl[%d]", i), b.l1vCaches[i].GetPortByName("Control"))
+	// 	b.sa.AddPort(fmt.Sprintf("L1VCacheBottom[%d]", i), b.l1vCaches[i].GetPortByName("Bottom"))
+	// }
+	// b.sa.AddPort("L1SCacheCtrl", b.l1sCache.GetPortByName("Control"))
+	// b.sa.AddPort("L1SCacheBottom", b.l1sCache.GetPortByName("Bottom"))
+	baselineDataPathTopology{}.addExternalPorts(b) // sbin_codex
 }
 
 func (baselineDataPathTopology) connect(b *Builder) {
@@ -91,17 +99,19 @@ func (baselineDataPathTopology) connect(b *Builder) {
 }
 
 func (virtualDataPathTopology) connect(b *Builder) {
-	bufferSize := dataPathBufferSize(b)
-	for i := range b.numCUs {
-		cu, rob, cache := b.cus[i], b.l1vROBs[i], b.l1vCaches[i]
-		cu.VectorMemModules = &mem.SinglePortMapper{Port: rob.GetPortByName("Top").AsRemote()}
-		b.connectWithDirectConnection(cu.ToVectorMem, rob.GetPortByName("Top"), bufferSize)
-		rob.BottomUnit = cache.GetPortByName("Top").AsRemote()
-		b.connectWithDirectConnection(rob.GetPortByName("Bottom"), cache.GetPortByName("Top"), bufferSize)
-	}
-	b.l1sROB.BottomUnit = b.l1sCache.GetPortByName("Top").AsRemote()
-	b.connectWithDirectConnection(b.l1sROB.GetPortByName("Bottom"), b.l1sCache.GetPortByName("Top"), 32)
-	connectScalarCUs(b)
+	// Pre-edit code (commented per AGENTS.md convention):
+	// bufferSize := dataPathBufferSize(b)
+	// for i := range b.numCUs {
+	// 	cu, rob, cache := b.cus[i], b.l1vROBs[i], b.l1vCaches[i]
+	// 	cu.VectorMemModules = &mem.SinglePortMapper{Port: rob.GetPortByName("Top").AsRemote()}
+	// 	b.connectWithDirectConnection(cu.ToVectorMem, rob.GetPortByName("Top"), bufferSize)
+	// 	rob.BottomUnit = cache.GetPortByName("Top").AsRemote()
+	// 	b.connectWithDirectConnection(rob.GetPortByName("Bottom"), cache.GetPortByName("Top"), bufferSize)
+	// }
+	// b.l1sROB.BottomUnit = b.l1sCache.GetPortByName("Top").AsRemote()
+	// b.connectWithDirectConnection(b.l1sROB.GetPortByName("Bottom"), b.l1sCache.GetPortByName("Top"), 32)
+	// connectScalarCUs(b)
+	baselineDataPathTopology{}.connect(b) // sbin_codex
 }
 
 func dataPathBufferSize(b *Builder) int {
@@ -112,7 +122,10 @@ func dataPathBufferSize(b *Builder) int {
 }
 
 func connectScalarCUs(b *Builder) {
-	conn := directconnection.MakeBuilder().WithEngine(b.simulation.GetEngine()).WithFreq(b.freq).Build(b.name + ".ScalarMemConn")
+	conn := directconnection.MakeBuilder().
+		WithEngine(b.simulation.GetEngine()).
+		WithFreq(b.freq).
+		Build(b.name + ".ScalarMemConn") // sbin_codex: wrapped for lll.
 	b.simulation.RegisterComponent(conn)
 	conn.PlugIn(b.l1sROB.GetPortByName("Top"))
 	for i := range b.numCUs {

@@ -3,6 +3,8 @@ package driver
 import (
 	"container/list"
 	"sync" // sbin_codex: serialize the UVM state machine under ParallelEngine.
+
+	"github.com/sarchlab/akita/v4/sim" // sbin_codex
 )
 
 // UVMManager owns the functional UVM demand-paging state machine: residency,
@@ -24,11 +26,15 @@ type UVMManager struct {
 	blocks      map[BlockKey]*VABlock
 	regions     map[RegionKey]*RegionState
 
-	faults       map[FaultKey]*PageFault
-	faultsByID   map[string]*PageFault
-	migrations   map[string]*Migration
-	pageToMig    map[PageKey]string
-	accessCounts map[AccessCounterKey]*AccessCounterState
+	faults     map[FaultKey]*PageFault
+	faultsByID map[string]*PageFault
+	migrations map[string]*Migration
+	pageToMig  map[PageKey]string
+	// accessCounts map[AccessCounterKey]*AccessCounterState // sbin_codex
+
+	accessCounterResetDestination sim.RemotePort                 // sbin_codex
+	pendingAccessCounterResets    []pendingAccessCounterReset    // sbin_codex
+	pendingAccessCounterResetKeys map[AccessCounterResetKey]bool // sbin_codex
 
 	// sbin_codex: driver-side LRU list of GPU-resident 64KB regions for
 	// eviction victim selection. The access counter is independent of it.
@@ -44,6 +50,16 @@ type UVMManager struct {
 	// sbin_codex: migrations that arrived while an eviction was pending; they
 	// resume in order after the pending eviction finalizes.
 	pendingResumes []func()
+
+	// sbin_codex: every CPU-to-GPU migration publishes migrating PTEs and owns
+	// the same global shootdown exclusively until the CP ACK starts its copy.
+	migrationDrainACK       uint64 // sbin_codex
+	migrationQuiesceACK     uint64
+	migrationGPURestartACK  uint64 // sbin_codex
+	migrationRDMARestartACK uint64 // sbin_codex
+	// migrationQuiesceID string // sbin_codex: ownership now spans drain through restart.
+	activeMigrationID       string // sbin_codex
+	activeMigrationDeviceID uint64 // sbin_codex
 
 	stats  UVMStats
 	nextID uint64
@@ -69,20 +85,21 @@ func newUVMManager(d *Driver, config UVMConfig) *UVMManager {
 	}
 
 	m := &UVMManager{
-		config:       config,
-		d:            d,
-		allocations:  make(map[string]*ManagedAllocation),
-		pages:        make(map[PageKey]*ManagedPage),
-		blocks:       make(map[BlockKey]*VABlock),
-		regions:      make(map[RegionKey]*RegionState),
-		faults:       make(map[FaultKey]*PageFault),
-		faultsByID:   make(map[string]*PageFault),
-		migrations:   make(map[string]*Migration),
-		pageToMig:    make(map[PageKey]string),
-		accessCounts: make(map[AccessCounterKey]*AccessCounterState),
-		lru:          list.New(),
-		lruMap:       make(map[RegionKey]*list.Element),
-		nextID:       1,
+		config:      config,
+		d:           d,
+		allocations: make(map[string]*ManagedAllocation),
+		pages:       make(map[PageKey]*ManagedPage),
+		blocks:      make(map[BlockKey]*VABlock),
+		regions:     make(map[RegionKey]*RegionState),
+		faults:      make(map[FaultKey]*PageFault),
+		faultsByID:  make(map[string]*PageFault),
+		migrations:  make(map[string]*Migration),
+		pageToMig:   make(map[PageKey]string),
+		// accessCounts: make(map[AccessCounterKey]*AccessCounterState), // sbin_codex
+		pendingAccessCounterResetKeys: make(map[AccessCounterResetKey]bool), // sbin_codex
+		lru:                           list.New(),
+		lruMap:                        make(map[RegionKey]*list.Element),
+		nextID:                        1,
 	}
 	return m
 }

@@ -2,25 +2,27 @@ package tlb
 
 import (
 	"github.com/sarchlab/akita/v4/mem/mem"
+	"github.com/sarchlab/akita/v4/mem/vm" // sbin_codex
 	"github.com/sarchlab/akita/v4/pipelining"
 	"github.com/sarchlab/akita/v4/sim"
 )
 
 // A Builder can build TLBs
 type Builder struct {
-	engine            sim.Engine
-	freq              sim.Freq
-	numReqPerCycle    int
-	numSets           int
-	numWays           int
-	log2PageSize      uint64
-	pageSize          uint64
-	numMSHREntry      int
-	state             int
-	latency           int
-	addressMapper     mem.AddressToPortMapper
-	addressMapperType string
-	remotePorts       []sim.RemotePort
+	engine                 sim.Engine
+	freq                   sim.Freq
+	numReqPerCycle         int
+	numSets                int
+	numWays                int
+	log2PageSize           uint64
+	pageSize               uint64
+	numMSHREntry           int
+	state                  int
+	latency                int
+	addressMapper          mem.AddressToPortMapper
+	addressMapperType      string
+	remotePorts            []sim.RemotePort
+	pageAdmissionPredicate func(vm.Page) bool // sbin_codex
 }
 
 // MakeBuilder returns a Builder
@@ -33,7 +35,9 @@ func MakeBuilder() Builder {
 		pageSize:       4096,
 		numMSHREntry:   4,
 		state:          tlbStateEnable,
-		latency:        4,
+		// latency: 4, // sbin_codex: pre-edit default.
+		latency:                4,
+		pageAdmissionPredicate: func(vm.Page) bool { return true }, // sbin_codex: admit-all default.
 	}
 }
 
@@ -123,6 +127,13 @@ func (b Builder) WithLatency(cycles int) Builder {
 	return b
 }
 
+// WithPageAdmissionPredicate controls which translated pages are stored while
+// preserving responses to requests already waiting in the MSHR. // sbin_codex
+func (b Builder) WithPageAdmissionPredicate(predicate func(vm.Page) bool) Builder {
+	b.pageAdmissionPredicate = predicate
+	return b
+}
+
 // WithTranslationProviderMapper sets the mapper that can find the remote port
 // that can provide the translation service according to the virtual address.
 func (b Builder) WithTranslationProviderMapper(
@@ -157,8 +168,7 @@ func (b Builder) WithTranslationProviders(ports ...sim.RemotePort) Builder {
 // Build creates a new TLB
 func (b Builder) Build(name string) *Comp {
 	tlb := &Comp{}
-	tlb.TickingComponent =
-		sim.NewTickingComponent(name, b.engine, b.freq, tlb)
+	tlb.TickingComponent = sim.NewTickingComponent(name, b.engine, b.freq, tlb)
 
 	tlb.numSets = b.numSets
 	tlb.numWays = b.numWays
@@ -166,7 +176,9 @@ func (b Builder) Build(name string) *Comp {
 	tlb.pageSize = b.pageSize
 	tlb.addressMapper = b.addressMapper
 	tlb.mshr = newMSHR(b.numMSHREntry)
+	// tlb.state = b.state // sbin_codex: pre-edit assignment.
 	tlb.state = b.state
+	tlb.pageAdmissionPredicate = b.pageAdmissionPredicate // sbin_codex
 
 	b.createPorts(name, tlb)
 	b.createTranslationProviderMapper(tlb)

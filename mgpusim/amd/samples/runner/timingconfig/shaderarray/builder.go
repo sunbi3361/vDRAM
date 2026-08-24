@@ -40,11 +40,13 @@ type Builder struct {
 	memPipelineBufferSize     int
 	maxCoalescingPenalty      int
 	registerScoreboard        bool
-	dataPathTopology          DataPathTopology // sbin_codex: injected strategy owns vector/scalar data-path construction and wiring.
-	l1AddressMapper           mem.AddressToPortMapper
-	l1iAddressMapper          mem.AddressToPortMapper // sbin_codex: preserve an independent instruction path mapper.
-	l1TLBAddressMapper        mem.AddressToPortMapper
-	l1tlbFactory              func(name string, engine sim.Engine, freq sim.Freq, pageTable vm.PageTable, mapper mem.AddressToPortMapper, numReqPerCycle int) sim.Component //nolint:lll // sbin_codex: ideal-L1-TLB factory hook (todo 4).
+	// sbin_codex: injected strategy owns vector/scalar data-path construction and wiring.
+	dataPathTopology   DataPathTopology
+	remoteDataPath     remoteDataPathConfig // sbin_codex
+	l1AddressMapper    mem.AddressToPortMapper
+	l1iAddressMapper   mem.AddressToPortMapper // sbin_codex: preserve an independent instruction path mapper.
+	l1TLBAddressMapper mem.AddressToPortMapper
+	l1tlbFactory       func(name string, engine sim.Engine, freq sim.Freq, pageTable vm.PageTable, mapper mem.AddressToPortMapper, numReqPerCycle int) sim.Component //nolint:lll // sbin_codex: ideal-L1-TLB factory hook (todo 4).
 	// sbin_codex: page table passed to ideal-L1-TLB factory (todo 4).
 	pageTable  vm.PageTable
 	aluFactory emu.ALUFactory
@@ -457,12 +459,19 @@ func (b *Builder) buildL1VReorderBuffers() {
 }
 
 func (b *Builder) buildL1VAddressTranslators() {
-	base := addresstranslator.MakeBuilder().
-		WithEngine(b.simulation.GetEngine()).
-		WithFreq(b.freq).
-		WithDeviceID(b.gpuID).
-		WithLog2PageSize(b.log2PageSize).
-		WithNumReqPerCycle(32)
+	// Pre-edit code (commented per AGENTS.md convention):
+	// base := addresstranslator.MakeBuilder().
+	// 	WithEngine(b.simulation.GetEngine()).
+	// 	WithFreq(b.freq).
+	// 	WithDeviceID(b.gpuID).
+	// 	WithLog2PageSize(b.log2PageSize).
+	// 	WithNumReqPerCycle(32)
+	base := b.configureDataAddressTranslator(addresstranslator.MakeBuilder(). // sbin_codex
+											WithEngine(b.simulation.GetEngine()).
+											WithFreq(b.freq).
+											WithDeviceID(b.gpuID).
+											WithLog2PageSize(b.log2PageSize).
+											WithNumReqPerCycle(32))
 
 	b.l1vMemMappers = make([]*mem.SinglePortMapper, 0, b.numCUs)
 	b.l1vTransMappers = make([]*mem.SinglePortMapper, 0, b.numCUs)
@@ -503,7 +512,9 @@ func (b *Builder) buildL1VTLBs() {
 		WithNumWays(64).
 		WithNumReqPerCycle(32).
 		WithLatency(1).
-		WithTranslationProviderMapper(b.l1TLBAddressMapper)
+		// WithTranslationProviderMapper(b.l1TLBAddressMapper) // sbin_codex: pre-edit chain ending.
+		WithTranslationProviderMapper(b.l1TLBAddressMapper).
+		WithPageAdmissionPredicate(admitLocalPage) // sbin_codex
 
 	for i := 0; i < b.numCUs; i++ {
 		name := fmt.Sprintf("%s.L1VTLB[%d]", b.name, i)
@@ -570,14 +581,23 @@ func (b *Builder) buildL1SAddressTranslator() {
 	if b.l1sTransMapper == nil {
 		b.l1sTransMapper = &mem.SinglePortMapper{}
 	}
-	builder := addresstranslator.MakeBuilder().
-		WithEngine(b.simulation.GetEngine()).
-		WithFreq(b.freq).
-		WithDeviceID(b.gpuID).
-		WithLog2PageSize(b.log2PageSize).
-		WithNumReqPerCycle(32).
-		WithMemoryProviderMapper(b.l1sMemMapper).
-		WithTranslationProviderMapper(b.l1sTransMapper)
+	// Pre-edit code (commented per AGENTS.md convention):
+	// builder := addresstranslator.MakeBuilder().
+	// 	WithEngine(b.simulation.GetEngine()).
+	// 	WithFreq(b.freq).
+	// 	WithDeviceID(b.gpuID).
+	// 	WithLog2PageSize(b.log2PageSize).
+	// 	WithNumReqPerCycle(32).
+	// 	WithMemoryProviderMapper(b.l1sMemMapper).
+	// 	WithTranslationProviderMapper(b.l1sTransMapper)
+	builder := b.configureDataAddressTranslator(addresstranslator.MakeBuilder(). // sbin_codex
+											WithEngine(b.simulation.GetEngine()).
+											WithFreq(b.freq).
+											WithDeviceID(b.gpuID).
+											WithLog2PageSize(b.log2PageSize).
+											WithNumReqPerCycle(32).
+											WithMemoryProviderMapper(b.l1sMemMapper).
+											WithTranslationProviderMapper(b.l1sTransMapper))
 
 	name := fmt.Sprintf("%s.L1SAddrTrans", b.name)
 	at := builder.Build(name)
@@ -603,7 +623,9 @@ func (b *Builder) buildL1STLB() {
 		WithNumSets(1).
 		WithNumWays(64).
 		WithNumReqPerCycle(32).
-		WithTranslationProviderMapper(b.l1TLBAddressMapper)
+		// WithTranslationProviderMapper(b.l1TLBAddressMapper) // sbin_codex: pre-edit chain ending.
+		WithTranslationProviderMapper(b.l1TLBAddressMapper).
+		WithPageAdmissionPredicate(admitLocalPage) // sbin_codex
 
 	name := fmt.Sprintf("%s.L1STLB", b.name)
 	tlb := builder.Build(name)
