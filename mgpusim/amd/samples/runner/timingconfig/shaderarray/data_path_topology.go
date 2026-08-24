@@ -19,6 +19,11 @@ type DataPathTopology interface {
 // pre-cache translators own the following IDs.
 const baselineAccessGateIDBase uint64 = 2
 
+// sbin_codex: virtual-caching UVM access-gate ID base (plan todo 10 of
+// mgpusim-uvm-manager). The GMMU owns gate ID 1; the virtual L1V/L1S gates
+// (which replace the leaf data TLBs) own the following IDs per shader array.
+const VirtualAccessGateIDBase uint64 = 2
+
 type baselineDataPathTopology struct{} // sbin_codex
 type virtualDataPathTopology struct{}  // sbin_codex
 
@@ -45,6 +50,8 @@ func (baselineDataPathTopology) build(b *Builder) {
 func (virtualDataPathTopology) build(b *Builder) {
 	b.buildL1VCaches()
 	b.buildL1SCache()
+	b.buildVirtualAccessGates()     // sbin_codex: virtual L1V/L1S UVM access gates (plan todo 10).
+	b.configureVirtualAccessGates() // sbin_codex
 }
 
 func (baselineDataPathTopology) addExternalPorts(b *Builder) {
@@ -66,9 +73,13 @@ func (virtualDataPathTopology) addExternalPorts(b *Builder) {
 	for i := range b.numCUs {
 		b.sa.AddPort(fmt.Sprintf("L1VCacheCtrl[%d]", i), b.l1vCaches[i].GetPortByName("Control"))
 		b.sa.AddPort(fmt.Sprintf("L1VCacheBottom[%d]", i), b.l1vCaches[i].GetPortByName("Bottom"))
+		b.sa.AddPort(fmt.Sprintf("L1VGateCtrl[%d]", i), b.l1vGates[i].GetPortByName("Control"))
+		b.sa.AddPort(fmt.Sprintf("L1VGateTranslation[%d]", i), b.l1vGates[i].GetPortByName("Translation"))
 	}
 	b.sa.AddPort("L1SCacheCtrl", b.l1sCache.GetPortByName("Control"))
 	b.sa.AddPort("L1SCacheBottom", b.l1sCache.GetPortByName("Bottom"))
+	b.sa.AddPort("L1SGateCtrl", b.l1sGate.GetPortByName("Control"))
+	b.sa.AddPort("L1SGateTranslation", b.l1sGate.GetPortByName("Translation"))
 }
 
 func (baselineDataPathTopology) connect(b *Builder) {
@@ -99,14 +110,16 @@ func (baselineDataPathTopology) connect(b *Builder) {
 func (virtualDataPathTopology) connect(b *Builder) {
 	bufferSize := dataPathBufferSize(b)
 	for i := range b.numCUs {
-		cu, rob, cache := b.cus[i], b.l1vROBs[i], b.l1vCaches[i]
+		cu, rob, gate, cache := b.cus[i], b.l1vROBs[i], b.l1vGates[i], b.l1vCaches[i]
 		cu.VectorMemModules = &mem.SinglePortMapper{Port: rob.GetPortByName("Top").AsRemote()}
 		b.connectWithDirectConnection(cu.ToVectorMem, rob.GetPortByName("Top"), bufferSize)
-		rob.BottomUnit = cache.GetPortByName("Top").AsRemote()
-		b.connectWithDirectConnection(rob.GetPortByName("Bottom"), cache.GetPortByName("Top"), bufferSize)
+		rob.BottomUnit = gate.GetPortByName("Top").AsRemote()
+		b.connectWithDirectConnection(rob.GetPortByName("Bottom"), gate.GetPortByName("Top"), bufferSize)
+		b.connectWithDirectConnection(gate.GetPortByName("Bottom"), cache.GetPortByName("Top"), bufferSize)
 	}
-	b.l1sROB.BottomUnit = b.l1sCache.GetPortByName("Top").AsRemote()
-	b.connectWithDirectConnection(b.l1sROB.GetPortByName("Bottom"), b.l1sCache.GetPortByName("Top"), 32)
+	b.l1sROB.BottomUnit = b.l1sGate.GetPortByName("Top").AsRemote()
+	b.connectWithDirectConnection(b.l1sROB.GetPortByName("Bottom"), b.l1sGate.GetPortByName("Top"), 32)
+	b.connectWithDirectConnection(b.l1sGate.GetPortByName("Bottom"), b.l1sCache.GetPortByName("Top"), 32)
 	connectScalarCUs(b)
 }
 

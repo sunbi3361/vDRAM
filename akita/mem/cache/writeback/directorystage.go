@@ -368,6 +368,7 @@ func (ds *directoryStage) writeToBank(
 	block.Tag = cachelineID
 	block.IsValid = true
 	block.PID = trans.write.PID
+	block.Annotation = cache.ResolveAnnotation(trans.write) // sbin_codex: persist the virtual-access annotation on the block.
 	trans.block = block
 	trans.action = bankWriteHit
 
@@ -447,6 +448,7 @@ func (ds *directoryStage) updateTransForEviction(
 		Tag:          victim.Tag,
 		CacheAddress: victim.CacheAddress,
 		DirtyMask:    victim.DirtyMask,
+		Annotation:   victim.Annotation, // sbin_codex: carry the evicted line's stored annotation on the writeback.
 	}
 	trans.block = victim
 	trans.evictingPID = trans.victim.PID
@@ -456,6 +458,7 @@ func (ds *directoryStage) updateTransForEviction(
 	if ds.evictionNeedFetch(trans) {
 		mshrEntry := ds.cache.mshr.Add(pid, cacheLineID)
 		mshrEntry.Block = victim
+		mshrEntry.Annotation = cache.ResolveAnnotation(trans.accessReq()) // sbin_codex: retain the annotation on the MSHR entry.
 		mshrEntry.Requests = append(mshrEntry.Requests, trans)
 		trans.mshrEntry = mshrEntry
 		trans.fetchPID = pid
@@ -515,6 +518,7 @@ func (ds *directoryStage) fetch(
 	block.Tag = cacheLineID
 	block.PID = pid
 	block.IsValid = true
+	block.Annotation = cache.ResolveAnnotation(req) // sbin_codex: persist the virtual-access annotation on the fetched block.
 	ds.cache.directory.Visit(block)
 
 	tracing.AddTaskStep(
@@ -531,6 +535,7 @@ func (ds *directoryStage) fetch(
 	bankBuf.Push(trans)
 
 	mshrEntry.Block = block
+	mshrEntry.Annotation = cache.ResolveAnnotation(req) // sbin_codex: retain the annotation on the MSHR entry.
 	mshrEntry.Requests = append(mshrEntry.Requests, trans)
 
 	return true

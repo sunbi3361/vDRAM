@@ -131,6 +131,7 @@ func (wb *writeBufferStage) fetchFromBottom(
 		WithAddress(trans.fetchAddress).
 		WithByteSize(1 << wb.cache.log2BlockSize).
 		Build()
+	cache.Annotate(read, cache.ResolveAnnotation(trans.accessReq())) // sbin_codex: persist the virtual-access annotation on the fetch clone.
 	wb.cache.bottomPort.Send(read)
 
 	trans.fetchReadReq = read
@@ -241,6 +242,11 @@ func (wb *writeBufferStage) write() bool {
 		WithData(trans.evictingData).
 		WithDirtyMask(trans.evictingDirtyMask).
 		Build()
+	// sbin_codex: carry the evicted block's stored annotation on the
+	// writeback; a stage-driven transaction without a victim carries none.
+	if trans.victim != nil {
+		cache.Annotate(write, trans.victim.Annotation)
+	}
 	wb.cache.bottomPort.Send(write)
 
 	trans.evictionWriteReq = write

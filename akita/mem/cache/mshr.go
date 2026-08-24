@@ -17,6 +17,10 @@ type MSHREntry struct {
 	ReadReq   *mem.ReadReq
 	DataReady *mem.DataReadyRsp
 	Data      []byte
+	// sbin_codex: the virtual-access annotation of the pending refill (plan
+	// todo 10 of mgpusim-uvm-manager). The cache records it at MSHR creation
+	// so range operations can identify matching in-flight requests.
+	Annotation *VirtualAccessAnnotation
 }
 
 // NewMSHREntry returns a new MSHR entry object

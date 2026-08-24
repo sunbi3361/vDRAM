@@ -33,6 +33,12 @@ type UVMManager struct {
 
 	// sbin_codex (todo 4): GPU capacity reservation tracker (R+I+N <= C).
 	reservation *AdmissionReservation
+
+	// sbin_codex (todo 10): publication generation counter. The manager
+	// increments it before every mapping publication; the virtual access
+	// gates stamp it into GPU_LOCAL annotations so stale retries can be
+	// detected.
+	generation uint64
 }
 
 // NewUVMManager constructs a UVM manager for an enabled UVM configuration.
@@ -54,6 +60,25 @@ func (m *UVMManager) Reservation() *AdmissionReservation {
 	defer m.Unlock()
 
 	return m.reservation
+}
+
+// Generation returns the current publication generation. // sbin_codex
+func (m *UVMManager) Generation() uint64 {
+	m.Lock()
+	defer m.Unlock()
+
+	return m.generation
+}
+
+// IncrementGeneration advances the publication generation and returns the new
+// value. The manager calls it before every mapping publication so the gates
+// can detect stale annotations. // sbin_codex
+func (m *UVMManager) IncrementGeneration() uint64 {
+	m.Lock()
+	defer m.Unlock()
+
+	m.generation++
+	return m.generation
 }
 
 // RegisterManagedAllocation validates an allocator result and atomically

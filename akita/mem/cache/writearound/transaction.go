@@ -50,3 +50,12 @@ func (t *transaction) PID() vm.PID {
 
 	return t.write.PID
 }
+
+// accessReq returns the request that drives the transaction. // sbin_codex
+func (t *transaction) accessReq() mem.AccessReq {
+	if t.read != nil {
+		return t.read
+	}
+
+	return t.write
+}

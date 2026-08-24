@@ -17,6 +17,11 @@ type Block struct {
 	ReadCount    int
 	IsLocked     bool
 	DirtyMask    []bool
+	// sbin_codex: the virtual-access annotation of the line stored in this
+	// block (plan todo 10 of mgpusim-uvm-manager). Persisted at refill and
+	// write so replacement writebacks and range operations can validate the
+	// stored mapping.
+	Annotation *VirtualAccessAnnotation
 }
 
 // A Set is a list of blocks where a certain piece memory can be stored at

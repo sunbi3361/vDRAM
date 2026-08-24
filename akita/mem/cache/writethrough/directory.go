@@ -271,6 +271,7 @@ func (d *directory) writeBottom(trans *transaction) bool {
 		WithData(write.Data).
 		WithDirtyMask(write.DirtyMask).
 		Build()
+	cache.Annotate(writeToBottom, cache.ResolveAnnotation(write)) // sbin_codex: persist the virtual-access annotation on the clone.
 
 	err := d.cache.bottomPort.Send(writeToBottom)
 	if err != nil {
@@ -311,6 +312,7 @@ func (d *directory) processWriteHit(
 	block.IsLocked = true
 	block.IsValid = true
 	block.Tag = cacheLineID
+	block.Annotation = cache.ResolveAnnotation(write) // sbin_codex: persist the virtual-access annotation on the block.
 	d.cache.directory.Visit(block)
 
 	trans.bankAction = bankActionWrite
@@ -339,8 +341,9 @@ func (d *directory) fetchFromBottom(
 		WithPID(pid).
 		WithByteSize(blockSize).
 		Build()
-	err := d.cache.bottomPort.Send(readToBottom)
+	cache.Annotate(readToBottom, cache.ResolveAnnotation(trans.accessReq())) // sbin_codex: persist the virtual-access annotation on the refill clone.
 
+	err := d.cache.bottomPort.Send(readToBottom)
 	if err != nil {
 		return false
 	}
@@ -353,11 +356,13 @@ func (d *directory) fetchFromBottom(
 	mshrEntry.Requests = append(mshrEntry.Requests, trans)
 	mshrEntry.ReadReq = readToBottom
 	mshrEntry.Block = victim
+	mshrEntry.Annotation = cache.ResolveAnnotation(trans.accessReq()) // sbin_codex: retain the annotation on the MSHR entry.
 
 	victim.Tag = cacheLineID
 	victim.PID = pid
 	victim.IsValid = true
 	victim.IsLocked = true
+	victim.Annotation = cache.ResolveAnnotation(trans.accessReq()) // sbin_codex: persist the virtual-access annotation on the refilled block.
 	d.cache.directory.Visit(victim)
 
 	return true

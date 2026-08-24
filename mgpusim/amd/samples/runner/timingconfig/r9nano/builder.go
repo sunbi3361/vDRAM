@@ -65,6 +65,9 @@ type Builder struct {
 	l1TLBAddressMapper   *mem.SinglePortMapper
 	l1tlbFactory         func(name string, engine sim.Engine, freq sim.Freq, pageTable vm.PageTable, mapper mem.AddressToPortMapper, numReqPerCycle int) sim.Component //nolint:lll // sbin_codex: ideal-L1-TLB factory injection (todo 5).
 	pmcAddressMapper     mem.AddressToPortMapper
+	// sbin_codex: UVM generation source for the virtual access gates (plan
+	// todo 10). A nil provider keeps the gates at generation zero.
+	generationProvider shaderarray.GenerationProvider
 }
 
 // MakeBuilder creates a new builder.
@@ -186,6 +189,16 @@ func (b Builder) WithL1TLBFactory(
 	return b
 }
 
+// WithGenerationProvider sets the UVM generation source the virtual access
+// gates stamp into annotations and compare for stale retries. A nil provider
+// keeps the gates at generation zero. // sbin_codex
+func (b Builder) WithGenerationProvider(
+	provider shaderarray.GenerationProvider,
+) Builder {
+	b.generationProvider = provider
+	return b
+}
+
 // WithGlobalStorage sets the global storage that can provide the ultimate address translation.
 func (b Builder) WithGlobalStorage(
 	globalStorage *mem.Storage,
@@ -277,8 +290,8 @@ func (b *Builder) connectCP() {
 	b.internalConn.PlugIn(b.cp.ToAddressTranslators)
 	b.internalConn.PlugIn(b.cp.ToRDMA)
 	b.internalConn.PlugIn(b.cp.ToPMC)
-	b.internalConn.PlugIn(b.cp.ToGMMU) // sbin_codex: UVM GMMU control seam.
-	b.internalConn.PlugIn(b.gmmu.GetPortByName("Control")) // sbin_codex
+	b.internalConn.PlugIn(b.cp.ToGMMU)                              // sbin_codex: UVM GMMU control seam.
+	b.internalConn.PlugIn(b.gmmu.GetPortByName("Control"))          // sbin_codex
 	b.internalConn.PlugIn(b.gmmu.GetPortByName("CommandProcessor")) // sbin_codex
 
 	b.cp.RDMA = b.rdmaEngine.CtrlPort

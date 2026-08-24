@@ -6,7 +6,6 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"github.com/sarchlab/akita/v4/mem/cache/writearound"
 	"github.com/sarchlab/akita/v4/mem/cache/writethrough"
 	"github.com/sarchlab/akita/v4/mem/mem"
 	"github.com/sarchlab/akita/v4/simulation"
@@ -115,6 +114,9 @@ var _ = Describe("Shader array builder", func() {
 			"VirtualShaderArray.L1SCache",
 			"VirtualShaderArray.L1IAddrTrans",
 			"VirtualShaderArray.L1ITLB",
+			// sbin_codex: virtual L1V/L1S UVM access gates (plan todo 10).
+			"VirtualShaderArray.L1VGate[0]",
+			"VirtualShaderArray.L1SGate",
 		))
 		for _, componentName := range []string{
 			"VirtualShaderArray.L1VAddrTrans[0]",
@@ -134,6 +136,12 @@ var _ = Describe("Shader array builder", func() {
 			"L1ITLBCtrl",
 			"L1ICacheBottom",
 			"L1ITLBBottom",
+			// sbin_codex: virtual L1V/L1S gate control and probe ports (plan
+			// todo 10).
+			"L1VGateCtrl[0]",
+			"L1VGateTranslation[0]",
+			"L1SGateCtrl",
+			"L1SGateTranslation",
 		} {
 			Expect(func() {
 				_ = domain.GetPortByName(portName)
@@ -157,20 +165,26 @@ var _ = Describe("Shader array builder", func() {
 			"VirtualShaderArray.CU[0]").(*cu.ComputeUnit)
 		vectorROB := testSimulation.GetComponentByName(
 			"VirtualShaderArray.L1VROB[0]").(*rob.ReorderBuffer)
-		vectorCache := testSimulation.GetComponentByName(
-			"VirtualShaderArray.L1VCache[0]").(*writearound.Comp)
+		vectorGate := testSimulation.GetComponentByName(
+			"VirtualShaderArray.L1VGate[0]").(*VirtualAccessGate)
 		Expect(computeUnit.VectorMemModules.Find(0)).To(Equal(
 			vectorROB.GetPortByName("Top").AsRemote()))
+		// sbin_codex: the virtual gate sits before cache admission (plan
+		// todo 10): ROB -> gate -> cache.
 		Expect(vectorROB.BottomUnit).To(Equal(
-			vectorCache.GetPortByName("Top").AsRemote()))
+			vectorGate.GetPortByName("Top").AsRemote()))
+		Expect(vectorGate.GetUVMGateID()).To(Equal(
+			VirtualAccessGateIDBase))
 
 		scalarROB := testSimulation.GetComponentByName(
 			"VirtualShaderArray.L1SROB").(*rob.ReorderBuffer)
-		scalarCache := testSimulation.GetComponentByName(
-			"VirtualShaderArray.L1SCache").(*writethrough.Comp)
+		scalarGate := testSimulation.GetComponentByName(
+			"VirtualShaderArray.L1SGate").(*VirtualAccessGate)
 		Expect(computeUnit.ScalarMem).To(Equal(scalarROB.GetPortByName("Top")))
 		Expect(scalarROB.BottomUnit).To(Equal(
-			scalarCache.GetPortByName("Top").AsRemote()))
+			scalarGate.GetPortByName("Top").AsRemote()))
+		Expect(scalarGate.GetUVMGateID()).To(Equal(
+			VirtualAccessGateIDBase + 1))
 
 		instructionROB := testSimulation.GetComponentByName(
 			"VirtualShaderArray.L1IROB").(*rob.ReorderBuffer)

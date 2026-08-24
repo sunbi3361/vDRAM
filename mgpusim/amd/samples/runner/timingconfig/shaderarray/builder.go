@@ -48,6 +48,9 @@ type Builder struct {
 	// sbin_codex: page table passed to ideal-L1-TLB factory (todo 4).
 	pageTable  vm.PageTable
 	aluFactory emu.ALUFactory
+	// sbin_codex: UVM generation source for the virtual access gates (plan
+	// todo 10). A nil provider keeps the gates at generation zero.
+	generationProvider GenerationProvider
 
 	sa        *sim.Domain
 	cus       []*cu.ComputeUnit
@@ -63,6 +66,9 @@ type Builder struct {
 	l1vTLBs   []sim.Component // sbin_codex: relax concrete type for ideal-L1-TLB injection (todo 4).
 	l1sTLB    sim.Component   // sbin_codex: relax concrete type for ideal-L1-TLB injection (todo 4).
 	l1iTLB    sim.Component   // sbin_codex: relax concrete type for ideal-L1-TLB injection (todo 4).
+	// sbin_codex: virtual-caching L1V/L1S UVM access gates (plan todo 10).
+	l1vGates []*VirtualAccessGate
+	l1sGate  *VirtualAccessGate
 
 	// Mapper pointers to allow left-to-right component build order
 	// Vector path: ROB -> AT -(mem)-> L1V Cache, AT -(xlate)-> L1V TLB
@@ -172,6 +178,14 @@ func (b Builder) WithL1TLBFactory(
 // sbin_codex: used by ideal-L1-TLB GPU configs (todo 4).
 func (b Builder) WithPageTable(pageTable vm.PageTable) Builder {
 	b.pageTable = pageTable
+	return b
+}
+
+// WithGenerationProvider sets the UVM generation source the virtual access
+// gates stamp into annotations and compare for stale retries. A nil provider
+// keeps the gates at generation zero. // sbin_codex
+func (b Builder) WithGenerationProvider(provider GenerationProvider) Builder {
+	b.generationProvider = provider
 	return b
 }
 
@@ -634,6 +648,64 @@ func (b *Builder) buildL1SCache() {
 	// if b.memTracer != nil {
 	// 	tracing.CollectTrace(cache, b.memTracer)
 	// }
+}
+
+// buildVirtualAccessGates constructs the virtual-caching L1V/L1S UVM access
+// gates before cache admission (plan todo 10 of mgpusim-uvm-manager). Each
+// gate probes the shared L2 TLB through the topology translation mapper and
+// forwards admitted accesses to its cache. // sbin_codex
+func (b *Builder) buildVirtualAccessGates() {
+	for i := 0; i < b.numCUs; i++ {
+		name := fmt.Sprintf("%s.L1VGate[%d]", b.name, i)
+		gate := b.newVirtualAccessGate(name, b.l1vCaches[i])
+		b.l1vGates = append(b.l1vGates, gate)
+		b.simulation.RegisterComponent(gate)
+	}
+
+	name := fmt.Sprintf("%s.L1SGate", b.name)
+	gate := b.newVirtualAccessGate(name, b.l1sCache)
+	b.l1sGate = gate
+	b.simulation.RegisterComponent(gate)
+}
+
+// newVirtualAccessGate builds one gate with its ports, mappers, and the
+// generation provider. // sbin_codex
+func (b *Builder) newVirtualAccessGate(
+	name string,
+	cacheComp sim.Component,
+) *VirtualAccessGate {
+	gate := &VirtualAccessGate{}
+	gate.TickingComponent = sim.NewTickingComponent(
+		name, b.simulation.GetEngine(), b.freq, gate)
+	gate.topPort = sim.NewPort(gate, 32, 32, name+".TopPort")
+	gate.bottomPort = sim.NewPort(gate, 32, 32, name+".BottomPort")
+	gate.translationPort = sim.NewPort(gate, 32, 32, name+".TranslationPort")
+	gate.ctrlPort = sim.NewPort(gate, 32, 32, name+".ControlPort")
+	gate.AddPort("Top", gate.topPort)
+	gate.AddPort("Bottom", gate.bottomPort)
+	gate.AddPort("Translation", gate.translationPort)
+	gate.AddPort("Control", gate.ctrlPort)
+	gate.log2PageSize = b.log2PageSize
+	gate.deviceID = b.gpuID
+	gate.memoryPortMapper = &mem.SinglePortMapper{
+		Port: cacheComp.GetPortByName("Top").AsRemote(),
+	}
+	gate.translationPortMapper = b.l1TLBAddressMapper
+	gate.generationProvider = b.generationProvider
+	gate.pendingRegions = make(map[uint64]int)
+	middleware := &gateMiddleware{VirtualAccessGate: gate}
+	gate.AddMiddleware(middleware)
+	return gate
+}
+
+// configureVirtualAccessGates assigns a UVM access-gate ID to every virtual
+// L1V/L1S gate. The gate is inert without BlockRange commands and without
+// managed pages, so disabled (-uvm off) behavior is unchanged. // sbin_codex
+func (b *Builder) configureVirtualAccessGates() {
+	for i := range b.numCUs {
+		b.l1vGates[i].SetUVMGateID(VirtualAccessGateIDBase + uint64(i))
+	}
+	b.l1sGate.SetUVMGateID(VirtualAccessGateIDBase + uint64(b.numCUs))
 }
 
 func (b *Builder) buildL1IReorderBuffer() {

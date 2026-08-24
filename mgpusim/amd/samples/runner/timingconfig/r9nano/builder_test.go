@@ -146,7 +146,13 @@ var _ = Describe("R9 Nano builder", func() {
 		commandProcessor := testSimulation.GetComponentByName(
 			"GPU.CommandProcessor").(*cp.CommandProcessor)
 		Expect(componentNamesForPorts(commandProcessor.PreCacheTranslators.Ports)).To(
-			ConsistOf("GPU.SA[0].L1IAddrTrans")) // sbin_codex: L1 ATs remain distinct.
+			ConsistOf(
+				"GPU.SA[0].L1IAddrTrans",
+				// sbin_codex: the virtual L1V/L1S gate control ports replace
+				// the missing leaf TLB endpoints (plan todo 10).
+				"GPU.SA[0].L1VGate[0]",
+				"GPU.SA[0].L1SGate",
+			)) // sbin_codex: L1 ATs remain distinct.
 		Expect(componentNamesForPorts(commandProcessor.PostCacheTranslators.Ports)).To(
 			ConsistOf(
 				"GPU.L2AddrTrans[0]",

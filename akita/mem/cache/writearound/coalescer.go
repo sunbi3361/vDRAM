@@ -4,6 +4,7 @@ import (
 	"log"
 	"reflect"
 
+	"github.com/sarchlab/akita/v4/mem/cache"
 	"github.com/sarchlab/akita/v4/mem/mem"
 	"github.com/sarchlab/akita/v4/sim"
 	"github.com/sarchlab/akita/v4/tracing"
@@ -183,6 +184,7 @@ func (c *coalescer) coalesceRead() *transaction {
 		WithByteSize(blockSize).
 		WithPID(c.toCoalesce[0].PID()).
 		Build()
+	cache.Annotate(coalescedRead, cache.ResolveAnnotation(c.toCoalesce[0].accessReq())) // sbin_codex: persist the virtual-access annotation on the coalesced clone.
 
 	return &transaction{
 		id:                      sim.GetIDGenerator().Generate(),
@@ -200,6 +202,7 @@ func (c *coalescer) coalesceWrite() *transaction {
 		WithData(make([]byte, blockSize)).
 		WithDirtyMask(make([]bool, blockSize)).
 		Build()
+	cache.Annotate(write, cache.ResolveAnnotation(c.toCoalesce[0].accessReq())) // sbin_codex: persist the virtual-access annotation on the coalesced clone.
 
 	for _, t := range c.toCoalesce {
 		w := t.write

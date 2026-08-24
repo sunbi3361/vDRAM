@@ -51,6 +51,7 @@ func (virtualDataPathTopology) configureShaderArray(
 	return saBuilder.
 		WithL1AddressMapper(b.l1DataAddressMapper).
 		WithL1IAddressMapper(b.l1AddressMapper).
+		WithGenerationProvider(b.generationProvider).                  // sbin_codex: UVM generation source for the virtual gates (plan todo 10).
 		WithDataPathTopology(shaderarray.NewVirtualDataPathTopology()) // sbin_codex: L1I remains baseline.
 }
 
@@ -92,6 +93,12 @@ func (virtualDataPathTopology) connectTranslation(b *Builder) {
 	conn.PlugIn(b.l2TLBs[0].GetPortByName("Top"))
 	for _, sa := range b.sas {
 		conn.PlugIn(sa.GetPortByName("L1ITLBBottom"))
+		for i := range b.numCUPerShaderArray {
+			// sbin_codex: the virtual L1V/L1S gates probe the shared L2 TLB
+			// through this connection (plan todo 10 of mgpusim-uvm-manager).
+			conn.PlugIn(sa.GetPortByName(fmt.Sprintf("L1VGateTranslation[%d]", i)))
+		}
+		conn.PlugIn(sa.GetPortByName("L1SGateTranslation"))
 	}
 	b.memoryTopology.connectTranslationClients(b, conn) // sbin_codex
 }
@@ -114,6 +121,13 @@ func (virtualDataPathTopology) connectCP(b *Builder) {
 	for _, sa := range b.sas {
 		b.addPreCacheTranslator(sa.GetPortByName("L1IAddrTransCtrl"))
 		b.addTLB(sa.GetPortByName("L1ITLBCtrl"))
+		for i := range b.numCUPerShaderArray {
+			// sbin_codex: the virtual L1V/L1S gate control ports replace the
+			// missing leaf TLB endpoints (plan todo 10 of
+			// mgpusim-uvm-manager).
+			b.addPreCacheTranslator(sa.GetPortByName(fmt.Sprintf("L1VGateCtrl[%d]", i)))
+		}
+		b.addPreCacheTranslator(sa.GetPortByName("L1SGateCtrl"))
 	}
 	b.addSharedL2TLBs() // sbin_codex
 }
