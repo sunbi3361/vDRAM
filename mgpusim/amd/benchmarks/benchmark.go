@@ -8,3 +8,12 @@ type Benchmark interface {
 	Verify()
 	SetUnifiedMemory()
 }
+
+// sbin_codex: ManagedMemoryCapable is implemented by benchmarks whose
+// application buffers can be allocated through the driver's managed-memory
+// (UVM) API. The runner calls SetManagedMemory on such benchmarks when -uvm
+// is enabled. It is a separate optional capability interface so that
+// benchmarks not yet converted to managed memory are not forced to change.
+type ManagedMemoryCapable interface {
+	SetManagedMemory()
+}

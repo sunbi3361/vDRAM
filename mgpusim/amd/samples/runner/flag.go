@@ -178,6 +178,12 @@ func (r *Runner) parseFlag() *Runner {
 	r.parseGPUFlag()
 	r.uvmConfig = parseUVMConfig() // sbin_codex: validated UVM config (fail-fast).
 
+	// sbin_codex: -use-unified-memory and -uvm are mutually exclusive modes.
+	// Reject the combination here, at flag-parse time, before any allocation.
+	if r.UseUnifiedMemory && r.uvmConfig.Enabled {
+		panic("cannot use -use-unified-memory and -uvm together")
+	}
+
 	return r
 }
 

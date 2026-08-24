@@ -133,8 +133,18 @@ func (r *Runner) createUnifiedGPUs() {
 // AddBenchmark adds an benchmark that the driver runs
 func (r *Runner) AddBenchmark(b benchmarks.Benchmark) {
 	b.SelectGPU(r.GPUIDs)
+	// if r.UseUnifiedMemory {
+	// 	b.SetUnifiedMemory()
+	// }
+	// sbin_codex: propagate the managed-memory capability when -uvm is
+	// enabled; -use-unified-memory takes precedence (the two modes are
+	// mutually exclusive and rejected together in parseFlag).
 	if r.UseUnifiedMemory {
 		b.SetUnifiedMemory()
+	} else if r.uvmConfig.Enabled {
+		if bm, ok := b.(benchmarks.ManagedMemoryCapable); ok {
+			bm.SetManagedMemory()
+		}
 	}
 
 	r.benchmarks = append(r.benchmarks, b)
@@ -143,8 +153,16 @@ func (r *Runner) AddBenchmark(b benchmarks.Benchmark) {
 // AddBenchmarkWithoutSettingGPUsToUse allows for user specified GPUs for
 // the benchmark to run.
 func (r *Runner) AddBenchmarkWithoutSettingGPUsToUse(b benchmarks.Benchmark) {
+	// if r.UseUnifiedMemory {
+	// 	b.SetUnifiedMemory()
+	// }
+	// sbin_codex: same managed-memory capability propagation as AddBenchmark.
 	if r.UseUnifiedMemory {
 		b.SetUnifiedMemory()
+	} else if r.uvmConfig.Enabled {
+		if bm, ok := b.(benchmarks.ManagedMemoryCapable); ok {
+			bm.SetManagedMemory()
+		}
 	}
 
 	r.benchmarks = append(r.benchmarks, b)
