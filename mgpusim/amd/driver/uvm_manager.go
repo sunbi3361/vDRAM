@@ -19,8 +19,8 @@ import (
 // can consult them without re-deriving configuration.
 // type UVMManager struct {
 //
-//	sync.Mutex
-// }
+//		sync.Mutex
+//	}
 type UVMManager struct {
 	sync.Mutex
 
@@ -30,6 +30,9 @@ type UVMManager struct {
 	// sbin_codex: registered managed allocations; a registration is appended
 	// only after its boundaries and masks are fully built (atomic visibility).
 	registrations []*ManagedAllocationRegistration
+
+	// sbin_codex (todo 4): GPU capacity reservation tracker (R+I+N <= C).
+	reservation *AdmissionReservation
 }
 
 // NewUVMManager constructs a UVM manager for an enabled UVM configuration.
@@ -38,9 +41,19 @@ type UVMManager struct {
 // otherwise the full available GPU memory. sbin_codex
 func NewUVMManager(cfg UVMConfig, availableGPUMemory uint64) *UVMManager {
 	return &UVMManager{
-		config:   cfg,
-		capacity: cfg.ResolvedCapacity(availableGPUMemory),
+		config:      cfg,
+		capacity:    cfg.ResolvedCapacity(availableGPUMemory),
+		reservation: NewAdmissionReservation(cfg.ResolvedCapacity(availableGPUMemory)),
 	}
+}
+
+// Reservation returns the manager's GPU capacity reservation tracker.
+// sbin_codex (todo 4)
+func (m *UVMManager) Reservation() *AdmissionReservation {
+	m.Lock()
+	defer m.Unlock()
+
+	return m.reservation
 }
 
 // RegisterManagedAllocation validates an allocator result and atomically
@@ -87,7 +100,7 @@ func newManagedAllocationRegistration(
 			"uvm: managed allocation page size %d != base page %d",
 			res.PageSize, basePageSize)
 	}
-	if want := (res.Size - 1) / res.PageSize + 1; res.PageCount != want {
+	if want := (res.Size-1)/res.PageSize + 1; res.PageCount != want {
 		return nil, fmt.Errorf(
 			"uvm: managed allocation page count %d != %d",
 			res.PageCount, want)
@@ -103,15 +116,18 @@ func newManagedAllocationRegistration(
 
 	numWords := (res.PageCount + 63) / 64
 	reg := &ManagedAllocationRegistration{
-		PID:           pid,
-		Base:          res.Base,
-		Size:          res.Size,
-		PageCount:     res.PageCount,
-		PageSize:      res.PageSize,
-		ResidentMask:  make([]uint64, numWords),
-		InFlightMask:  make([]uint64, numWords),
-		DirtyMask:     make([]uint64, numWords),
-		ValidMask:     make([]uint64, numWords),
+		PID:          pid,
+		Base:         res.Base,
+		Size:         res.Size,
+		PageCount:    res.PageCount,
+		PageSize:     res.PageSize,
+		ResidentMask: make([]uint64, numWords),
+		InFlightMask: make([]uint64, numWords),
+		DirtyMask:    make([]uint64, numWords),
+		ValidMask:    make([]uint64, numWords),
+		// sbin_codex (todo 4): copy the CPU backing frames so the VA-block
+		// model can publish per-page CPU physical addresses.
+		CPUBackingPages: append([]uint64(nil), res.CPUBackingPages...),
 	}
 	for w := uint64(0); w < numWords; w++ {
 		bits := res.PageCount - w*64
@@ -120,5 +136,7 @@ func newManagedAllocationRegistration(
 		}
 		reg.ValidMask[w] = (uint64(1) << bits) - 1
 	}
+	// sbin_codex (todo 4): build the 2 MB VA-block model over the masks.
+	reg.VABlocks = buildVABlocks(reg)
 	return reg, nil
 }
