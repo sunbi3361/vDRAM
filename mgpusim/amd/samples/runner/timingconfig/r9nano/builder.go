@@ -293,6 +293,11 @@ func (b *Builder) connectCP() {
 	b.internalConn.PlugIn(b.cp.ToGMMU)                              // sbin_codex: UVM GMMU control seam.
 	b.internalConn.PlugIn(b.gmmu.GetPortByName("Control"))          // sbin_codex
 	b.internalConn.PlugIn(b.gmmu.GetPortByName("CommandProcessor")) // sbin_codex
+	// sbin_codex (todo 24 of mgpusim-uvm-manager): the CP's ToAccessCounter
+	// port is the shared AccessCounter seam. The timingconfig builder sets the
+	// counter's ToCP field to this port; loop-back messages flow through the
+	// internal connection.
+	b.internalConn.PlugIn(b.cp.ToAccessCounter)
 
 	b.cp.RDMA = b.rdmaEngine.CtrlPort
 	b.internalConn.PlugIn(b.cp.RDMA)
@@ -309,6 +314,9 @@ func (b *Builder) connectCP() {
 	// replay commands (todo 8 of mgpusim-uvm-manager).
 	b.gmmu.SetCommandProcessor(b.cp.ToGMMU)
 	b.cp.UVMGateIDs = append(b.cp.UVMGateIDs, gmmu.TranslationGateID)
+	// sbin_codex (todo 24): the CP routes block/unblock commands to the GMMU
+	// control port through the shared ToGMMU seam.
+	b.cp.GMMUControl = b.gmmu.GetPortByName("Control").AsRemote()
 
 	b.connectCPWithCUs()
 	// b.connectCPWithAddressTranslators()

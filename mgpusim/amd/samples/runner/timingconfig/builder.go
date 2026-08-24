@@ -15,7 +15,9 @@ import (
 	ideall1tlb "github.com/sarchlab/mgpusim/v4/amd/samples/runner/timingconfig/ideal-l1tlb" // sbin_codex: ideal-L1-TLB GPU builder
 	"github.com/sarchlab/mgpusim/v4/amd/samples/runner/timingconfig/r9nano"
 	virtualcaching "github.com/sarchlab/mgpusim/v4/amd/samples/runner/timingconfig/virtual-caching" // sbin_codex: virtual-caching GPU builder
-	"github.com/sarchlab/mgpusim/v4/amd/timing/uvm"                                                 // sbin_codex: GPU-wide AccessCounter + CPU-remote endpoint (todo 11).
+	"github.com/sarchlab/mgpusim/v4/amd/timing/cp"  // sbin_codex (todo 24): UVM CP seam wiring.
+	"github.com/sarchlab/mgpusim/v4/amd/timing/rdma" // sbin_codex (todo 24): remote endpoint CPU-memory seam.
+	"github.com/sarchlab/mgpusim/v4/amd/timing/uvm"  // sbin_codex: GPU-wide AccessCounter + CPU-remote endpoint (todo 11).
 )
 
 // Builder builds a hardware platform for timing simulation.
@@ -45,6 +47,16 @@ type Builder struct {
 	// AccessCounter + CPU-remote endpoint), registered behind the access gates.
 	accessCounters  []*uvm.AccessCounter
 	remoteEndpoints []*uvm.RemoteEndpoint
+
+	// sbin_codex (todo 24): the UVM scheduling adapter (uvm-manager.md §1.2).
+	// ModeNormal for -uvm, ModeIdeal for -uvm -uvm-ideal; the driver builder
+	// constructs the Todo-21 coordinator with this mode. The platform wiring
+	// itself is mode-neutral: both modes wire the same control and remote
+	// data paths (ideal changes only timing, not behavior).
+	uvmMode uvm.Mode
+	// gpuDomains collects the built GPU domains so the UVM remote components
+	// can be wired to their CP and RDMA engine seams. // sbin_codex
+	gpuDomains []*sim.Domain
 }
 
 // MakeBuilder creates a new Builder with default parameters.
@@ -97,6 +109,17 @@ func (b Builder) WithUVMConfig(cfg driver.UVMConfig) Builder {
 	return b
 }
 
+// UVMMode returns the chosen UVM scheduling adapter (uvm-manager.md §1.2):
+// ModeIdeal for -uvm -uvm-ideal, ModeNormal otherwise (including a disabled
+// config). The driver builder constructs the Todo-21 coordinator with this
+// mode; the platform wiring is mode-neutral. // sbin_codex
+func (b Builder) UVMMode() uvm.Mode {
+	if b.uvmConfig.Enabled && b.uvmConfig.Ideal {
+		return uvm.ModeIdeal
+	}
+	return uvm.ModeNormal
+}
+
 // Build builds the hardware platform.
 func (b Builder) Build() *sim.Domain {
 	b.adjustConfigForGPUType()
@@ -129,7 +152,11 @@ func (b Builder) Build() *sim.Domain {
 	// sbin_codex (todo 11): register the per-GPU UVM remote-access components
 	// behind the access gates when UVM is enabled.
 	if b.uvmConfig.Enabled {
+		// sbin_codex (todo 24): choose the normal/ideal scheduling adapter
+		// and complete the UVM wiring (CP seam, RDMA/CPU-memory seam).
+		b.uvmMode = b.UVMMode()
 		b.createUVMRemoteComponents()
+		b.wireUVMRemoteComponents()
 	}
 
 	pcieConnector.EstablishRoute()
@@ -242,8 +269,9 @@ func (b *Builder) createGPUs(
 			lastSwitchID = pcieConnector.AddSwitch(rootComplexID)
 		}
 
-		b.createGPU(i, gpuBuilder, gpuDriver, pmcAddressTable,
+		gpu := b.createGPU(i, gpuBuilder, gpuDriver, pmcAddressTable,
 			pcieConnector, lastSwitchID)
+		b.gpuDomains = append(b.gpuDomains, gpu) // sbin_codex (todo 24): keep the domains for UVM seam wiring.
 	}
 }
 
@@ -283,6 +311,34 @@ func (b *Builder) createUVMRemoteComponents() {
 
 		b.accessCounters = append(b.accessCounters, counter)
 		b.remoteEndpoints = append(b.remoteEndpoints, endpoint)
+	}
+}
+
+// wireUVMRemoteComponents completes the UVM platform wiring (plan todo 24 of
+// mgpusim-uvm-manager):
+//
+//   - counter.ToCP = CP.ToAccessCounter (shared port): the acknowledged
+//     kernel-launch reset barrier and the threshold notifications flow
+//     loop-back through the GPU internal connection (uvm-manager.md §14.2),
+//   - endpoint.ToRDMA = RDMA.RDMARequestInside (shared port): CPU-remote
+//     reads are forwarded over modeled PCIe to CPU memory, bypassing the GPU
+//     data caches (uvm-manager.md §13, §23.1).
+//
+// The wiring is mode-neutral: normal and ideal modes wire the same paths.
+// sbin_codex
+func (b *Builder) wireUVMRemoteComponents() {
+	for i := 1; i < b.numGPUs+1; i++ {
+		counter := b.accessCounters[i-1]
+		endpoint := b.remoteEndpoints[i-1]
+		gpu := b.gpuDomains[i-1]
+
+		commandProcessor := gpu.GetPortByName("CommandProcessor").
+			Component().(*cp.CommandProcessor)
+		counter.ToCP = commandProcessor.ToAccessCounter
+
+		rdmaEngine := gpu.GetPortByName("RDMAData").
+			Component().(*rdma.Comp)
+		endpoint.ToRDMA = rdmaEngine.RDMARequestInside
 	}
 }
 

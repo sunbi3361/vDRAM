@@ -46,7 +46,7 @@ func TestBaselineUVMAccessGateWiring(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		at := testSimulation.GetComponentByName(
 			fmt.Sprintf("ShaderArray.L1VAddrTrans[%d]", i)).(*addresstranslator.Comp)
-		want := baselineAccessGateIDBase + uint64(i)
+		want := BaselineAccessGateIDBase + uint64(i)
 		if at.GetUVMGateID() != want {
 			t.Fatalf("L1V[%d] must be wired as gate %d, got %d",
 				i, want, at.GetUVMGateID())
@@ -55,7 +55,7 @@ func TestBaselineUVMAccessGateWiring(t *testing.T) {
 
 	l1s := testSimulation.GetComponentByName(
 		"ShaderArray.L1SAddrTrans").(*addresstranslator.Comp)
-	if want := baselineAccessGateIDBase + 2; l1s.GetUVMGateID() != want {
+	if want := BaselineAccessGateIDBase + 2; l1s.GetUVMGateID() != want {
 		t.Fatalf("L1S must be wired as gate %d, got %d", want, l1s.GetUVMGateID())
 	}
 
