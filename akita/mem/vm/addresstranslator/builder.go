@@ -21,7 +21,8 @@ type Builder struct {
 	translationPortMapper      mem.AddressToPortMapper
 	translationPortMapperType  string
 	translationRemotePorts     []sim.RemotePort
-	physicalAddressPassthrough bool // sbin_codex: explicit mixed-address boundary mode.
+	physicalAddressPassthrough bool   // sbin_codex: explicit mixed-address boundary mode.
+	gateID                     uint64 // sbin_codex: UVM access-gate ID (todo 9).
 }
 
 // MakeBuilder creates a new builder
@@ -68,6 +69,13 @@ func (b Builder) WithDeviceID(n uint64) Builder {
 // WithPhysicalAddressPassthrough forwards PID zero requests without GMMU.
 func (b Builder) WithPhysicalAddressPassthrough() Builder { // sbin_codex
 	b.physicalAddressPassthrough = true
+	return b
+}
+
+// WithUVMGateID enables the UVM access gate on the address translator with the
+// given gate ID. A zero gate ID leaves the gate disabled. // sbin_codex
+func (b Builder) WithUVMGateID(gateID uint64) Builder {
+	b.gateID = gateID
 	return b
 }
 
@@ -172,6 +180,7 @@ func (b Builder) Build(name string) *Comp {
 	t.log2PageSize = b.log2PageSize
 	t.deviceID = b.deviceID
 	t.physicalAddressPassthrough = b.physicalAddressPassthrough // sbin_codex
+	t.gateID = b.gateID                                         // sbin_codex
 
 	middleware := &middleware{Comp: t}
 	t.AddMiddleware(middleware)

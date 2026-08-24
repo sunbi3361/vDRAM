@@ -14,6 +14,11 @@ type DataPathTopology interface {
 	connect(*Builder)
 }
 
+// sbin_codex: baseline UVM access-gate ID base (todo 9 of
+// mgpusim-uvm-manager). The GMMU owns gate ID 1; the baseline L1V/L1S
+// pre-cache translators own the following IDs.
+const baselineAccessGateIDBase uint64 = 2
+
 type baselineDataPathTopology struct{} // sbin_codex
 type virtualDataPathTopology struct{}  // sbin_codex
 
@@ -34,6 +39,7 @@ func (baselineDataPathTopology) build(b *Builder) {
 	b.buildL1SAddressTranslator()
 	b.buildL1SCache()
 	b.buildL1STLB()
+	b.configureBaselineAccessGates() // sbin_codex: baseline UVM access-gate wiring (todo 9).
 }
 
 func (virtualDataPathTopology) build(b *Builder) {
@@ -109,6 +115,16 @@ func dataPathBufferSize(b *Builder) int {
 		return b.memPipelineBufferSize
 	}
 	return 8
+}
+
+// configureBaselineAccessGates assigns a UVM access-gate ID to every baseline
+// L1V/L1S pre-cache address translator. The gate is inert unless the CP sends
+// BlockRange commands, so disabled (-uvm off) behavior is unchanged. // sbin_codex
+func (b *Builder) configureBaselineAccessGates() {
+	for i := range b.numCUs {
+		b.l1vATs[i].SetUVMGateID(baselineAccessGateIDBase + uint64(i))
+	}
+	b.l1sAT.SetUVMGateID(baselineAccessGateIDBase + uint64(b.numCUs))
 }
 
 func connectScalarCUs(b *Builder) {
