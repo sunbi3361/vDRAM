@@ -15,6 +15,7 @@ import (
 	ideall1tlb "github.com/sarchlab/mgpusim/v4/amd/samples/runner/timingconfig/ideal-l1tlb" // sbin_codex: ideal-L1-TLB GPU builder
 	"github.com/sarchlab/mgpusim/v4/amd/samples/runner/timingconfig/r9nano"
 	virtualcaching "github.com/sarchlab/mgpusim/v4/amd/samples/runner/timingconfig/virtual-caching" // sbin_codex: virtual-caching GPU builder
+	"github.com/sarchlab/mgpusim/v4/amd/timing/uvm"                                                 // sbin_codex: GPU-wide AccessCounter + CPU-remote endpoint (todo 11).
 )
 
 // Builder builds a hardware platform for timing simulation.
@@ -36,9 +37,14 @@ type Builder struct {
 	platform          *sim.Domain
 	globalStorage     *mem.Storage
 	rdmaAddressMapper *mem.BankedAddressPortMapper
-	cpuPageTable      vm.PageTable   // sbin_codex: authoritative CPU-side page table.
-	gpuPageTables     []vm.PageTable // sbin_codex: one isolated page table per GPU GMMU.
+	cpuPageTable      vm.PageTable     // sbin_codex: authoritative CPU-side page table.
+	gpuPageTables     []vm.PageTable   // sbin_codex: one isolated page table per GPU GMMU.
 	uvmConfig         driver.UVMConfig // sbin_codex: validated UVM config (disabled zero value by default).
+
+	// sbin_codex (todo 11): per-GPU UVM remote-access components (GPU-wide
+	// AccessCounter + CPU-remote endpoint), registered behind the access gates.
+	accessCounters  []*uvm.AccessCounter
+	remoteEndpoints []*uvm.RemoteEndpoint
 }
 
 // MakeBuilder creates a new Builder with default parameters.
@@ -120,6 +126,12 @@ func (b Builder) Build() *sim.Domain {
 		gpuBuilder, gpuDriver,
 		pmcAddressTable)
 
+	// sbin_codex (todo 11): register the per-GPU UVM remote-access components
+	// behind the access gates when UVM is enabled.
+	if b.uvmConfig.Enabled {
+		b.createUVMRemoteComponents()
+	}
+
 	pcieConnector.EstablishRoute()
 
 	return b.platform
@@ -181,7 +193,7 @@ func (b *Builder) buildGPUDriver(
 		WithGlobalStorage(b.globalStorage).
 		WithD2HCycles(b.d2hCycles).
 		WithH2DCycles(b.h2dCycles).
-		WithUVMConfig(b.uvmConfig). // sbin_codex: validated UVM config (disabled => nil manager).
+		WithUVMConfig(b.uvmConfig).                             // sbin_codex: validated UVM config (disabled => nil manager).
 		WithUVMGPUMemorySize(uint64(b.numGPUs) * b.gpuMemSize). // sbin_codex: total GPU DRAM for capacity validation.
 		Build("Driver")
 
@@ -247,6 +259,31 @@ func (b *Builder) createRDMAAddrTable() *mem.BankedAddressPortMapper {
 	rdmaAddressTable.BankSize = b.gpuMemSize
 	rdmaAddressTable.LowModules = append(rdmaAddressTable.LowModules, "")
 	return rdmaAddressTable
+}
+
+// createUVMRemoteComponents builds and registers one GPU-wide AccessCounter
+// and one CPU-remote endpoint per GPU (uvm-manager.md §14, §16, §31.1). The
+// components sit behind the access gates; the topology builders complete the
+// CP-seam and RDMA wiring. // sbin_codex
+func (b *Builder) createUVMRemoteComponents() {
+	for i := 1; i < b.numGPUs+1; i++ {
+		counter := uvm.MakeAccessCounterBuilder().
+			WithEngine(b.simulation.GetEngine()).
+			WithFreq(1 * sim.GHz).
+			Build(fmt.Sprintf("GPU[%d].AccessCounter", i))
+		b.simulation.RegisterComponent(counter)
+
+		endpoint := uvm.MakeRemoteEndpointBuilder().
+			WithEngine(b.simulation.GetEngine()).
+			WithFreq(1 * sim.GHz).
+			WithGPU(i).
+			WithAccessCounter(counter).
+			Build(fmt.Sprintf("GPU[%d].RemoteEndpoint", i))
+		b.simulation.RegisterComponent(endpoint)
+
+		b.accessCounters = append(b.accessCounters, counter)
+		b.remoteEndpoints = append(b.remoteEndpoints, endpoint)
+	}
 }
 
 func (b *Builder) createConnection(

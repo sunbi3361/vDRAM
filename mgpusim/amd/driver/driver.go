@@ -15,6 +15,7 @@ import (
 	"github.com/sarchlab/mgpusim/v4/amd/insts"
 	"github.com/sarchlab/mgpusim/v4/amd/kernels"
 	"github.com/sarchlab/mgpusim/v4/amd/protocol"
+	"github.com/sarchlab/mgpusim/v4/amd/timing/cp" // sbin_codex: kernel-launch AccessCounter reset barrier (todo 11).
 	"github.com/tebeka/atexit"
 )
 
@@ -346,6 +347,19 @@ func (d *Driver) processLaunchKernelCommand(
 	cmd *LaunchKernelCommand,
 	queue *CommandQueue,
 ) bool {
+	// sbin_codex: UVM kernel-launch AccessCounter reset (todo 11 of
+	// mgpusim-uvm-manager, uvm-manager.md §14.2). The acknowledged reset is
+	// queued before the launch request so the CP raises the kernel-dispatch
+	// barrier until the GPU-wide AccessCounter acks; no workgroup dispatches
+	// before the ack.
+	if d.uvm != nil {
+		reset := &cp.CounterResetReq{}
+		reset.ID = sim.GetIDGenerator().Generate()
+		reset.Src = d.gpuPort.AsRemote()
+		reset.Dst = d.GPUs[queue.GPUID-1].AsRemote()
+		d.requestsToSend = append(d.requestsToSend, reset)
+	}
+
 	req := protocol.NewLaunchKernelReq(d.gpuPort,
 		d.GPUs[queue.GPUID-1])
 	req.PID = queue.Context.pid

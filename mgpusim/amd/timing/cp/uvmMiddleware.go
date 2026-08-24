@@ -175,9 +175,31 @@ func (m *uvmMiddleware) processRspFromAccessCounter() bool {
 	switch req := msg.(type) {
 	case *CounterResetRsp:
 		return m.processCounterResetRsp(req)
+	case *protocol.AccessCounterNotification:
+		// sbin_codex: route the GPU AccessCounter threshold notification to
+		// the UVM driver (todo 11 of mgpusim-uvm-manager, uvm-manager.md §16).
+		return m.processAccessCounterNotification(req)
 	}
 
 	return false
+}
+
+// processAccessCounterNotification routes a GPU-wide AccessCounter threshold
+// notification to the UVM driver, mirroring the GMMU fault-notification path
+// (uvm-manager.md §16: GPU Access Counter -> CP -> PCIe -> UVMDriver). // sbin_codex
+func (m *uvmMiddleware) processAccessCounterNotification(
+	notif *protocol.AccessCounterNotification,
+) bool {
+	notif.Src = m.ToDriver.AsRemote()
+	notif.Dst = m.Driver.AsRemote()
+	if err := m.ToDriver.Send(notif); err != nil {
+		return false
+	}
+
+	m.ToAccessCounter.RetrieveIncoming()
+	tracing.TraceReqReceive(notif, m.CommandProcessor)
+
+	return true
 }
 
 // processBlockRange pre-registers the topology gateID set for the commandID,
