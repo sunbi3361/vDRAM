@@ -210,6 +210,13 @@ func (m *faultServiceMiddleware) driveActive() bool {
 		}
 		m.service(tx)
 		return true
+	case faultPhaseWaitingCapacity:
+		// sbin_codex (todo 20): retry the admission — in-flight pre-evictions
+		// free capacity and frames; the retry re-runs the projected-occupancy
+		// gate with the same missing pages.
+		m.driver.uvm.recordCapacityWait()
+		m.startMigration(tx, tx.missingPages)
+		return true
 	}
 	return false
 }
@@ -223,14 +230,15 @@ func (m *faultServiceMiddleware) driveActive() bool {
 // (uvm-manager.md §11): the missing demand pages plus the actual prefetch
 // pages of the selected region, with resident/in-flight duplicates
 // suppressed.
-// func (m *faultServiceMiddleware) service(tx *faultTransaction) {
-// 	missing := m.driver.uvm.missingDemandPages(tx)
-// 	if len(missing) == 0 {
-// 		m.startReplay(tx)
-// 		return
-// 	}
-// 	m.startMigration(tx, missing)
-// }
+//
+//	func (m *faultServiceMiddleware) service(tx *faultTransaction) {
+//		missing := m.driver.uvm.missingDemandPages(tx)
+//		if len(missing) == 0 {
+//			m.startReplay(tx)
+//			return
+//		}
+//		m.startMigration(tx, missing)
+//	}
 func (m *faultServiceMiddleware) service(tx *faultTransaction) {
 	missing := m.driver.uvm.recomputeTBN(tx)
 	if len(missing) == 0 {
@@ -244,15 +252,32 @@ func (m *faultServiceMiddleware) service(tx *faultTransaction) {
 // admission, allocates the destination GPU frames, marks the pages in flight,
 // and forms the maximal runs; the service emits ONE MemCopyH2DReq per run
 // (uvm-manager.md §23.1.2). // sbin_codex
+// sbin_codex (todo 20): a hard capacity/frame shortage queues the admission
+// (faultPhaseWaitingCapacity) instead of panicking; the pre-eviction victims
+// launched by the admission gate are handed to the eviction service either
+// way, so the H2D and the D2H run concurrently.
 func (m *faultServiceMiddleware) startMigration(
 	tx *faultTransaction,
 	missing []uint64,
 ) {
+	tx.missingPages = missing
 	plan, err := m.driver.uvm.prepareFaultMigration(tx, missing)
 	if err != nil {
-		panic(err)
+		// sbin_codex (todo 20): drive the pre-eviction victims (they free
+		// capacity/frames) and queue the admission for the retry.
+		if plan != nil {
+			for _, v := range plan.PreEvictions {
+				m.driver.uvmEviction.intakePreEviction(v)
+			}
+		}
+		m.driver.uvm.recordCapacityWait()
+		tx.plan = nil
+		tx.phase = faultPhaseWaitingCapacity
+		return
 	}
-	tx.missingPages = missing
+	for _, v := range plan.PreEvictions {
+		m.driver.uvmEviction.intakePreEviction(v)
+	}
 	tx.plan = plan
 	tx.phase = faultPhaseMigrating
 	emitted := 0

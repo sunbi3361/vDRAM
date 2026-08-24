@@ -53,6 +53,12 @@ type migrationPlan struct {
 	allocatedPages []uint64
 	// released guards the exactly-once rollback.
 	released bool
+	// sbin_codex (todo 20): PreEvictions are the projected-occupancy
+	// pre-eviction victims launched by the admission gate; the driving
+	// middleware hands them to the eviction service. They are returned even
+	// when the migration itself fails (frame shortage) so the victims are
+	// never orphaned.
+	PreEvictions []*evictionTransaction
 }
 
 // formMigrationRuns groups pages into maximal runs where consecutive pages
@@ -155,6 +161,11 @@ func (m *UVMManager) prepareFaultMigration(
 // marks the pages in flight, and forms the maximal runs. The reservation is
 // the capacity gate: it happens BEFORE any destination frame allocation, and
 // a failed reservation mutates nothing. // sbin_codex
+// sbin_codex (todo 20): the projected-occupancy admission gate runs before
+// the frame allocation: a hard capacity shortage returns an error (the
+// admission queues) and the optional-headroom pre-eviction victims are
+// launched; a frame shortage releases the reservation and returns the
+// victims with the error so they are driven and never orphaned.
 func (m *UVMManager) prepareMigrationPages(
 	reg *ManagedAllocationRegistration,
 	gpu int,
@@ -167,8 +178,12 @@ func (m *UVMManager) prepareMigrationPages(
 		return nil, fmt.Errorf("uvm: migration without a registration")
 	}
 	bytes := uint64(len(pages)) * basePageSize
-	if err := m.reservation.ReserveAdmission(bytes); err != nil {
-		return nil, err
+	// sbin_codex (todo 20): the projected-occupancy admission gate — reserve
+	// the admission (N += bytes) and launch the pre-eviction victims for the
+	// 64 KB headroom; a hard capacity shortage queues the admission.
+	victims, err := m.admitWithPreEvictionLocked(reg.PID, gpu, bytes)
+	if err != nil {
+		return &migrationPlan{PreEvictions: victims}, err
 	}
 
 	// Allocate destination GPU frames for pages without a pre-assigned frame.
@@ -179,20 +194,20 @@ func (m *UVMManager) prepareMigrationPages(
 		}
 	}
 	var frames []uint64
-	var err error
 	if need > 0 {
 		if m.frames == nil {
 			m.reservation.ReleaseAdmission(bytes)
-			return nil, fmt.Errorf("uvm: no migration frame allocator")
+			return &migrationPlan{PreEvictions: victims},
+				fmt.Errorf("uvm: no migration frame allocator")
 		}
 		frames, err = m.frames.allocateMigrationFrames(gpu, need)
 		if err != nil {
 			m.reservation.ReleaseAdmission(bytes)
-			return nil, err
+			return &migrationPlan{PreEvictions: victims}, err
 		}
 	}
 
-	plan := &migrationPlan{frames: frames}
+	plan := &migrationPlan{frames: frames, PreEvictions: victims}
 	allocated := make([]uint64, 0, need)
 	mpages := make([]migrationPage, 0, len(pages))
 	fi := 0

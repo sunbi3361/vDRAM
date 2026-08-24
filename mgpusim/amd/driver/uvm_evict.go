@@ -88,6 +88,13 @@ type evictionTransaction struct {
 	migrated  bool
 	completed bool
 	bytes     uint64
+
+	// sbin_codex (todo 20): preEviction marks a projected-occupancy
+	// pre-eviction victim (uvm-manager.md §17.1) as opposed to a reactive
+	// eviction; it drives the pre-eviction statistics (E term, concurrency,
+	// overlap). bytes is recorded at launch so a launched-but-not-started
+	// victim counts toward the projected occupancy E term.
+	preEviction bool
 }
 
 // evictionMiddleware drives reactive eviction transactions. It is wired into
@@ -111,12 +118,25 @@ func (m *evictionMiddleware) intake(pid vm.PID, gpu int) error {
 	if err != nil {
 		return err
 	}
+	m.queue(tx)
+	return nil
+}
+
+// intakePreEviction queues a pre-eviction victim transaction created by the
+// projected-occupancy admission gate (todo 20); it is driven by the same
+// eviction transaction machinery as a reactive eviction. // sbin_codex
+func (m *evictionMiddleware) intakePreEviction(tx *evictionTransaction) {
+	m.queue(tx)
+}
+
+// queue appends a transaction to the active/pending set; there is no fixed
+// depth (§17.1: no UVM-side queue-depth limit). // sbin_codex
+func (m *evictionMiddleware) queue(tx *evictionTransaction) {
 	if m.active == nil {
 		m.active = tx
 	} else {
 		m.pending = append(m.pending, tx)
 	}
-	return nil
 }
 
 // ProcessCommand reports that the eviction service handles no commands.
@@ -641,6 +661,19 @@ func (m *UVMManager) intakeEviction(
 	m.Lock()
 	defer m.Unlock()
 
+	return m.intakeEvictionVictimLocked(pid, gpu)
+}
+
+// intakeEvictionVictimLocked selects the deterministic LRU victim, marks the
+// region EVICTING (GPU_RESIDENT -> EVICT_PENDING), claims the ownership slot,
+// and records the coalescing entry — all under one manager lock, so a region
+// is never selected twice. The victim's logical bytes are recorded at launch
+// so the projected-occupancy E term counts launched victims (todo 20). The
+// caller must hold the manager lock. // sbin_codex
+func (m *UVMManager) intakeEvictionVictimLocked(
+	pid vm.PID,
+	gpu int,
+) (*evictionTransaction, error) {
 	cand, err := m.selectEvictionVictimLocked(pid, gpu)
 	if err != nil {
 		return nil, err
@@ -663,12 +696,32 @@ func (m *UVMManager) intakeEviction(
 		reg:         cand.reg,
 		ReplayToken: m.nextReplayTokenLocked(),
 		phase:       evictionStageClaiming,
+		// sbin_codex (todo 20): the victim's logical bytes at launch (the
+		// same value beginEvictionMigration records at the R->I move).
+		bytes: m.victimBytesLocked(cand.reg, cand.regionBase),
 	}
 	e := m.ownershipFor(key)
 	e.OwnerType = OwnershipEviction
 	e.OwnerID = tx.Ticket
 	m.evictByKey[key] = tx
 	return tx, nil
+}
+
+// victimBytesLocked returns the logical bytes of the 64 KB region containing
+// regionBase of reg: every valid page at 4 KB (uvm-manager.md §18.3). The
+// caller must hold the manager lock. // sbin_codex
+func (m *UVMManager) victimBytesLocked(
+	reg *ManagedAllocationRegistration,
+	regionBase uint64,
+) uint64 {
+	blockIdx := (BlockForVA(regionBase) - BlockForVA(reg.Base)) /
+		vablockSizeBytes
+	block := reg.VABlocks[blockIdx]
+	regionIdx := (regionBase - block.StartVA) / subblockSizeBytes
+	_, valid := (&InvariantContext{
+		Reg: reg, Block: block, RegionIdx: regionIdx,
+	}).regionPageRange()
+	return valid * basePageSize
 }
 
 // beginEvictionMigration transitions the region EVICT_PENDING ->
@@ -746,6 +799,11 @@ func (m *UVMManager) completeEviction(tx *evictionTransaction) {
 	defer m.Unlock()
 
 	delete(m.evictByKey, tx.Key)
+	// sbin_codex (todo 20): a completed pre-eviction leaves the concurrent
+	// pre-eviction set.
+	if tx.preEviction {
+		m.preEviction.numConcurrentPreEvictions--
+	}
 	m.reevaluateLocked()
 }
 
@@ -762,6 +820,11 @@ func (m *UVMManager) abortEviction(tx *evictionTransaction) {
 	if e := m.ownershipFor(tx.Key); e.OwnerID == tx.Ticket {
 		e.OwnerType = OwnershipIdle
 		e.OwnerID = 0
+	}
+	// sbin_codex (todo 20): an aborted pre-eviction leaves the concurrent
+	// pre-eviction set.
+	if tx.preEviction {
+		m.preEviction.numConcurrentPreEvictions--
 	}
 	if tx.migrated && !tx.completed {
 		m.reservation.CompleteMigrationToGPU(tx.bytes)

@@ -240,6 +240,10 @@ const (
 	faultPhaseLatency
 	// faultPhaseClaiming waits for its ownership slot (e.g. a copy).
 	faultPhaseClaiming
+	// sbin_codex (todo 20): faultPhaseWaitingCapacity queues the admission
+	// for a hard capacity/frame shortage; the retry re-runs the
+	// projected-occupancy gate once in-flight pre-evictions free capacity.
+	faultPhaseWaitingCapacity
 	// faultPhaseMigrating transfers the missing pages.
 	faultPhaseMigrating
 	// faultPhaseTLBI waits for the 64 KB TLB invalidation ack.

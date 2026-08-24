@@ -200,11 +200,24 @@ func (m *migrationMiddleware) startBlock(tx *migrationTransaction) {
 // reserves the admission, allocates the destination GPU frames, marks the
 // pages in flight, and forms the maximal runs; the service emits ONE
 // MemCopyH2DReq per run (uvm-manager.md §23.1.2). // sbin_codex
+// sbin_codex (todo 20): the pre-eviction victims launched by the admission
+// gate are handed to the eviction service so the D2H runs concurrently with
+// this H2D.
 func (m *migrationMiddleware) startMigration(tx *migrationTransaction) {
 	missing := m.driver.uvm.missingPages(tx.reg, tx.DemandPages)
 	plan, err := m.driver.uvm.prepareMigrationPages(tx.reg, tx.GPU, missing)
 	if err != nil {
+		// sbin_codex (todo 20): drive any pre-eviction victims launched by
+		// the gate before the (unchanged) hard-shortage panic.
+		if plan != nil {
+			for _, v := range plan.PreEvictions {
+				m.driver.uvmEviction.intakePreEviction(v)
+			}
+		}
 		panic(err)
+	}
+	for _, v := range plan.PreEvictions {
+		m.driver.uvmEviction.intakePreEviction(v)
 	}
 	tx.plan = plan
 	tx.phase = migrationPhaseMigrating

@@ -86,6 +86,13 @@ func selectTBNRegion(
 		RegionBase: SubBlockStartVA(faultVA),
 		RegionSize: subblockSizeBytes,
 	}
+	// sbin_codex (todo 20): the fault leaf is FIXED at the original 64 KB
+	// leaf of the serviced fault (§11.3: CurrentFaultExpanded64KBMask
+	// "contains the 64 KB leaf associated with the currently serviced
+	// fault"). Passing the mutated sel.RegionBase as leafBase would shift
+	// the leaf to the previous candidate's base and drop the fault leaf's
+	// occupancy once the fault leaf is not in the candidate's first 64 KB.
+	leafBase := sel.RegionBase
 
 	// Mandatory 64 KB leaf (§11.2): the 4 KB fault expands to its aligned
 	// leaf; the leaf's valid pages are the demand set (§11.7).
@@ -101,8 +108,14 @@ func selectTBNRegion(
 	for level := 1; level <= tbnMaxLevel; level++ {
 		nodeVA := tbnNodeBaseVA(faultVA, level)
 		total := countValidPages(reg, nodeVA, tbnNodeSize(level))
+		// sbin_codex (todo 20): count the FIXED fault leaf as occupied at
+		// every level (§11.3); the previous code passed the mutated
+		// sel.RegionBase, which dropped the fault leaf's occupancy once the
+		// leaf was not in the candidate's first 64 KB.
+		// occupied := countOccupiedPages(reg, nodeVA, tbnNodeSize(level),
+		// 	sel.RegionBase, residentMask)
 		occupied := countOccupiedPages(reg, nodeVA, tbnNodeSize(level),
-			sel.RegionBase, residentMask)
+			leafBase, residentMask)
 		if occupied*100 <= total*51 {
 			break
 		}

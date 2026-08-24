@@ -105,6 +105,13 @@ type UVMManager struct {
 	// a victim must not be pinned). No pin API exists in the initial model;
 	// the registry is exercised by the PinnedExclusion contract test.
 	pinned map[copyRegionKey]bool
+
+	// sbin_codex (todo 20): the projected-occupancy pre-eviction statistics
+	// (uvm-manager.md §17.1): num_pre_evictions, bytes_pre_evicted,
+	// num/max_concurrent_pre_evictions, num_pre_evictions_overlapped_with_h2d,
+	// migration_wait_cycles_for_capacity, and the optional-headroom shortfall
+	// diagnostic. Todo 22 exposes them through the reporter.
+	preEviction preEvictionStats
 }
 
 // NewUVMManager constructs a UVM manager for an enabled UVM configuration.
@@ -112,10 +119,28 @@ type UVMManager struct {
 // resolved capacity is the explicit -uvm-gpu-memory-capacity when set,
 // otherwise the full available GPU memory. sbin_codex
 func NewUVMManager(cfg UVMConfig, availableGPUMemory uint64) *UVMManager {
+	// sbin_codex (todo 20): runtime capacity enforcement — the
+	// projected-occupancy policy requires a page-aligned capacity of at least
+	// 64 KB bounded by the available GPU DRAM/frames (validated at config
+	// time in todo 1; enforced defensively here).
+	capacity := cfg.ResolvedCapacity(availableGPUMemory)
+	if capacity < preEvictionHeadroomBytes {
+		panic(fmt.Sprintf(
+			"uvm: GPU memory capacity %d must be >= 64KB", capacity))
+	}
+	if capacity%basePageSize != 0 {
+		panic(fmt.Sprintf(
+			"uvm: GPU memory capacity %d must be 4KB-aligned", capacity))
+	}
+	if capacity > availableGPUMemory {
+		panic(fmt.Sprintf(
+			"uvm: GPU memory capacity %d exceeds available GPU memory %d",
+			capacity, availableGPUMemory))
+	}
 	return &UVMManager{
 		config:      cfg,
-		capacity:    cfg.ResolvedCapacity(availableGPUMemory),
-		reservation: NewAdmissionReservation(cfg.ResolvedCapacity(availableGPUMemory)),
+		capacity:    capacity,
+		reservation: NewAdmissionReservation(capacity),
 		ownership:   make(map[copyRegionKey]*OwnershipEntry),   // sbin_codex (todo 5)
 		faultByKey:  make(map[copyRegionKey]*faultTransaction), // sbin_codex (todo 15)
 		// sbin_codex (todo 18): the AC/write migration coalescing table.
@@ -790,39 +815,41 @@ func (m *UVMManager) missingPages(
 // TBN-prefetched region admits without a pending fault (§23
 // IDLE/CPU_RESIDENT -> MIGRATING_TO_GPU).
 // func (m *UVMManager) beginFaultMigration(
-// 	tx *faultTransaction,
-// 	bytes uint64,
-// 	now sim.VTimeInSec,
-// ) error {
-// 	m.Lock()
-// 	defer m.Unlock()
 //
-// 	// sbin_codex (todo 16): the admission reservation now happens in
-// 	// prepareFaultMigration BEFORE any DMA is emitted (uvm-manager.md §17.1
-// 	// "Reserve required GPU pages before H2D"); beginFaultMigration only
-// 	// performs the FAULT_PENDING -> MIGRATING_TO_GPU transition.
-// 	// if err := m.reservation.ReserveAdmission(bytes); err != nil {
-// 	// 	return err
-// 	// }
-// 	reg := tx.reg
-// 	if reg == nil {
-// 		return fmt.Errorf("uvm: fault migration without a registration")
-// 	}
-// 	sm := m.faultRegionMachineLocked(reg, tx.GPU, tx.RegionBase)
-// 	switch sm.Region.State {
-// 	case RegionFaultPending:
-// 		if err := sm.Transition(RegionMigratingToGPU, now); err != nil {
-// 			return err
-// 		}
-// 	case RegionMigratingToGPU:
-// 		// An earlier migration (prefetch / access-counter) is already in
-// 		// flight; this transaction's DMA joins it.
-// 	default:
-// 		return fmt.Errorf(
-// 			"uvm: fault service in illegal region state %s", sm.Region.State)
-// 	}
-// 	return nil
-// }
+//	tx *faultTransaction,
+//	bytes uint64,
+//	now sim.VTimeInSec,
+//
+//	) error {
+//		m.Lock()
+//		defer m.Unlock()
+//
+//		// sbin_codex (todo 16): the admission reservation now happens in
+//		// prepareFaultMigration BEFORE any DMA is emitted (uvm-manager.md §17.1
+//		// "Reserve required GPU pages before H2D"); beginFaultMigration only
+//		// performs the FAULT_PENDING -> MIGRATING_TO_GPU transition.
+//		// if err := m.reservation.ReserveAdmission(bytes); err != nil {
+//		// 	return err
+//		// }
+//		reg := tx.reg
+//		if reg == nil {
+//			return fmt.Errorf("uvm: fault migration without a registration")
+//		}
+//		sm := m.faultRegionMachineLocked(reg, tx.GPU, tx.RegionBase)
+//		switch sm.Region.State {
+//		case RegionFaultPending:
+//			if err := sm.Transition(RegionMigratingToGPU, now); err != nil {
+//				return err
+//			}
+//		case RegionMigratingToGPU:
+//			// An earlier migration (prefetch / access-counter) is already in
+//			// flight; this transaction's DMA joins it.
+//		default:
+//			return fmt.Errorf(
+//				"uvm: fault service in illegal region state %s", sm.Region.State)
+//		}
+//		return nil
+//	}
 func (m *UVMManager) beginFaultMigration(
 	tx *faultTransaction,
 	bytes uint64,
@@ -880,30 +907,32 @@ func (m *UVMManager) beginFaultMigration(
 // sbin_codex (todo 17): the TBN-prefetched regions touched by the migration
 // are completed separately by completePrefetchRegions (uvm_tbn.go).
 // func (m *UVMManager) completeFaultMigration(
-// 	tx *faultTransaction,
-// 	bytes uint64,
-// 	now sim.VTimeInSec,
-// ) error {
-// 	m.Lock()
-// 	defer m.Unlock()
 //
-// 	reg := tx.reg
-// 	if reg == nil {
-// 		return fmt.Errorf("uvm: fault migration commit without a registration")
-// 	}
-// 	if tx.plan == nil {
-// 		return fmt.Errorf("uvm: fault migration commit without a plan")
-// 	}
-// 	regions := m.regionsTouchedByPlanLocked(reg, tx)
-// 	regions[tx.RegionBase] = true
-// 	for regionBase := range regions {
-// 		if err := m.completeRegionAdmissionLocked(reg, tx.GPU, regionBase, now); err != nil {
-// 			return err
-// 		}
-// 	}
-// 	m.reservation.CommitAdmission(bytes)
-// 	return nil
-// }
+//	tx *faultTransaction,
+//	bytes uint64,
+//	now sim.VTimeInSec,
+//
+//	) error {
+//		m.Lock()
+//		defer m.Unlock()
+//
+//		reg := tx.reg
+//		if reg == nil {
+//			return fmt.Errorf("uvm: fault migration commit without a registration")
+//		}
+//		if tx.plan == nil {
+//			return fmt.Errorf("uvm: fault migration commit without a plan")
+//		}
+//		regions := m.regionsTouchedByPlanLocked(reg, tx)
+//		regions[tx.RegionBase] = true
+//		for regionBase := range regions {
+//			if err := m.completeRegionAdmissionLocked(reg, tx.GPU, regionBase, now); err != nil {
+//				return err
+//			}
+//		}
+//		m.reservation.CommitAdmission(bytes)
+//		return nil
+//	}
 func (m *UVMManager) completeFaultMigration(
 	tx *faultTransaction,
 	bytes uint64,
