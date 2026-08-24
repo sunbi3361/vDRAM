@@ -18,6 +18,7 @@ type Page struct {
 	Valid       bool
 	DeviceID    uint64
 	Unified     bool
+	Managed     bool // sbin_uvm: managed memory
 	IsMigrating bool
 	IsPinned    bool
 }

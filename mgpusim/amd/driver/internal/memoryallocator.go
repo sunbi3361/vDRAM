@@ -24,6 +24,8 @@ type MemoryAllocator interface {
 		vAddr uint64,
 		unified bool,
 	) vm.Page
+
+	AllocateManaged(pid vm.PID, byteSize uint64) ManagedAllocationResult // sbin_uvm: allocate managed memory.
 }
 
 // NewMemoryAllocator creates a new memory allocator.
@@ -46,6 +48,19 @@ func NewMemoryAllocator(
 type processMemoryState struct {
 	pid       vm.PID
 	nextVAddr uint64
+}
+
+// sbin_uvm
+// managedAllocationResult describes a managed allocation created by
+// AllocateManaged. It carries the virtual range and per-page CPU backing
+// frames so the driver UVM manager can register residency metadata.
+type ManagedAllocationResult struct {
+	Base            uint64
+	Size            uint64
+	PageCount       uint64
+	PageSize        uint64
+	CPUBackingPages []uint64
+	PIDs            []vm.PID
 }
 
 // A memoryAllocatorImpl provides the default implementation for
@@ -175,24 +190,6 @@ func (a *memoryAllocatorImpl) AllocateUnified(
 	return a.allocatePages(int(numPages), pid, 1, true)
 }
 
-// sbin_uvm: AllocateManaged allocates a chunck of managed memory.
-// Allocation is done on CPU and can be migrated to GPU.
-func (a *memoryAllocatorImpl) AllocateManaged(
-	pid vm.PID,
-	byteSize uint64,
-) uint64 {
-	if byteSize == 0 {
-		panic("Allocating 0 bytes.")
-	}
-
-	a.Lock()
-	defer a.Unlock()
-
-	pageSize := uint64(1 << a.log2PageSize)
-	numPages := (byteSize-1)/pageSize + 1
-	return a.allocatePages(int(numPages), pid, 0, true)
-}
-
 func (a *memoryAllocatorImpl) allocatePages(
 	numPages int,
 	pid vm.PID,
@@ -236,6 +233,84 @@ func (a *memoryAllocatorImpl) allocatePages(
 	pState.nextVAddr += pageSize * uint64(numPages)
 
 	return nextVAddr
+}
+
+// sbin_uvm: AllocateManaged allocates a chunck of managed memory.
+// Allocation is done on CPU and can be migrated to GPU.
+func (a *memoryAllocatorImpl) AllocateManaged(
+	pid vm.PID,
+	byteSize uint64,
+) ManagedAllocationResult {
+	if byteSize == 0 {
+		panic("Allocating 0 bytes.")
+	}
+
+	a.Lock()
+	defer a.Unlock()
+
+	pageSize := uint64(1 << a.log2PageSize)
+	numPages := (byteSize-1)/pageSize + 1
+	return a.allocateManagedPages(int(numPages), byteSize, pid, 0)
+}
+
+// sbin_uvm
+func (a *memoryAllocatorImpl) allocateManagedPages(
+	numPages int,
+	byteSize uint64,
+	pid vm.PID,
+	deviceID int,
+) ManagedAllocationResult {
+	pState, found := a.processMemoryStates[pid]
+	if !found {
+		a.processMemoryStates[pid] = &processMemoryState{
+			pid:       pid,
+			nextVAddr: uint64(1 << a.log2PageSize),
+		}
+		pState = a.processMemoryStates[pid]
+	}
+	device := a.devices[deviceID]
+
+	pageSize := uint64(1 << a.log2PageSize)
+	nextVAddr := pState.nextVAddr
+
+	result := ManagedAllocationResult{
+		Base:            nextVAddr,
+		Size:            byteSize,
+		PageCount:       uint64(numPages),
+		PageSize:        pageSize,
+		CPUBackingPages: make([]uint64, 0, numPages),
+		PIDs:            make([]vm.PID, 0, numPages),
+	}
+
+	for i := 0; i < numPages; i++ {
+		vAddr := nextVAddr + uint64(i)*pageSize
+		cpuPAddr := device.allocatePage()
+
+		page := vm.Page{
+			DeviceID:    uint64(0), // sbin_uvm: managed memory is allocated on CPU.
+			PID:         pid,
+			VAddr:       vAddr,
+			PAddr:       cpuPAddr,
+			PageSize:    pageSize,
+			Valid:       true,
+			Unified:     false,
+			Managed:     true, // sbin_uvm: managed memory is marked as managed.
+			IsPinned:    false,
+			IsMigrating: false,
+		}
+
+		// fmt.Printf("page.addr is %x piage Device ID is %d \n", page.PAddr, page.DeviceID)
+		// debug.PrintStack()
+		a.insertPage(page) // sbin_codex: driver owns CPU/GPU page-table synchronization.
+		a.vAddrToPageMapping[page.VAddr] = page
+		result.CPUBackingPages = append(result.CPUBackingPages, cpuPAddr)
+		result.PIDs = append(result.PIDs, pid)
+	}
+	a.recordAllocation(numPages) // sbin_codex: update physical footprint counters.
+
+	pState.nextVAddr += pageSize * uint64(numPages)
+
+	return result
 }
 
 func (a *memoryAllocatorImpl) Remap(

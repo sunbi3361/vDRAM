@@ -164,13 +164,22 @@ func (d *Driver) AllocateUnifiedMemory(
 	return ptr
 }
 
-// sbin_uvm: AllocateManagedMemory allocates a managed memory. Allocation is done on CPU
+// sbin_uvm
+// AllocateManaged allocates a UVM-managed buffer. The allocation reserves
+// virtual address space with CPU backing frames but no GPU frames; pages are
+// demand-paged to the GPU on first access.
 func (d *Driver) AllocateManagedMemory(
 	ctx *Context,
 	byteSize uint64,
 ) Ptr {
-	ptr := Ptr(d.memAllocator.AllocateManaged(ctx.pid, byteSize))
+	if d.uvm == nil {
+		log.Panic("AllocateManaged called without -uvm enabled")
+	}
 
+	result := d.memAllocator.AllocateManaged(ctx.pid, byteSize)
+	d.uvm.RegisterManagedAllocation(ctx.pid, result) // sbin_uvm
+
+	ptr := Ptr(result.Base)
 	ctx.buffers = append(ctx.buffers, &buffer{
 		vAddr:   ptr,
 		size:    byteSize,

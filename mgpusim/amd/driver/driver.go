@@ -62,6 +62,8 @@ type Driver struct {
 
 	RemotePMCPorts []sim.Port
 
+	uvm *UVMManager // sbin_uvm: UVM demand-paging manager (nil when disabled).
+
 	codeObjGPUAddrs map[*insts.KernelCodeObject]Ptr
 }
 
