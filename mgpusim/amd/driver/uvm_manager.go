@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/sarchlab/akita/v4/mem/vm"
+	"github.com/sarchlab/akita/v4/sim" // sbin_codex (todo 15): fault service region transitions.
 	"github.com/sarchlab/mgpusim/v4/amd/driver/internal"
 )
 
@@ -55,6 +56,22 @@ type UVMManager struct {
 	// claim their whole key set. A copy is enqueued once and re-evaluated
 	// after any release.
 	copyWaiters []*copyTransaction
+
+	// sbin_codex (todo 15): the fault coalescing table: one live fault-service
+	// transaction per (PID, GPU, regionBase). An entry exists from the first
+	// raw fault of a region until the transaction completes after replay.
+	faultByKey map[copyRegionKey]*faultTransaction
+
+	// sbin_codex (todo 15): the per-episode replay token counter. The GMMU
+	// assigns a region replay token per fault episode; the driver mirrors it
+	// per transaction (the PageFaultReq envelope carries no ReplayToken yet —
+	// the correlation is a later-todo concern).
+	nextReplayToken vm.ReplayToken
+
+	// sbin_codex (todo 15): fault statistics (uvm-manager.md §8.4).
+	rawPageFaultCount       uint64
+	coalescedPageFaultCount uint64
+	uniqueFaultServiceCount uint64
 }
 
 // NewUVMManager constructs a UVM manager for an enabled UVM configuration.
@@ -66,7 +83,8 @@ func NewUVMManager(cfg UVMConfig, availableGPUMemory uint64) *UVMManager {
 		config:      cfg,
 		capacity:    cfg.ResolvedCapacity(availableGPUMemory),
 		reservation: NewAdmissionReservation(cfg.ResolvedCapacity(availableGPUMemory)),
-		ownership:   make(map[copyRegionKey]*OwnershipEntry), // sbin_codex (todo 5)
+		ownership:   make(map[copyRegionKey]*OwnershipEntry),   // sbin_codex (todo 5)
+		faultByKey:  make(map[copyRegionKey]*faultTransaction), // sbin_codex (todo 15)
 	}
 }
 
@@ -258,8 +276,31 @@ func (m *UVMManager) NextCopyTicket() uint64 {
 	m.Lock()
 	defer m.Unlock()
 
+	return m.nextTicketLocked()
+}
+
+// nextTicketLocked returns the next global ticket under the manager lock.
+// Fault transactions share the same ticket space so ticket order is the
+// global creation order across copies and faults. // sbin_codex
+func (m *UVMManager) nextTicketLocked() uint64 {
 	m.nextCopyTicket++
 	return m.nextCopyTicket
+}
+
+// nextReplayTokenLocked returns the next per-episode replay token under the
+// manager lock. // sbin_codex
+func (m *UVMManager) nextReplayTokenLocked() vm.ReplayToken {
+	m.nextReplayToken++
+	return m.nextReplayToken
+}
+
+// setMaskBit sets or clears bit `page` of a registration mask. // sbin_codex
+func setMaskBit(mask []uint64, page uint64, on bool) {
+	if on {
+		mask[page/64] |= uint64(1) << (page % 64)
+	} else {
+		mask[page/64] &^= uint64(1) << (page % 64)
+	}
 }
 
 // claimCopy atomically claims every key of tx as one COPY transaction when
@@ -483,4 +524,282 @@ func (m *UVMManager) forEachSpanPage(
 			fn(pageVA, lo-startVA, hi-lo, info)
 		}
 	}
+}
+
+// intakePageFault consumes one raw 4 KB fault request: it counts the request,
+// coalesces it into the live transaction of its 64 KB region when one exists,
+// or creates the region's first unique fault-service transaction. A fault on
+// an unmanaged address or in an illegal region state is rejected before any
+// transaction state is created. // sbin_codex
+func (m *UVMManager) intakePageFault(
+	pid vm.PID,
+	gpu int,
+	vaddr uint64,
+) (tx *faultTransaction, isNew bool, err error) {
+	m.Lock()
+	defer m.Unlock()
+
+	m.rawPageFaultCount++
+
+	reg := m.registrationForPageLocked(pid, vaddr)
+	if reg == nil {
+		return nil, false, fmt.Errorf(
+			"uvm: fault on unmanaged address pid=%d va=%#x", pid, vaddr)
+	}
+
+	key := copyRegionKey{PID: pid, GPU: gpu, RegionBase: SubBlockStartVA(vaddr)}
+	if tx := m.faultByKey[key]; tx != nil {
+		m.coalescedPageFaultCount++
+		return tx, false, nil
+	}
+
+	sm := m.faultRegionMachineLocked(reg, gpu, key.RegionBase)
+	switch sm.Region.State {
+	case RegionIDLE, RegionCPUResident:
+		if err := sm.Transition(RegionFaultPending, 0); err != nil {
+			return nil, false, err
+		}
+	case RegionFaultPending, RegionMigratingToGPU:
+		// A migration without a fault transaction (access-counter migration /
+		// prefetch) is in flight; the new transaction coalesces into it and
+		// the service re-reads residency from the current masks.
+	default:
+		return nil, false, fmt.Errorf(
+			"uvm: fault in illegal region state %s (pid=%d gpu=%d region=%#x)",
+			sm.Region.State, pid, gpu, key.RegionBase)
+	}
+
+	m.uniqueFaultServiceCount++
+	tx = &faultTransaction{
+		Ticket:      m.nextTicketLocked(),
+		PID:         pid,
+		GPU:         gpu,
+		RegionBase:  key.RegionBase,
+		Key:         key,
+		DemandPages: m.demandPagesLocked(reg, key.RegionBase),
+		ReplayToken: m.nextReplayTokenLocked(),
+		reg:         reg,
+	}
+	m.faultByKey[key] = tx
+	return tx, true, nil
+}
+
+// RawPageFaultCount returns the number of raw 4 KB fault requests consumed
+// (uvm-manager.md §8.4). // sbin_codex
+func (m *UVMManager) RawPageFaultCount() uint64 {
+	m.Lock()
+	defer m.Unlock()
+
+	return m.rawPageFaultCount
+}
+
+// CoalescedPageFaultCount returns the number of raw faults attached to an
+// existing transaction of their 64 KB region. // sbin_codex
+func (m *UVMManager) CoalescedPageFaultCount() uint64 {
+	m.Lock()
+	defer m.Unlock()
+
+	return m.coalescedPageFaultCount
+}
+
+// UniqueFaultServiceCount returns the number of unique fault-service
+// transactions created (one per 64 KB region per episode). // sbin_codex
+func (m *UVMManager) UniqueFaultServiceCount() uint64 {
+	m.Lock()
+	defer m.Unlock()
+
+	return m.uniqueFaultServiceCount
+}
+
+// faultRegionMachineLocked binds a region state machine to the 64 KB region
+// containing regionBase of reg. The caller must hold the manager lock. // sbin_codex
+func (m *UVMManager) faultRegionMachineLocked(
+	reg *ManagedAllocationRegistration,
+	gpu int,
+	regionBase uint64,
+) *RegionStateMachine {
+	blockIdx := (BlockForVA(regionBase) - BlockForVA(reg.Base)) / vablockSizeBytes
+	block := reg.VABlocks[blockIdx]
+	regionIdx := (regionBase - block.StartVA) / subblockSizeBytes
+	return NewRegionStateMachine(
+		RegionContext{PID: reg.PID, GPU: gpu, Block: blockIdx, Region: regionIdx},
+		block.SubBlocks[regionIdx])
+}
+
+// demandPagesLocked returns the allocation page indices of the 64 KB region's
+// valid pages: the demand set of a fault transaction. The caller must hold
+// the manager lock. // sbin_codex
+func (m *UVMManager) demandPagesLocked(
+	reg *ManagedAllocationRegistration,
+	regionBase uint64,
+) []uint64 {
+	blockIdx := (BlockForVA(regionBase) - BlockForVA(reg.Base)) / vablockSizeBytes
+	block := reg.VABlocks[blockIdx]
+	regionIdx := (regionBase - block.StartVA) / subblockSizeBytes
+	allocStart, valid := (&InvariantContext{
+		Reg: reg, Block: block, RegionIdx: regionIdx,
+	}).regionPageRange()
+	pages := make([]uint64, 0, valid)
+	for i := uint64(0); i < valid; i++ {
+		pages = append(pages, allocStart+i)
+	}
+	return pages
+}
+
+// missingDemandPages returns the transaction's demand pages that are neither
+// GPU-resident nor in flight: the pages a new migration must transfer. // sbin_codex
+func (m *UVMManager) missingDemandPages(tx *faultTransaction) []uint64 {
+	m.Lock()
+	defer m.Unlock()
+
+	if tx.reg == nil {
+		return nil
+	}
+	missing := make([]uint64, 0, len(tx.DemandPages))
+	for _, page := range tx.DemandPages {
+		if !maskBit(tx.reg.ResidentMask, page) && !maskBit(tx.reg.InFlightMask, page) {
+			missing = append(missing, page)
+		}
+	}
+	return missing
+}
+
+// prepareFaultMigration marks the missing pages in flight and returns their
+// transfer descriptors (CPU source, HBM destination). // sbin_codex
+func (m *UVMManager) prepareFaultMigration(
+	tx *faultTransaction,
+	missing []uint64,
+) ([]faultMigrationPage, error) {
+	m.Lock()
+	defer m.Unlock()
+
+	reg := tx.reg
+	if reg == nil {
+		return nil, fmt.Errorf("uvm: fault migration without a registration")
+	}
+	pages := make([]faultMigrationPage, 0, len(missing))
+	for _, page := range missing {
+		blockIdx := (BlockForVA(reg.Base+page*basePageSize) -
+			BlockForVA(reg.Base)) / vablockSizeBytes
+		block := reg.VABlocks[blockIdx]
+		blockLocal := (reg.Base + page*basePageSize - block.StartVA) / basePageSize
+		p := &block.Pages[blockLocal]
+		if p.GPUPhysicalPage == 0 {
+			return nil, fmt.Errorf(
+				"uvm: fault migration page %d has no GPU physical page", page)
+		}
+		setMaskBit(reg.InFlightMask, page, true)
+		pages = append(pages, faultMigrationPage{
+			PageVA:  reg.Base + page*basePageSize,
+			CPUPage: p.CPUPhysicalPage,
+			GPUPage: p.GPUPhysicalPage,
+		})
+	}
+	return pages, nil
+}
+
+// commitFaultMigration publishes GPU residency for the migrated pages and
+// returns their (VA, HBM PA) pairs for the GPU PTE publication. // sbin_codex
+func (m *UVMManager) commitFaultMigration(
+	tx *faultTransaction,
+) ([]faultMigratedPage, error) {
+	m.Lock()
+	defer m.Unlock()
+
+	reg := tx.reg
+	if reg == nil {
+		return nil, fmt.Errorf("uvm: fault migration commit without a registration")
+	}
+	pages := make([]faultMigratedPage, 0, len(tx.missingPages))
+	for _, page := range tx.missingPages {
+		setMaskBit(reg.ResidentMask, page, true)
+		setMaskBit(reg.InFlightMask, page, false)
+		blockIdx := (BlockForVA(reg.Base+page*basePageSize) -
+			BlockForVA(reg.Base)) / vablockSizeBytes
+		block := reg.VABlocks[blockIdx]
+		blockLocal := (reg.Base + page*basePageSize - block.StartVA) / basePageSize
+		pages = append(pages, faultMigratedPage{
+			PageVA:  reg.Base + page*basePageSize,
+			GPUPage: block.Pages[blockLocal].GPUPhysicalPage,
+		})
+	}
+	return pages, nil
+}
+
+// beginFaultMigration reserves admission for the migrated bytes and
+// transitions the fault region to MIGRATING_TO_GPU. // sbin_codex
+func (m *UVMManager) beginFaultMigration(
+	tx *faultTransaction,
+	bytes uint64,
+	now sim.VTimeInSec,
+) error {
+	m.Lock()
+	defer m.Unlock()
+
+	if err := m.reservation.ReserveAdmission(bytes); err != nil {
+		return err
+	}
+	reg := tx.reg
+	if reg == nil {
+		return fmt.Errorf("uvm: fault migration without a registration")
+	}
+	sm := m.faultRegionMachineLocked(reg, tx.GPU, tx.RegionBase)
+	switch sm.Region.State {
+	case RegionFaultPending:
+		if err := sm.Transition(RegionMigratingToGPU, now); err != nil {
+			return err
+		}
+	case RegionMigratingToGPU:
+		// An earlier migration (prefetch / access-counter) is already in
+		// flight; this transaction's DMA joins it.
+	default:
+		return fmt.Errorf(
+			"uvm: fault service in illegal region state %s", sm.Region.State)
+	}
+	return nil
+}
+
+// completeFaultMigration commits the migrated bytes to resident and
+// transitions the region to GPU_RESIDENT. // sbin_codex
+func (m *UVMManager) completeFaultMigration(
+	tx *faultTransaction,
+	bytes uint64,
+	now sim.VTimeInSec,
+) error {
+	m.Lock()
+	defer m.Unlock()
+
+	reg := tx.reg
+	if reg == nil {
+		return fmt.Errorf("uvm: fault migration commit without a registration")
+	}
+	sm := m.faultRegionMachineLocked(reg, tx.GPU, tx.RegionBase)
+	switch sm.Region.State {
+	case RegionMigratingToGPU:
+		if err := sm.Transition(RegionGPUResident, now); err != nil {
+			return err
+		}
+	case RegionGPUResident:
+		// Already resident (an overlapping migration completed first).
+	default:
+		return fmt.Errorf(
+			"uvm: fault completion in illegal region state %s", sm.Region.State)
+	}
+	m.reservation.CommitAdmission(bytes)
+	return nil
+}
+
+// completeFault retires a serviced fault transaction: it removes the
+// coalescing-table entry, releases the ownership slot, and wakes the ticket
+// queue so a waiting copy can claim. // sbin_codex
+func (m *UVMManager) completeFault(tx *faultTransaction) {
+	m.Lock()
+	defer m.Unlock()
+
+	delete(m.faultByKey, tx.Key)
+	if e := m.ownershipFor(tx.Key); e.OwnerID == tx.Ticket {
+		e.OwnerType = OwnershipIdle
+		e.OwnerID = 0
+	}
+	m.reevaluateLocked()
 }

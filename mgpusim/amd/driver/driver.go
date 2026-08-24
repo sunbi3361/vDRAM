@@ -65,6 +65,10 @@ type Driver struct {
 
 	uvm *UVMManager // sbin_uvm: UVM demand-paging manager (nil when disabled).
 
+	// sbin_codex (todo 15): FIFO fault service consuming PageFaultReq and
+	// driving coalesced 64 KB fault-service transactions (nil when disabled).
+	uvmFault *faultServiceMiddleware
+
 	codeObjGPUAddrs map[*insts.KernelCodeObject]Ptr
 }
 
@@ -227,6 +231,14 @@ func (d *Driver) processReturnReq() bool {
 	case *protocol.GPURestartRsp:
 		d.gpuPort.RetrieveIncoming()
 		return d.handleGPURestartRsp(req)
+	// sbin_codex (todo 15): the fault intake seam — a PageFaultReq from the
+	// CP is consumed by the FIFO fault service.
+	case *protocol.PageFaultReq:
+		d.gpuPort.RetrieveIncoming()
+		if d.uvmFault == nil {
+			panic("uvm: PageFaultReq without an enabled UVM fault service")
+		}
+		return d.uvmFault.intake(req)
 	}
 
 	return false

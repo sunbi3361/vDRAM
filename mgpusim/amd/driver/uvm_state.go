@@ -177,9 +177,10 @@ func (m *RegionStateMachine) GPUWrite() error {
 // OwnershipType classifies the holder of one ownership-table slot (plan todo
 // 5, uvm-manager.md §23). The ownership table is shared by copies, faults,
 // migrations, prefetches, and evictions: a slot is idle, or owned by exactly
-// one transaction of one type. COPY is the only type this todo drives; the
-// other types are reserved for the owning todos (15, 16, 17, 19) and are
-// exercised through the generic AcquireOwnership/ReleaseOwnership API.
+// one transaction of one type. COPY (todo 5) and FAULT (todo 15) are the
+// types driven so far; the remaining types are reserved for the owning todos
+// (16, 17, 19) and are exercised through the generic
+// AcquireOwnership/ReleaseOwnership API.
 type OwnershipType int
 
 const (
@@ -225,6 +226,29 @@ type OwnershipEntry struct {
 	OwnerType OwnershipType
 	OwnerID   uint64 // transaction ticket / holder ID; 0 when idle
 }
+
+// faultPhase is the progress of one fault-service transaction (plan todo 15,
+// uvm-manager.md §8.4, §9). A transaction is created at the first raw fault
+// of its 64 KB region, waits FIFO, and is serviced when it reaches the head.
+type faultPhase int
+
+const (
+	// faultPhaseQueued waits in the FIFO for the head.
+	faultPhaseQueued faultPhase = iota
+	// faultPhaseLatency has reached the head; its one software latency is
+	// scheduled as a simulation event.
+	faultPhaseLatency
+	// faultPhaseClaiming waits for its ownership slot (e.g. a copy).
+	faultPhaseClaiming
+	// faultPhaseMigrating transfers the missing pages.
+	faultPhaseMigrating
+	// faultPhaseTLBI waits for the 64 KB TLB invalidation ack.
+	faultPhaseTLBI
+	// faultPhaseReplaying waits for the GMMU replay ack.
+	faultPhaseReplaying
+	// faultPhaseDone completed after the replay; the next FIFO may start.
+	faultPhaseDone
+)
 
 // AdmissionReservation tracks GPU capacity reservations for the R+I+N <= C
 // invariant (plan todo 20 enforces eviction; this todo owns the tracking

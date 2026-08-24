@@ -123,6 +123,13 @@ func (b Builder) Build(name string) *Driver {
 	driver.pageTable = b.pageTable
 	driver.globalStorage = b.globalStorage
 
+	// sbin_codex (todo 15): wire the FIFO fault service before the copy
+	// middleware so it consumes its own DMA/replay responses first.
+	if b.uvmConfig != nil && b.uvmConfig.Enabled {
+		driver.uvmFault = &faultServiceMiddleware{driver: driver}
+		driver.middlewares = append(driver.middlewares, driver.uvmFault)
+	}
+
 	if b.useMagicMemoryCopy {
 		globalStorageMemoryCopyMiddleware := &globalStorageMemoryCopyMiddleware{
 			driver: driver,
