@@ -389,15 +389,23 @@ func (m *faultServiceMiddleware) processIncoming() bool {
 				continue
 			}
 		case *protocol.UVMTLBInvalidateRsp:
-			m.driver.gpuPort.RetrieveIncoming()
-			m.processTLBRsp(req)
-			madeProgress = true
-			continue
+			// sbin_codex (todo 18): consume only the fault transaction's own
+			// TLB ack; a concurrent migration transaction's ack is left for
+			// the migration middleware.
+			if m.processTLBRsp(req) {
+				m.driver.gpuPort.RetrieveIncoming()
+				madeProgress = true
+				continue
+			}
 		case *protocol.UVMFaultReplayRsp:
-			m.driver.gpuPort.RetrieveIncoming()
-			m.processReplayRsp(req)
-			madeProgress = true
-			continue
+			// sbin_codex (todo 18): consume only the fault transaction's own
+			// replay ack; a concurrent migration transaction's ack is left
+			// for the migration middleware.
+			if m.processReplayRsp(req) {
+				m.driver.gpuPort.RetrieveIncoming()
+				madeProgress = true
+				continue
+			}
 		}
 		break
 	}
@@ -427,12 +435,15 @@ func (m *faultServiceMiddleware) processGeneralRsp(rsp *sim.GeneralRsp) bool {
 	return false
 }
 
-// processTLBRsp completes the TLB-invalidation phase; a stray ack is
-// rejected. // sbin_codex
-func (m *faultServiceMiddleware) processTLBRsp(rsp *protocol.UVMTLBInvalidateRsp) {
+// processTLBRsp completes the TLB-invalidation phase. It returns whether the
+// ack belonged to the active transaction; a stray ack (e.g. another
+// middleware's transaction) is rejected and left in the port. // sbin_codex
+func (m *faultServiceMiddleware) processTLBRsp(
+	rsp *protocol.UVMTLBInvalidateRsp,
+) bool {
 	tx := m.active
 	if tx == nil || tx.phase != faultPhaseTLBI {
-		return
+		return false
 	}
 	for i, req := range tx.tlbReqs {
 		if req.ID == rsp.RspTo {
@@ -441,17 +452,22 @@ func (m *faultServiceMiddleware) processTLBRsp(rsp *protocol.UVMTLBInvalidateRsp
 			if tx.pendingTLB == 0 {
 				m.startReplay(tx)
 			}
-			return
+			return true
 		}
 	}
+	return false
 }
 
 // processReplayRsp completes the transaction after the exactly-one replay
-// ack; a duplicate or stray ack is rejected without double accounting. // sbin_codex
-func (m *faultServiceMiddleware) processReplayRsp(rsp *protocol.UVMFaultReplayRsp) {
+// ack. It returns whether the ack belonged to the active transaction; a
+// duplicate or stray ack is rejected without double accounting. // sbin_codex
+func (m *faultServiceMiddleware) processReplayRsp(
+	rsp *protocol.UVMFaultReplayRsp,
+) bool {
 	tx := m.active
 	if tx == nil || tx.replayReq == nil || rsp.RspTo != tx.replayReq.ID {
-		return
+		return false
 	}
 	m.completeFault(tx)
+	return true
 }

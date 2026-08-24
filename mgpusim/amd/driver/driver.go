@@ -69,6 +69,11 @@ type Driver struct {
 	// driving coalesced 64 KB fault-service transactions (nil when disabled).
 	uvmFault *faultServiceMiddleware
 
+	// sbin_codex (todo 18): AC/write migration service consuming
+	// AccessCounterNotification and remote-write triggers and driving 64 KB
+	// migration transactions (nil when disabled).
+	uvmMigration *migrationMiddleware
+
 	codeObjGPUAddrs map[*insts.KernelCodeObject]Ptr
 }
 
@@ -239,6 +244,14 @@ func (d *Driver) processReturnReq() bool {
 			panic("uvm: PageFaultReq without an enabled UVM fault service")
 		}
 		return d.uvmFault.intake(req)
+	// sbin_codex (todo 18): the access-counter migration intake seam — a
+	// threshold notification from the CP becomes a migration transaction.
+	case *protocol.AccessCounterNotification:
+		d.gpuPort.RetrieveIncoming()
+		if d.uvmMigration == nil {
+			panic("uvm: AccessCounterNotification without an enabled UVM migration service")
+		}
+		return d.uvmMigration.intakeNotification(req)
 	}
 
 	return false

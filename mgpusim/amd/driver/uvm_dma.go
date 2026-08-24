@@ -140,25 +140,40 @@ func (m *UVMManager) pageStateLocked(
 // marks the missing pages in flight, and forms the maximal runs. The
 // reservation is the capacity gate: it happens BEFORE any destination frame
 // allocation, and a failed reservation mutates nothing. // sbin_codex
+// sbin_codex (todo 18): delegates to the generic page-based
+// prepareMigrationPages so AC/write migration transactions reuse the same
+// reservation -> destination frame allocation -> run formation.
 func (m *UVMManager) prepareFaultMigration(
 	tx *faultTransaction,
 	missing []uint64,
 ) (*migrationPlan, error) {
+	return m.prepareMigrationPages(tx.reg, tx.GPU, missing)
+}
+
+// prepareMigrationPages reserves the admission for the migrated bytes,
+// allocates destination GPU frames for pages without a pre-assigned frame,
+// marks the pages in flight, and forms the maximal runs. The reservation is
+// the capacity gate: it happens BEFORE any destination frame allocation, and
+// a failed reservation mutates nothing. // sbin_codex
+func (m *UVMManager) prepareMigrationPages(
+	reg *ManagedAllocationRegistration,
+	gpu int,
+	pages []uint64,
+) (*migrationPlan, error) {
 	m.Lock()
 	defer m.Unlock()
 
-	reg := tx.reg
 	if reg == nil {
-		return nil, fmt.Errorf("uvm: fault migration without a registration")
+		return nil, fmt.Errorf("uvm: migration without a registration")
 	}
-	bytes := uint64(len(missing)) * basePageSize
+	bytes := uint64(len(pages)) * basePageSize
 	if err := m.reservation.ReserveAdmission(bytes); err != nil {
 		return nil, err
 	}
 
 	// Allocate destination GPU frames for pages without a pre-assigned frame.
 	need := 0
-	for _, page := range missing {
+	for _, page := range pages {
 		if m.pageStateLocked(reg, page).GPUPhysicalPage == 0 {
 			need++
 		}
@@ -170,7 +185,7 @@ func (m *UVMManager) prepareFaultMigration(
 			m.reservation.ReleaseAdmission(bytes)
 			return nil, fmt.Errorf("uvm: no migration frame allocator")
 		}
-		frames, err = m.frames.allocateMigrationFrames(tx.GPU, need)
+		frames, err = m.frames.allocateMigrationFrames(gpu, need)
 		if err != nil {
 			m.reservation.ReleaseAdmission(bytes)
 			return nil, err
@@ -179,9 +194,9 @@ func (m *UVMManager) prepareFaultMigration(
 
 	plan := &migrationPlan{frames: frames}
 	allocated := make([]uint64, 0, need)
-	pages := make([]migrationPage, 0, len(missing))
+	mpages := make([]migrationPage, 0, len(pages))
 	fi := 0
-	for _, page := range missing {
+	for _, page := range pages {
 		p := m.pageStateLocked(reg, page)
 		if p.GPUPhysicalPage == 0 {
 			p.GPUPhysicalPage = frames[fi]
@@ -189,13 +204,13 @@ func (m *UVMManager) prepareFaultMigration(
 			allocated = append(allocated, page)
 		}
 		setMaskBit(reg.InFlightMask, page, true)
-		pages = append(pages, migrationPage{
+		mpages = append(mpages, migrationPage{
 			Page:  page,
 			SrcPA: p.CPUPhysicalPage,
 			DstPA: p.GPUPhysicalPage,
 		})
 	}
-	formed := formMigrationRuns(pages)
+	formed := formMigrationRuns(mpages)
 	plan.Runs = formed.Runs
 	plan.TotalBytes = formed.TotalBytes
 	plan.PageCount = formed.PageCount
@@ -206,21 +221,33 @@ func (m *UVMManager) prepareFaultMigration(
 // commitFaultMigration publishes GPU residency for the migrated pages and
 // returns their (VA, HBM PA) pairs for the GPU PTE publication. It is called
 // only after ALL runs of the migration succeeded. // sbin_codex
+// sbin_codex (todo 18): delegates to the generic page-based
+// commitMigrationPages so AC/write migration transactions reuse the same
+// publish-after-all-runs commit.
 func (m *UVMManager) commitFaultMigration(
 	tx *faultTransaction,
+) ([]faultMigratedPage, error) {
+	return m.commitMigrationPages(tx.reg, tx.plan)
+}
+
+// commitMigrationPages publishes GPU residency for the migrated pages and
+// returns their (VA, HBM PA) pairs for the GPU PTE publication. It is called
+// only after ALL runs of the migration succeeded. // sbin_codex
+func (m *UVMManager) commitMigrationPages(
+	reg *ManagedAllocationRegistration,
+	plan *migrationPlan,
 ) ([]faultMigratedPage, error) {
 	m.Lock()
 	defer m.Unlock()
 
-	reg := tx.reg
 	if reg == nil {
-		return nil, fmt.Errorf("uvm: fault migration commit without a registration")
+		return nil, fmt.Errorf("uvm: migration commit without a registration")
 	}
-	if tx.plan == nil {
-		return nil, fmt.Errorf("uvm: fault migration commit without a plan")
+	if plan == nil {
+		return nil, fmt.Errorf("uvm: migration commit without a plan")
 	}
-	pages := make([]faultMigratedPage, 0, tx.plan.PageCount)
-	for _, run := range tx.plan.Runs {
+	pages := make([]faultMigratedPage, 0, plan.PageCount)
+	for _, run := range plan.Runs {
 		for i, page := range run.Pages {
 			setMaskBit(reg.ResidentMask, page, true)
 			setMaskBit(reg.InFlightMask, page, false)

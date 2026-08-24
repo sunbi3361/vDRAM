@@ -128,6 +128,11 @@ func (b Builder) Build(name string) *Driver {
 	if b.uvmConfig != nil && b.uvmConfig.Enabled {
 		driver.uvmFault = &faultServiceMiddleware{driver: driver}
 		driver.middlewares = append(driver.middlewares, driver.uvmFault)
+
+		// sbin_codex (todo 18): wire the AC/write migration service after
+		// the fault service so each consumes only its own responses.
+		driver.uvmMigration = &migrationMiddleware{driver: driver}
+		driver.middlewares = append(driver.middlewares, driver.uvmMigration)
 	}
 
 	if b.useMagicMemoryCopy {

@@ -68,6 +68,19 @@ type UVMManager struct {
 	// the correlation is a later-todo concern).
 	nextReplayToken vm.ReplayToken
 
+	// sbin_codex (todo 18): the AC/write migration coalescing table: one live
+	// migration transaction per (PID, GPU, regionBase). An entry exists from
+	// the first notification/write trigger of a region until the transaction
+	// completes after the unblock; a later trigger is suppressed (§16).
+	migrationByKey map[copyRegionKey]*migrationTransaction
+
+	// sbin_codex (todo 18): migration statistics (uvm-manager.md §16, §31.1).
+	// The trigger-specific counters record created transactions; the
+	// suppressed counter records ignored notifications/writes (§16).
+	accessCounterMigrationCount uint64
+	remoteWriteMigrationCount   uint64
+	suppressedMigrationCount    uint64
+
 	// sbin_codex (todo 15): fault statistics (uvm-manager.md §8.4).
 	rawPageFaultCount       uint64
 	coalescedPageFaultCount uint64
@@ -94,6 +107,8 @@ func NewUVMManager(cfg UVMConfig, availableGPUMemory uint64) *UVMManager {
 		reservation: NewAdmissionReservation(cfg.ResolvedCapacity(availableGPUMemory)),
 		ownership:   make(map[copyRegionKey]*OwnershipEntry),   // sbin_codex (todo 5)
 		faultByKey:  make(map[copyRegionKey]*faultTransaction), // sbin_codex (todo 15)
+		// sbin_codex (todo 18): the AC/write migration coalescing table.
+		migrationByKey: make(map[copyRegionKey]*migrationTransaction),
 	}
 }
 
@@ -660,16 +675,27 @@ func (m *UVMManager) demandPagesLocked(
 
 // missingDemandPages returns the transaction's demand pages that are neither
 // GPU-resident nor in flight: the pages a new migration must transfer. // sbin_codex
+// sbin_codex (todo 18): delegates to the generic page-based missingPages so
+// AC/write migration transactions reuse the same residency re-read.
 func (m *UVMManager) missingDemandPages(tx *faultTransaction) []uint64 {
+	return m.missingPages(tx.reg, tx.DemandPages)
+}
+
+// missingPages returns the demand pages that are neither GPU-resident nor in
+// flight: the pages a new migration must transfer. // sbin_codex
+func (m *UVMManager) missingPages(
+	reg *ManagedAllocationRegistration,
+	demand []uint64,
+) []uint64 {
 	m.Lock()
 	defer m.Unlock()
 
-	if tx.reg == nil {
+	if reg == nil {
 		return nil
 	}
-	missing := make([]uint64, 0, len(tx.DemandPages))
-	for _, page := range tx.DemandPages {
-		if !maskBit(tx.reg.ResidentMask, page) && !maskBit(tx.reg.InFlightMask, page) {
+	missing := make([]uint64, 0, len(demand))
+	for _, page := range demand {
+		if !maskBit(reg.ResidentMask, page) && !maskBit(reg.InFlightMask, page) {
 			missing = append(missing, page)
 		}
 	}
@@ -897,7 +923,7 @@ func (m *UVMManager) completeMigrationAdmission(
 		// Already resident (an overlapping migration completed first).
 	default:
 		return fmt.Errorf(
-			"uvm: fault completion in illegal region state %s", sm.Region.State)
+			"uvm: migration completion in illegal region state %s", sm.Region.State)
 	}
 	m.reservation.CommitAdmission(bytes)
 	return nil
@@ -916,4 +942,112 @@ func (m *UVMManager) completeFault(tx *faultTransaction) {
 		e.OwnerID = 0
 	}
 	m.reevaluateLocked()
+}
+
+// intakeMigration consumes one access-counter notification or remote-write
+// trigger: it creates the region's migration transaction when the region is
+// IDLE/CPU_RESIDENT, and suppresses the trigger when the region is already
+// being brought to the GPU (FAULT_PENDING / MIGRATING_TO_GPU, §16) or a
+// transaction is already in flight — no additional transaction, no duplicate
+// DMA. // sbin_codex
+func (m *UVMManager) intakeMigration(
+	pid vm.PID,
+	gpu int,
+	vaddr uint64,
+	trigger migrationTrigger,
+	now sim.VTimeInSec,
+) (tx *migrationTransaction, err error) {
+	m.Lock()
+	defer m.Unlock()
+
+	reg := m.registrationForPageLocked(pid, vaddr)
+	if reg == nil {
+		return nil, fmt.Errorf(
+			"uvm: migration trigger on unmanaged address pid=%d va=%#x", pid, vaddr)
+	}
+
+	key := copyRegionKey{PID: pid, GPU: gpu, RegionBase: SubBlockStartVA(vaddr)}
+	if m.migrationByKey[key] != nil {
+		m.suppressedMigrationCount++
+		return nil, nil
+	}
+
+	sm := m.faultRegionMachineLocked(reg, gpu, key.RegionBase)
+	switch sm.Region.State {
+	case RegionIDLE, RegionCPUResident:
+		if err := sm.Transition(RegionMigratingToGPU, now); err != nil {
+			return nil, err
+		}
+	case RegionFaultPending, RegionMigratingToGPU:
+		// §16: a demand migration or prefetch already owns the region; the
+		// notification is ignored and never fires retroactively.
+		m.suppressedMigrationCount++
+		return nil, nil
+	default:
+		// GPU_RESIDENT (no remote accesses should notify), EVICT_PENDING /
+		// MIGRATING_TO_CPU (an eviction owns the region): ignore.
+		m.suppressedMigrationCount++
+		return nil, nil
+	}
+
+	switch trigger {
+	case migrationTriggerAccessCounter:
+		m.accessCounterMigrationCount++
+	case migrationTriggerRemoteWrite:
+		m.remoteWriteMigrationCount++
+	}
+
+	tx = &migrationTransaction{
+		Ticket:      m.nextTicketLocked(),
+		PID:         pid,
+		GPU:         gpu,
+		RegionBase:  key.RegionBase,
+		Key:         key,
+		Trigger:     trigger,
+		DemandPages: m.demandPagesLocked(reg, key.RegionBase),
+		ReplayToken: m.nextReplayTokenLocked(),
+		reg:         reg,
+		phase:       migrationPhaseClaiming,
+	}
+	m.migrationByKey[key] = tx
+	return tx, nil
+}
+
+// completeMigration retires a completed migration transaction: it removes the
+// coalescing-table entry and wakes the ticket queue so a waiting copy can
+// claim. The ownership slot was already released before the unblock. // sbin_codex
+func (m *UVMManager) completeMigration(tx *migrationTransaction) {
+	m.Lock()
+	defer m.Unlock()
+
+	delete(m.migrationByKey, tx.Key)
+	m.reevaluateLocked()
+}
+
+// AccessCounterMigrationCount returns the number of threshold-triggered
+// migration transactions created. // sbin_codex
+func (m *UVMManager) AccessCounterMigrationCount() uint64 {
+	m.Lock()
+	defer m.Unlock()
+
+	return m.accessCounterMigrationCount
+}
+
+// RemoteWriteMigrationCount returns the number of write-triggered migration
+// transactions created. // sbin_codex
+func (m *UVMManager) RemoteWriteMigrationCount() uint64 {
+	m.Lock()
+	defer m.Unlock()
+
+	return m.remoteWriteMigrationCount
+}
+
+// SuppressedMigrationCount returns the number of ignored notifications/writes
+// (§16): triggers while the region is already being brought to the GPU or a
+// migration transaction is in flight. // sbin_codex
+func (m *UVMManager) SuppressedMigrationCount() uint64 {
+	m.Lock()
+	defer m.Unlock()
+
+	return m.suppressedMigrationCount
 }
