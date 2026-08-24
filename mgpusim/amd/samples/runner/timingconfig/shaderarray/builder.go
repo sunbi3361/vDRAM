@@ -503,7 +503,8 @@ func (b *Builder) buildL1VTLBs() {
 		WithNumWays(64).
 		WithNumReqPerCycle(32).
 		WithLatency(1).
-		WithTranslationProviderMapper(b.l1TLBAddressMapper)
+		WithTranslationProviderMapper(b.l1TLBAddressMapper).
+		WithIsLeafDataTranslationPoint(true) // sbin_codex: baseline L1V is a leaf data translation point (plan todo 7).
 
 	for i := 0; i < b.numCUs; i++ {
 		name := fmt.Sprintf("%s.L1VTLB[%d]", b.name, i)
@@ -603,7 +604,8 @@ func (b *Builder) buildL1STLB() {
 		WithNumSets(1).
 		WithNumWays(64).
 		WithNumReqPerCycle(32).
-		WithTranslationProviderMapper(b.l1TLBAddressMapper)
+		WithTranslationProviderMapper(b.l1TLBAddressMapper).
+		WithIsLeafDataTranslationPoint(true) // sbin_codex: baseline L1S is a leaf data translation point (plan todo 7).
 
 	name := fmt.Sprintf("%s.L1STLB", b.name)
 	tlb := builder.Build(name)

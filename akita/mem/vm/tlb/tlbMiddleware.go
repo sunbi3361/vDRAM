@@ -273,6 +273,28 @@ func (m *tlbMiddleware) processTLBMSHRHit(
 	req *vm.TranslationReq,
 ) bool {
 	mshrEntry.Requests = append(mshrEntry.Requests, req)
+	// sbin_codex: leaf data translation points count late MSHR waiters;
+	// shared L2 never counts its own forwarding request.
+	if m.isLeafDataTranslationPoint {
+		mshrEntry.waiterDelta.LateMSHRWaiters++
+	}
+
+	// sbin_codex: UVM fault-pending replay (plan todo 7 of
+	// mgpusim-uvm-manager). A request that hits a fault-pending entry
+	// re-fetches from the bottom so the replay can complete the translation;
+	// the original waiters stay retained in the MSHR until the valid response
+	// arrives. The append is rolled back on failure so a retry does not
+	// double-count the waiter.
+	if mshrEntry.faultPending {
+		ok := m.refetchBottom(mshrEntry, req)
+		if !ok {
+			mshrEntry.Requests = mshrEntry.Requests[:len(mshrEntry.Requests)-1]
+			if m.isLeafDataTranslationPoint {
+				mshrEntry.waiterDelta.LateMSHRWaiters--
+			}
+			return false
+		}
+	}
 
 	tracing.TraceReqReceive(req, m.Comp)
 	tracing.AddTaskStep(
@@ -281,14 +303,76 @@ func (m *tlbMiddleware) processTLBMSHRHit(
 	return true
 }
 
-func (m *tlbMiddleware) fetchBottom(req *vm.TranslationReq) bool {
+// refetchBottom re-issues the translation request for a fault-pending MSHR
+// entry. The re-fetch carries the GMMU fault-pending token (the request's own
+// token when present, otherwise the token recorded on the entry) so the
+// translation provider can match it to the pending fault transaction. // sbin_codex
+func (m *tlbMiddleware) refetchBottom(
+	mshrEntry *mshrEntry,
+	req *vm.TranslationReq,
+) bool {
+	token := req.FaultPendingToken
+	if token == 0 {
+		token = mshrEntry.faultPendingToken
+	}
 	fetchBottom := vm.TranslationReqBuilder{}.
 		WithSrc(m.bottomPort.AsRemote()).
 		WithDst(m.addressMapper.Find(req.VAddr)).
 		WithPID(req.PID).
 		WithVAddr(req.VAddr).
 		WithDeviceID(req.DeviceID).
+		WithFaultPendingToken(token).
+		WithWaiterDelta(mshrEntry.waiterDelta).
 		Build()
+
+	err := m.bottomPort.Send(fetchBottom)
+	if err != nil {
+		return false
+	}
+
+	tracing.AddMilestone(
+		tracing.MsgIDAtReceiver(req, m.Comp),
+		tracing.MilestoneKindNetworkBusy,
+		m.bottomPort.Name(),
+		m.Comp.Name(),
+		m.Comp,
+	)
+
+	mshrEntry.reqToBottom = fetchBottom
+
+	tracing.TraceReqInitiate(fetchBottom, m.Comp,
+		tracing.MsgIDAtReceiver(req, m.Comp))
+
+	return true
+}
+
+func (m *tlbMiddleware) fetchBottom(req *vm.TranslationReq) bool {
+	// sbin_codex: UVM waiter accounting and fault-pending token propagation
+	// (plan todo 7 of mgpusim-uvm-manager). Leaf data translation points
+	// report the initial waiter count (1 for the first request); shared L2
+	// propagates the delta it received and never counts its own forwarding
+	// request.
+	delta := req.WaiterDelta
+	if m.isLeafDataTranslationPoint {
+		delta = vm.WaiterDelta{InitialWaiters: 1}
+	}
+	fetchBottom := vm.TranslationReqBuilder{}.
+		WithSrc(m.bottomPort.AsRemote()).
+		WithDst(m.addressMapper.Find(req.VAddr)).
+		WithPID(req.PID).
+		WithVAddr(req.VAddr).
+		WithDeviceID(req.DeviceID).
+		WithFaultPendingToken(req.FaultPendingToken). // sbin_codex
+		WithWaiterDelta(delta).                       // sbin_codex
+		Build()
+
+	// fetchBottom := vm.TranslationReqBuilder{}. // sbin_codex: pre-edit
+	// 	WithSrc(m.bottomPort.AsRemote()).
+	// 	WithDst(m.addressMapper.Find(req.VAddr)).
+	// 	WithPID(req.PID).
+	// 	WithVAddr(req.VAddr).
+	// 	WithDeviceID(req.DeviceID).
+	// 	Build()
 
 	err := m.bottomPort.Send(fetchBottom)
 	if err != nil {
@@ -306,6 +390,7 @@ func (m *tlbMiddleware) fetchBottom(req *vm.TranslationReq) bool {
 	mshrEntry := m.mshr.Add(req.PID, req.VAddr)
 	mshrEntry.Requests = append(mshrEntry.Requests, req)
 	mshrEntry.reqToBottom = fetchBottom
+	mshrEntry.waiterDelta = delta // sbin_codex
 
 	tracing.TraceReqInitiate(fetchBottom, m.Comp,
 		tracing.MsgIDAtReceiver(req, m.Comp))
@@ -337,6 +422,36 @@ func (m *tlbMiddleware) parseBottom() bool {
 		m.bottomPort.RetrieveIncoming()
 		return true
 	}
+	mshrEntry := m.mshr.GetEntry(rsp.Page.PID, rsp.Page.VAddr)
+
+	// sbin_codex: UVM fault-pending handling (plan todo 7 of
+	// mgpusim-uvm-manager). A fault-pending response propagates the GMMU
+	// token and the original waiter counts up, retains the MSHR entry, and
+	// never installs an entry in the set.
+	if rsp.FaultPendingToken != 0 && !rsp.Page.Valid {
+		if mshrEntry.faultPending {
+			m.bottomPort.RetrieveIncoming()
+			return true
+		}
+		ok := m.sendFaultPendingRspToTop(mshrEntry, rsp)
+		if !ok {
+			return false
+		}
+		mshrEntry.faultPending = true
+		mshrEntry.faultPendingToken = rsp.FaultPendingToken
+		m.bottomPort.RetrieveIncoming()
+		return true
+	}
+
+	// sbin_codex: reject invalid managed translations without negative caching
+	// (uvm-manager.md §600-610). The MSHR retains the original waiters; no
+	// invalid entry is installed in the set.
+	if !page.Valid &&
+		(page.Managed || page.Location != vm.MemoryLocationUNMANAGED) {
+		m.bottomPort.RetrieveIncoming()
+		return true
+	}
+
 	setID := m.vAddrToSetID(page.VAddr)
 	set := m.sets[setID]
 	wayID, ok := m.sets[setID].Evict()
@@ -348,13 +463,46 @@ func (m *tlbMiddleware) parseBottom() bool {
 	set.Update(wayID, page)
 	set.Visit(wayID)
 
-	mshrEntry := m.mshr.GetEntry(rsp.Page.PID, rsp.Page.VAddr)
 	m.respondingMSHREntry = mshrEntry
 	mshrEntry.page = page
 
 	m.mshr.Remove(rsp.Page.PID, rsp.Page.VAddr)
 	m.bottomPort.RetrieveIncoming()
 	tracing.TraceReqFinalize(mshrEntry.reqToBottom, m.Comp)
+
+	return true
+}
+
+// sendFaultPendingRspToTop propagates the fault-pending response to the first
+// retained waiter, carrying the GMMU token and the original waiter counts
+// observed at this translation point. The MSHR entry stays retained. // sbin_codex
+func (m *tlbMiddleware) sendFaultPendingRspToTop(
+	mshrEntry *mshrEntry,
+	rsp *vm.TranslationRsp,
+) bool {
+	req := mshrEntry.Requests[0]
+	rspToTop := vm.TranslationRspBuilder{}.
+		WithSrc(m.topPort.AsRemote()).
+		WithDst(req.Src).
+		WithRspTo(req.ID).
+		WithPage(rsp.Page).
+		WithLocation(rsp.Location).
+		WithFaultPendingToken(rsp.FaultPendingToken).
+		WithWaiterDelta(mshrEntry.waiterDelta).
+		Build()
+
+	err := m.topPort.Send(rspToTop)
+	if err != nil {
+		return false
+	}
+
+	tracing.AddMilestone(
+		tracing.MsgIDAtReceiver(rsp, m.Comp),
+		tracing.MilestoneKindNetworkBusy,
+		m.topPort.Name(),
+		m.Comp.Name(),
+		m.Comp,
+	)
 
 	return true
 }

@@ -12,6 +12,18 @@ type mshrEntry struct {
 	Requests    []*vm.TranslationReq
 	reqToBottom *vm.TranslationReq
 	page        vm.Page
+	// sbin_codex: UVM fault-pending retention and waiter accounting (plan
+	// todo 7 of mgpusim-uvm-manager). A fault-pending entry keeps its original
+	// Requests until the replay completes; the token is the GMMU-assigned
+	// fault-pending token propagated in the fault-pending response.
+	faultPending      bool
+	faultPendingToken vm.FaultPendingToken
+	// waiterDelta reports the original waiter counts observed at this
+	// translation point. Leaf data translation points (baseline L1V/L1S)
+	// record the initial waiter count when the translation first became
+	// pending and the late MSHR waiter delta; shared L2 only propagates the
+	// delta it received and never counts its own forwarding request.
+	waiterDelta vm.WaiterDelta
 }
 
 // newMSHREntry returns a new MSHR entry object

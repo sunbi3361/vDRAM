@@ -21,6 +21,9 @@ type Builder struct {
 	addressMapper     mem.AddressToPortMapper
 	addressMapperType string
 	remotePorts       []sim.RemotePort
+	// sbin_codex: leaf data translation point flag (plan todo 7 of
+	// mgpusim-uvm-manager).
+	isLeafDataTranslationPoint bool
 }
 
 // MakeBuilder returns a Builder
@@ -154,6 +157,14 @@ func (b Builder) WithTranslationProviders(ports ...sim.RemotePort) Builder {
 	return b
 }
 
+// WithIsLeafDataTranslationPoint marks the TLB as a leaf data translation
+// point (baseline L1V/L1S). Leaf data translation points report original
+// waiter counts; shared L2 and L1I TLBs only propagate tokens and deltas. // sbin_codex
+func (b Builder) WithIsLeafDataTranslationPoint(isLeaf bool) Builder {
+	b.isLeafDataTranslationPoint = isLeaf // sbin_codex
+	return b
+}
+
 // Build creates a new TLB
 func (b Builder) Build(name string) *Comp {
 	tlb := &Comp{}
@@ -167,6 +178,7 @@ func (b Builder) Build(name string) *Comp {
 	tlb.addressMapper = b.addressMapper
 	tlb.mshr = newMSHR(b.numMSHREntry)
 	tlb.state = b.state
+	tlb.isLeafDataTranslationPoint = b.isLeafDataTranslationPoint // sbin_codex
 
 	b.createPorts(name, tlb)
 	b.createTranslationProviderMapper(tlb)

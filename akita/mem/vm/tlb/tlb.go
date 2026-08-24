@@ -40,6 +40,10 @@ type Comp struct {
 	responseBuffer      sim.Buffer
 
 	inflightFlushReq *FlushReq
+	// sbin_codex: leaf data translation points (baseline L1V/L1S) report
+	// original waiter counts; shared L2 and L1I only propagate tokens and
+	// deltas (plan todo 7 of mgpusim-uvm-manager).
+	isLeafDataTranslationPoint bool
 }
 
 // reset sets all the entries in the TLB to be invalid
