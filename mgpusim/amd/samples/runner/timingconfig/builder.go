@@ -38,6 +38,7 @@ type Builder struct {
 	rdmaAddressMapper *mem.BankedAddressPortMapper
 	cpuPageTable      vm.PageTable   // sbin_codex: authoritative CPU-side page table.
 	gpuPageTables     []vm.PageTable // sbin_codex: one isolated page table per GPU GMMU.
+	uvmConfig         driver.UVMConfig // sbin_codex: validated UVM config (disabled zero value by default).
 }
 
 // MakeBuilder creates a new Builder with default parameters.
@@ -79,6 +80,14 @@ func (b Builder) WithMagicMemoryCopy() Builder {
 // ideal-l1tlb, or virtual-caching). // sbin_codex
 func (b Builder) WithGPUType(gpuType string) Builder {
 	b.gpuType = gpuType
+	return b
+}
+
+// WithUVMConfig sets the validated UVM configuration handed to the driver
+// builder. A disabled (zero-value) config leaves the driver's UVM manager
+// nil. sbin_codex
+func (b Builder) WithUVMConfig(cfg driver.UVMConfig) Builder {
+	b.uvmConfig = cfg
 	return b
 }
 
@@ -172,6 +181,8 @@ func (b *Builder) buildGPUDriver(
 		WithGlobalStorage(b.globalStorage).
 		WithD2HCycles(b.d2hCycles).
 		WithH2DCycles(b.h2dCycles).
+		WithUVMConfig(b.uvmConfig). // sbin_codex: validated UVM config (disabled => nil manager).
+		WithUVMGPUMemorySize(uint64(b.numGPUs) * b.gpuMemSize). // sbin_codex: total GPU DRAM for capacity validation.
 		Build("Driver")
 
 	b.simulation.RegisterComponent(gpuDriver)

@@ -4,8 +4,11 @@ import (
 	"flag"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/sarchlab/akita/v4/mem/mem"
 	"github.com/sarchlab/mgpusim/v4/amd/arch"
+	"github.com/sarchlab/mgpusim/v4/amd/driver"
 )
 
 var timingFlag = flag.Bool("timing", false, "Run detailed timing simulation.")
@@ -75,6 +78,28 @@ this number is not given or a invalid number is given number, a random port
 will be used.`)
 var disableAkitaRTM = flag.Bool("disable-rtm", false, "Disable the AkitaRTM monitoring portal")
 
+// sbin_codex: UVM managed-memory configuration flags (uvm-manager.md §26).
+// Defaults mirror driver.DefaultUVMConfig; keep them in sync.
+var uvmFlag = flag.Bool("uvm", false, "Enable UVM managed memory.")
+var uvmIdealFlag = flag.Bool("uvm-ideal", false,
+	"Canonical zero-latency UVM experiment mode (requires -uvm).")
+var uvmAccessCounterFlag = flag.Bool("uvm-access-counter", false,
+	"Enable UVM access counters.")
+var uvmFaultHandlingLatencyFlag = flag.Duration(
+	"uvm-fault-handling-latency", 20*time.Microsecond,
+	"UVM fault handling latency (must be non-negative).")
+var uvmAccessCounterThresholdFlag = flag.Int(
+	"uvm-access-counter-threshold", 8,
+	"UVM access counter threshold before migration (must be > 0).")
+var uvmVABlockSizeFlag = flag.Uint64("uvm-vablock-size", 2*mem.MB,
+	"UVM VA block size (must be exactly 2MB).")
+var uvmTBNMinNodeSizeFlag = flag.Uint64("uvm-tbn-min-node-size", 64*mem.KB,
+	"UVM TBN minimum node size (must be exactly 64KB).")
+var uvmGPUMemoryCapacityFlag = flag.Uint64("uvm-gpu-memory-capacity", 0,
+	"UVM GPU memory capacity in bytes (0 = full GPU DRAM; must be 4KB-aligned and >= 64KB).")
+var uvmPrefetcherFlag = flag.String("uvm-prefetcher", "tbn",
+	"UVM prefetcher (must be exactly tbn).")
+
 var analyzerNameFlag = flag.String("analyzer-name", "",
 	"The name of the analyzer to use.")
 
@@ -111,10 +136,47 @@ func metricFileNameFlagIsSet() bool {
 	return isSet
 }
 
+// sbin_codex
+func uvmGPUMemoryCapacityFlagIsSet() bool {
+	isSet := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "uvm-gpu-memory-capacity" {
+			isSet = true
+		}
+	})
+
+	return isSet
+}
+
+// parseUVMConfig builds the driver UVMConfig from the CLI flags and fails
+// fast (panic with a descriptive message) on any invalid combination or
+// domain. The capacity-vs-DRAM check happens later in the driver builder,
+// where the actual GPU memory size is known. sbin_codex
+func parseUVMConfig() driver.UVMConfig {
+	cfg := driver.DefaultUVMConfig()
+	cfg.Enabled = *uvmFlag
+	cfg.Ideal = *uvmIdealFlag
+	cfg.AccessCounter = *uvmAccessCounterFlag
+	cfg.FaultHandlingLatency = *uvmFaultHandlingLatencyFlag
+	cfg.AccessCounterThreshold = *uvmAccessCounterThresholdFlag
+	cfg.VABlockSize = *uvmVABlockSizeFlag
+	cfg.TBNMinNodeSize = *uvmTBNMinNodeSizeFlag
+	cfg.GPUMemoryCapacity = *uvmGPUMemoryCapacityFlag
+	cfg.CapacitySet = uvmGPUMemoryCapacityFlagIsSet()
+	cfg.Prefetcher = *uvmPrefetcherFlag
+
+	if err := cfg.Validate(); err != nil {
+		panic(err)
+	}
+
+	return cfg
+}
+
 // parseFlag applies the runner flag to runner object
 func (r *Runner) parseFlag() *Runner {
 	r.parseSimulationFlags()
 	r.parseGPUFlag()
+	r.uvmConfig = parseUVMConfig() // sbin_codex: validated UVM config (fail-fast).
 
 	return r
 }

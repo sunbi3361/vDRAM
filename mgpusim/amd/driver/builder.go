@@ -1,6 +1,8 @@
 package driver
 
 import (
+	"log"
+
 	"github.com/sarchlab/akita/v4/mem/mem"
 	"github.com/sarchlab/akita/v4/mem/vm"
 	"github.com/sarchlab/akita/v4/sim"
@@ -19,6 +21,8 @@ type Builder struct {
 	useMagicMemoryCopy  bool
 	middlewareD2HCycles int
 	middlewareH2DCycles int
+	uvmConfig           *UVMConfig // sbin_codex: UVM config; nil means UVM disabled.
+	uvmGPUMemorySize    uint64     // sbin_codex: total GPU DRAM available to UVM capacity validation.
 }
 
 // MakeBuilder creates a driver builder with some default configuration
@@ -82,6 +86,22 @@ func (b Builder) WithH2DCycles(h2dCycles int) Builder {
 	return b
 }
 
+// WithUVMConfig sets the validated UVM configuration. A config with
+// Enabled == false (or no call at all) leaves the driver's UVM manager nil.
+// sbin_codex
+func (b Builder) WithUVMConfig(cfg UVMConfig) Builder {
+	b.uvmConfig = &cfg
+	return b
+}
+
+// WithUVMGPUMemorySize sets the total GPU DRAM (in bytes) available to UVM
+// capacity validation. The timingconfig builder supplies this from the DRAM
+// sizes it owns. sbin_codex
+func (b Builder) WithUVMGPUMemorySize(size uint64) Builder {
+	b.uvmGPUMemorySize = size
+	return b
+}
+
 // Build creates a driver.
 func (b Builder) Build(name string) *Driver {
 	driver := new(Driver)
@@ -127,6 +147,19 @@ func (b Builder) Build(name string) *Driver {
 	driver.codeObjGPUAddrs = make(map[*insts.KernelCodeObject]Ptr)
 
 	b.createCPU(driver)
+
+	// sbin_codex: construct the driver-owned UVM manager only when the UVM
+	// config is enabled; otherwise driver.uvm stays nil (disabled mode, where
+	// AllocateManagedMemory is the only rejection path).
+	if b.uvmConfig != nil && b.uvmConfig.Enabled {
+		if err := b.uvmConfig.Validate(); err != nil {
+			log.Panic(err)
+		}
+		if err := b.uvmConfig.ValidateCapacity(b.uvmGPUMemorySize); err != nil {
+			log.Panic(err)
+		}
+		driver.uvm = NewUVMManager(*b.uvmConfig, b.uvmGPUMemorySize)
+	}
 
 	return driver
 }

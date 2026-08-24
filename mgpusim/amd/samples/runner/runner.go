@@ -41,6 +41,8 @@ type Runner struct {
 	GPUIDs     []int
 	benchmarks []benchmarks.Benchmark
 
+	uvmConfig driver.UVMConfig // sbin_codex: validated UVM config from -uvm* flags.
+
 	reported bool // sbin_codex
 }
 
@@ -107,7 +109,8 @@ func (r *Runner) buildTimingPlatform() {
 	b := timingconfig.MakeBuilder().
 		WithSimulation(r.simulation).
 		WithNumGPUs(r.GPUIDs[len(r.GPUIDs)-1]).
-		WithGPUType(r.GPUType)
+		WithGPUType(r.GPUType).
+		WithUVMConfig(r.uvmConfig) // sbin_codex: pass validated UVM config to the timing platform.
 
 	if *magicMemoryCopy {
 		b = b.WithMagicMemoryCopy()
