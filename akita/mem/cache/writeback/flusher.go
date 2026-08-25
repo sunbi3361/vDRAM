@@ -13,14 +13,23 @@ type flusher struct {
 
 	blockToEvict    []*cache.Block
 	processingFlush *cache.FlushReq
+
+	// sbin_codex: UVM region flush state. It runs concurrently with normal
+	// cache operation and never changes cache.state.
+	processingRangeFlush  *cache.RangeFlushReq
+	rangeStage            rangeFlushStage
+	rangeBlockToEvict     []*cache.Block
+	rangeLockedBlocks     []*cache.Block
+	rangeEvictionsPending int
 }
 
 func (f *flusher) Tick() bool {
+	madeProgress := f.processRangeFlush() // sbin_codex
+
 	if f.processingFlush != nil && f.cache.state == cacheStatePreFlushing {
-		return f.processPreFlushing()
+		return f.processPreFlushing() || madeProgress
 	}
 
-	madeProgress := false
 	if f.processingFlush != nil && f.cache.state == cacheStateFlushing {
 		madeProgress = f.finalizeFlushing() || madeProgress
 		madeProgress = f.processFlush() || madeProgress
@@ -28,7 +37,7 @@ func (f *flusher) Tick() bool {
 		return madeProgress
 	}
 
-	return f.extractFromPort()
+	return f.extractFromPort() || madeProgress
 }
 
 func (f *flusher) processPreFlushing() bool {
@@ -101,6 +110,8 @@ func (f *flusher) extractFromPort() bool {
 	switch req := item.(type) {
 	case *cache.FlushReq:
 		return f.startProcessingFlush(req)
+	case *cache.RangeFlushReq: // sbin_codex
+		return f.startProcessingRangeFlush(req)
 	case *cache.RestartReq:
 		return f.handleCacheRestart(req)
 	default:

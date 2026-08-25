@@ -14,14 +14,14 @@ import (
 
 // Builder can build Command Processors
 type Builder struct {
-	freq                         sim.Freq
-	engine                       sim.Engine
-	visTracer                    tracing.Tracer
-	monitor                      *monitoring.Monitor
-	perfAnalyzer                 *analysis.PerfAnalyzer
-	numDispatchers               int
-	driver                       sim.Port
-	cus                          []CUInterfaceForCP
+	freq                           sim.Freq
+	engine                         sim.Engine
+	visTracer                      tracing.Tracer
+	monitor                        *monitoring.Monitor
+	perfAnalyzer                   *analysis.PerfAnalyzer
+	numDispatchers                 int
+	driver                         sim.Port
+	cus                            []CUInterfaceForCP
 	constantKernelLaunchOverhead   int
 	constantKernelOverhead         int
 	subsequentKernelLaunchOverhead int
@@ -137,6 +137,7 @@ func (b Builder) Build(name string) *CommandProcessor {
 	}
 	cp.middleware = &cpMiddleware{cp}
 	cp.ctrlMiddleware = &ctrlMiddleware{cp}
+	cp.uvmMiddleware = &uvmMiddleware{cp} // sbin_codex
 
 	if b.perfAnalyzer != nil {
 		b.perfAnalyzer.RegisterComponent(cp)
@@ -164,6 +165,12 @@ func (Builder) createPorts(cp *CommandProcessor, name string) {
 	cp.AddPort("ToPMC", cp.ToPMC)
 	cp.AddPort("ToAddressTranslators", cp.ToAddressTranslators)
 	cp.AddPort("ToCaches", cp.ToCaches)
+
+	// sbin_codex: UVM control endpoints.
+	cp.ToUVMDriver = sim.NewPort(cp, 4096, 4096, name+".ToUVMDriver")
+	cp.ToUVMInternal = sim.NewPort(cp, 4096, 4096, name+".ToUVMInternal")
+	cp.AddPort("ToUVMDriver", cp.ToUVMDriver)
+	cp.AddPort("ToUVMInternal", cp.ToUVMInternal)
 }
 
 func (b Builder) buildDispatchers(cp *CommandProcessor) {

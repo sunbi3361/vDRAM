@@ -92,6 +92,8 @@ func (m *ctrlMiddleware) processRspFromCaches() bool {
 	switch req := msg.(type) {
 	case *cache.FlushRsp:
 		return m.processCacheFlushRsp(req)
+	case *cache.RangeFlushRsp: // sbin_codex
+		return m.processCacheRangeFlushRsp(req)
 	case *cache.RestartRsp:
 		return m.processCacheRestartRsp(req)
 	}
@@ -105,7 +107,10 @@ func (m *ctrlMiddleware) processRspFromATs() bool {
 		return false
 	}
 
-	msg := item.(*mem.ControlMsg)
+	msg, ok := item.(*mem.ControlMsg)
+	if !ok { // sbin_codex: UVM region drains are answered by the UVM middleware.
+		return false
+	}
 
 	switch { // sbin_codex: route acknowledgements by explicit lifecycle phase.
 	case m.numPreCacheTranslatorFlushAck > 0:

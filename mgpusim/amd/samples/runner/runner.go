@@ -39,12 +39,18 @@ type Runner struct {
 	GPUType          string
 
 	// sbin_codex: UVM demand-paging configuration.
-	UVM               bool
-	IdealUVM          bool
-	UVMFaultLatencyUS float64
-	UVMACThreshold    uint64
-	UVMExpandRatio    float64
-	UVMmaxFetchSize   uint64
+	UVM                 bool
+	IdealUVM            bool
+	UVMFaultLatencyUS   float64
+	UVMAccessCounter    bool
+	UVMACThreshold      uint64
+	UVMExpandRatio      float64
+	UVMmaxFetchSize     uint64
+	UVMNoPrefetch       bool
+	UVMNoEviction       bool
+	UVMGPUCapacityBytes uint64
+	UVMGPUCapacityRatio float64
+	UVMOversubRatio     float64
 
 	GPUIDs     []int
 	benchmarks []benchmarks.Benchmark
@@ -118,8 +124,20 @@ func (r *Runner) buildTimingPlatform() {
 		WithGPUType(r.GPUType)
 
 	if r.UVM {
-		b = b.WithUVM(r.UVM, r.IdealUVM, r.UVMFaultLatencyUS,
-			r.UVMACThreshold, r.UVMExpandRatio, r.UVMmaxFetchSize)
+		b = b.WithUVM(timingconfig.UVMPlatformConfig{ // sbin_codex
+			Enabled:                r.UVM,
+			Ideal:                  r.IdealUVM,
+			FaultLatencyUS:         r.UVMFaultLatencyUS,
+			AccessCounterEnabled:   r.UVMAccessCounter,
+			AccessCounterThreshold: r.UVMACThreshold,
+			TBNExpandRatio:         r.UVMExpandRatio,
+			TBNMaxFetchSize:        r.UVMmaxFetchSize,
+			PrefetchDisabled:       r.UVMNoPrefetch,
+			EvictionDisabled:       r.UVMNoEviction,
+			GPUCapacityBytes:       r.UVMGPUCapacityBytes,
+			GPUCapacityRatio:       r.UVMGPUCapacityRatio,
+			OversubscriptionRatio:  r.UVMOversubRatio,
+		})
 	}
 
 	if *magicMemoryCopy {

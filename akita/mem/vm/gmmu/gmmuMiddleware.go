@@ -41,10 +41,12 @@ func (m *middleware) walkPageTable() bool {
 
 	for i := 0; i < numActiveTranslations; i++ {
 		trans := &m.walkingTranslations[i]
-		if trans.waitingOnUVM { // sbin_codex: skip translations parked on a UVM fault.
-			tmp = append(tmp, *trans)
-			continue
-		}
+		// Pre-edit code (commented per AGENTS.md convention). Parked faults
+		// used to stay in this slice and be skipped every cycle:
+		// if trans.waitingOnUVM {
+		// 	tmp = append(tmp, *trans)
+		// 	continue
+		// }
 		switch trans.state {
 		case newTransaction:
 			madeProgress = m.sendToPageWalkCache(i) || madeProgress
@@ -238,8 +240,10 @@ func (m *middleware) needsUVMFault(page vm.Page, req *vm.TranslationReq) bool {
 // func (m *middleware) countRemoteAccess(page vm.Page, req *vm.TranslationReq) {} // sbin_codex
 // func (m *middleware) resetAccessCounter(pid vm.PID, regionBase uint64) {} // sbin_codex
 
-// sendUVMFault forwards a managed-page fault to the driver UVM manager and
-// parks the translation transaction.
+// sendUVMFault forwards a managed-page fault to the GPU control endpoint and
+// moves the translation into the replay queue. The transaction leaves
+// walkingTranslations so a fault storm cannot consume every page-walk slot.
+// sbin_codex
 func (m *middleware) sendUVMFault(walkingIndex int) bool {
 	if m.uvmPort == nil || m.UVMServiceProvider == "" {
 		panic("GMMU encountered a managed-page fault without a UVM service provider")
@@ -253,49 +257,120 @@ func (m *middleware) sendUVMFault(walkingIndex int) bool {
 	req.PID = trans.req.PID
 	req.VAddr = trans.req.VAddr
 	req.DeviceID = trans.req.DeviceID
+	req.IsWrite = trans.req.IsWrite
 	req.WaitRequestID = trans.req.ID
 
 	if err := m.uvmPort.Send(req); err != nil {
 		return false
 	}
-	trans.waitingOnUVM = true
+
+	m.replayQueue = append(m.replayQueue, *trans)
+	trans.state = transactionFinished
+
 	return true
 }
 
-// processUVMFaultRsp completes translations parked on a UVM page fault once
-// the driver reports the fault serviced. // sbin_codex
+// processUVMFaultRsp releases translations that were stalled on an unresolved
+// UVM mapping. Two forms are accepted: a per-request PageFaultRsp and the
+// region-scoped UVMFaultReplayReq that the driver issues once a 64KB service
+// transaction becomes replayable. // sbin_codex
 func (m *middleware) processUVMFaultRsp() bool {
 	if m.uvmPort == nil {
 		return false
 	}
-	rsp := m.uvmPort.PeekIncoming()
-	if rsp == nil {
-		return false
-	}
-	uvmRsp, ok := rsp.(*vm.PageFaultRsp)
-	if !ok {
+
+	msg := m.uvmPort.PeekIncoming()
+	if msg == nil {
 		return false
 	}
 
-	for i := range m.walkingTranslations {
-		trans := &m.walkingTranslations[i]
-		if !trans.waitingOnUVM || trans.req.ID != uvmRsp.RespondTo {
+	switch msg := msg.(type) {
+	case *vm.PageFaultRsp:
+		return m.replayOneRequest(msg)
+	case *vm.UVMFaultReplayReq:
+		return m.replayRange(msg)
+	default:
+		return false
+	}
+}
+
+// replayOneRequest re-runs the translation of a single stalled request.
+func (m *middleware) replayOneRequest(rsp *vm.PageFaultRsp) bool {
+	for i := range m.replayQueue {
+		if m.replayQueue[i].req.ID != rsp.RespondTo {
 			continue
 		}
+
 		if !m.topPort.CanSend() {
 			return false
 		}
-		page, found := m.pageTable.Find(trans.req.PID, trans.req.VAddr)
-		if !found {
-			panic("page not found after UVM fault")
-		}
-		trans.page = page
+
+		trans := m.replayQueue[i]
+		m.replayQueue = append(m.replayQueue[:i], m.replayQueue[i+1:]...)
 		m.uvmPort.RetrieveIncoming()
-		trans.waitingOnUVM = false
-		m.doPageWalkHit(i)
+		m.resumeTranslation(trans)
+
 		return true
 	}
-	return false
+
+	// The request is unknown; drop the message so the port does not deadlock.
+	m.uvmPort.RetrieveIncoming()
+
+	return true
+}
+
+// replayRange re-runs every stalled translation inside the serviced region.
+// One replay command releases the whole coalesced fault batch.
+func (m *middleware) replayRange(req *vm.UVMFaultReplayReq) bool {
+	end := req.StartVA + req.Size
+
+	for i := range m.replayQueue {
+		trans := m.replayQueue[i]
+		if trans.req.PID != req.PID {
+			continue
+		}
+
+		if trans.req.VAddr < req.StartVA || trans.req.VAddr >= end {
+			continue
+		}
+
+		if !m.topPort.CanSend() {
+			return false
+		}
+
+		m.replayQueue = append(m.replayQueue[:i], m.replayQueue[i+1:]...)
+		m.resumeTranslation(trans)
+
+		return true
+	}
+
+	m.uvmPort.RetrieveIncoming()
+
+	return true
+}
+
+// resumeTranslation re-reads the page table and completes a released
+// translation. The mapping is guaranteed usable by the driver's ordering.
+func (m *middleware) resumeTranslation(trans transaction) {
+	page, found := m.pageTable.Find(trans.req.PID, trans.req.VAddr)
+	if !found {
+		panic("page not found after UVM fault")
+	}
+
+	trans.page = page
+	trans.state = pageWalkComplete
+
+	m.walkingTranslations = append(m.walkingTranslations, trans)
+	m.doPageWalkHit(len(m.walkingTranslations) - 1)
+
+	tmp := m.walkingTranslations[:0]
+	for _, t := range m.walkingTranslations {
+		if t.state != transactionFinished {
+			tmp = append(tmp, t)
+		}
+	}
+
+	m.walkingTranslations = tmp
 }
 
 func (m *middleware) doPageWalkHit(

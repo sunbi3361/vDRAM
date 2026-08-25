@@ -1,8 +1,12 @@
 package driver
 
-import (
-	"sync" // sbin_codex: coordinate simultaneous migration completions in the race regression.
+// sbin_codex: unit coverage for the UVM state machine described by
+// uvm-manager.md. Ideal mode is used throughout so the functional sequence
+// runs without a GPU platform: with no GPU control endpoint registered, the
+// region-scoped invalidations complete immediately and migrations move their
+// bytes through globalStorage.
 
+import (
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	"github.com/sarchlab/akita/v4/mem/mem"
@@ -10,6 +14,63 @@ import (
 	"github.com/sarchlab/akita/v4/sim"
 	"github.com/sarchlab/akita/v4/sim/directconnection"
 )
+
+const testRegionSize = 64 * 1024
+
+const testVABlockSize = 2 * 1024 * 1024
+
+// allocateFullVABlock reserves enough managed memory that at least one 2MB VA
+// block is entirely backed, and returns that block's base. TBN uses the valid
+// allocation mask as its denominator, so a partially backed block would change
+// the occupancy arithmetic under test. // sbin_codex
+func allocateFullVABlock(d *Driver, ctx *Context) uint64 {
+	ptr := uint64(d.AllocateManaged(ctx, 4*testVABlockSize))
+
+	return (ptr + testVABlockSize - 1) / testVABlockSize * testVABlockSize
+}
+
+func buildUVMDriver(
+	engine *sim.SerialEngine,
+	pageTable vm.PageTable,
+	config UVMConfig,
+) *Driver {
+	d := MakeBuilder().
+		WithEngine(engine).
+		WithLog2PageSize(12).
+		WithPageTable(pageTable).
+		WithGlobalStorage(mem.NewStorage(1 << 30)).
+		WithD2HCycles(1).
+		WithH2DCycles(1).
+		WithUVM(config).
+		Build("Driver")
+
+	d.RegisterGPU(
+		sim.NewPort(d, 8, 8, "TestGPU.CP"),
+		DeviceProperties{CUCount: 4, DRAMSize: 4 * 1024 * 1024 * 1024},
+	)
+
+	conn := directconnection.MakeBuilder().
+		WithEngine(engine).
+		WithFreq(1 * sim.GHz).
+		Build("TestGPU.Conn")
+	conn.PlugIn(d.gpuPort)
+	conn.PlugIn(d.GPUs[0])
+
+	return d
+}
+
+func defaultUVMConfig() UVMConfig {
+	return UVMConfig{
+		Enabled:                true,
+		Ideal:                  true,
+		FaultLatencyUS:         20,
+		AccessCounterEnabled:   true,
+		AccessCounterThreshold: 8,
+		TBNExpandRatio:         0.51,
+		TBNMaxFetchSize:        2 * 1024 * 1024,
+		GPUCapacityBytes:       128 * 1024 * 1024,
+	}
+}
 
 var _ = ginkgo.Describe("UVMManager", func() {
 	var (
@@ -22,353 +83,221 @@ var _ = ginkgo.Describe("UVMManager", func() {
 	ginkgo.BeforeEach(func() {
 		engine = sim.NewSerialEngine()
 		pageTable = vm.NewPageTable(12)
-		driver = MakeBuilder().
-			WithEngine(engine).
-			WithLog2PageSize(12).
-			WithPageTable(pageTable).
-			WithGlobalStorage(mem.NewStorage(1 << 30)).
-			WithD2HCycles(1).
-			WithH2DCycles(1).
-			WithUVM(UVMConfig{
-				Enabled:                true,
-				Ideal:                  true,
-				FaultLatencyUS:         20,
-				AccessCounterThreshold: 64,
-				TBNExpandRatio:         0.51,
-				TBNMaxFetchSize:        2 * 1024 * 1024,
-				GPUCapacityBytes:       128 * 1024 * 1024,
-			}).
-			Build("Driver")
-		driver.RegisterGPU(
-			sim.NewPort(driver, 8, 8, "TestGPU.CP"),
-			DeviceProperties{CUCount: 4, DRAMSize: 4 * 1024 * 1024 * 1024},
-		)
-		// Wire the driver GPU port and the registered GPU through a direct
-		// connection so eviction shootdown sends resolve without a platform.
-		conn := directconnection.MakeBuilder().
-			WithEngine(engine).
-			WithFreq(1 * sim.GHz).
-			Build("TestGPU.Conn")
-		conn.PlugIn(driver.gpuPort)
-		conn.PlugIn(driver.GPUs[0])
+		driver = buildUVMDriver(engine, pageTable, defaultUVMConfig())
 		ctx = driver.Init()
 	})
 
-	ginkgo.It("should register a managed allocation with CPU residency", func() {
+	ginkgo.It("registers a managed allocation as CPU resident", func() {
 		ptr := driver.AllocateManaged(ctx, 128*1024)
 		gomega.Expect(uint64(ptr)).To(gomega.BeNumerically(">", 0))
 
 		base := uint64(ptr)
-		mp := driver.uvm.pages[PageKey{PID: ctx.pid, VAddr: base}]
-		gomega.Expect(mp).NotTo(gomega.BeNil())
-		gomega.Expect(mp.State).To(gomega.Equal(CPUResident))
-		gomega.Expect(mp.GPUFrameValid).To(gomega.BeFalse())
+		managedPage := driver.uvm.pages[PageKey{PID: ctx.pid, VAddr: base}]
+		gomega.Expect(managedPage).NotTo(gomega.BeNil())
+		gomega.Expect(managedPage.State).To(gomega.Equal(CPUResident))
+		gomega.Expect(managedPage.GPUFrameValid).To(gomega.BeFalse())
 
 		gomega.Expect(len(driver.uvm.pages)).To(gomega.Equal(32))
 		gomega.Expect(len(driver.uvm.blocks)).To(gomega.Equal(1))
 	})
 
-	ginkgo.It("should align TBN region selection to 64KB", func() {
+	// Spec 7.1: with access-counter mode on, a cold managed page is REMOTE, so
+	// the first GPU read is a counted remote access instead of a demand fault.
+	ginkgo.It("maps a cold page remotely when access counting is on", func() {
 		ptr := driver.AllocateManaged(ctx, 128*1024)
 		base := uint64(ptr)
-		pageKey := PageKey{PID: ctx.pid, VAddr: base + 4096}
-		block := driver.uvm.blocks[BlockKey{PID: ctx.pid, Base: (base + 4096) &^ (2*1024*1024 - 1)}]
 
-		sel := driver.uvm.selectTBNRegion(pageKey, block)
-		gomega.Expect(sel.regionBase % (64 * 1024)).To(gomega.Equal(uint64(0)))
-		gomega.Expect(len(sel.pageKeys)).To(gomega.BeNumerically(">=", 1))
-		gomega.Expect(sel.demandKey).To(gomega.Equal(pageKey))
-	})
-
-	ginkgo.It("should coalesce duplicate faults on one page", func() {
-		ptr := driver.AllocateManaged(ctx, 128*1024)
-		base := uint64(ptr)
-		vAddr := base + 4096
-		pid := ctx.pid
-
-		driver.uvm.onManagedAccess(pid, vAddr, 1, "req1", "")
-		driver.uvm.onManagedAccess(pid, vAddr, 1, "req2", "")
-		driver.uvm.onManagedAccess(pid, vAddr, 1, "req3", "")
-
-		gomega.Expect(driver.uvm.stats.PageFaultRequests).To(gomega.Equal(uint64(3)))
-		gomega.Expect(driver.uvm.stats.UniquePageFaults).To(gomega.Equal(uint64(1)))
-		gomega.Expect(driver.uvm.stats.CoalescedFaultReqs).To(gomega.Equal(uint64(2)))
-	})
-
-	// sbin_codex: old eager demand-migration expectations, replaced by the
-	// first-touch spec below (a cold first touch must not migrate).
-	// ginkgo.It("should run a demand fault through migration and replay", func() {
-	// 	ptr := driver.AllocateManaged(ctx, 128*1024)
-	// 	base := uint64(ptr)
-	// 	vAddr := base + 4096
-	// 	pid := ctx.pid
-	//
-	// 	driver.uvm.onManagedAccess(pid, vAddr, 1, "req1", "")
-	// 	engine.Run()
-	//
-	// 	gomega.Expect(driver.uvm.stats.UniquePageFaults).To(gomega.Equal(uint64(1)))
-	// 	gomega.Expect(driver.uvm.stats.CPUToGPUMigrations).To(gomega.Equal(uint64(1)))
-	// 	// The demanded page's 64KB region is fetched; the region contains up to
-	// 	// 16 pages but the allocation starts at 4KB so the first region holds 15.
-	// 	gomega.Expect(driver.uvm.stats.MigratedBytes).To(gomega.BeNumerically(">=", 15*4096))
-	//
-	// 	mp := driver.uvm.pages[PageKey{PID: pid, VAddr: vAddr}]
-	// 	gomega.Expect(mp.State).To(gomega.Equal(GPUResident))
-	// 	gomega.Expect(mp.GPUFrameValid).To(gomega.BeTrue())
-	// })
-
-	// sbin_codex: a cold page's first touch must NOT migrate. The GPU reads it
-	// remotely, so the page stays CPU-resident with a DeviceID=0/CPU-backed/
-	// RemoteAccessible PTE and no migration stats move. Migration is deferred to
-	// the access-counter path.
-	ginkgo.It("should leave a cold page CPU-resident on its first-touch", func() {
-		// Given: a cold managed allocation whose first 4KB page was never
-		// accessed, migrated, or evicted.
-		ptr := driver.AllocateManaged(ctx, 128*1024)
-		base := uint64(ptr)
-		pid := ctx.pid
-		mp := driver.uvm.pages[PageKey{PID: pid, VAddr: base}]
-		gomega.Expect(mp).NotTo(gomega.BeNil())
-		gomega.Expect(mp.TimesMigrated).To(gomega.Equal(uint64(0)))
-
-		// When: the GPU first touches the page and the engine drains the fault.
-		driver.uvm.onManagedAccess(pid, base, 1, "req1", "")
-		engine.Run()
-
-		// Then: the page remains CPU-resident and remotely accessible; no
-		// migration was performed.
-		gomega.Expect(mp.State).To(gomega.Equal(CPUResident))
-		gomega.Expect(mp.GPUFrameValid).To(gomega.BeFalse())
-		gomega.Expect(mp.TimesMigrated).To(gomega.Equal(uint64(0)))
-		gomega.Expect(driver.uvm.stats.CPUToGPUMigrations).To(gomega.Equal(uint64(0)))
-		gomega.Expect(driver.uvm.stats.MigratedPages).To(gomega.Equal(uint64(0)))
-
-		pte, ok := pageTable.Find(pid, base)
-		gomega.Expect(ok).To(gomega.BeTrue())
+		pte, found := pageTable.Find(ctx.pid, base)
+		gomega.Expect(found).To(gomega.BeTrue())
 		gomega.Expect(pte.DeviceID).To(gomega.Equal(uint64(0)))
-		gomega.Expect(pte.PAddr).To(gomega.Equal(mp.CPUBackingPAddr))
 		gomega.Expect(pte.RemoteAccessible).To(gomega.BeTrue())
+		gomega.Expect(pte.Managed).To(gomega.BeTrue())
 	})
 
-	// sbin_codex: the access-counter path must migrate a hot region even when
-	// its pages were never evicted (TimesMigrated stays 0). The first touch
-	// leaves the page CPU-resident; the counter notification then migrates it.
-	ginkgo.It("should migrate a never-evicted region on access-counter notify", func() {
-		// Given: a cold managed allocation; the first touch must not migrate.
+	// Spec 7.1: with access-counter mode off, the same page is INVALID, so the
+	// first access is a demand fault.
+	ginkgo.It("maps a cold page invalid when access counting is off", func() {
+		localEngine := sim.NewSerialEngine()
+		localTable := vm.NewPageTable(12)
+		config := defaultUVMConfig()
+		config.AccessCounterEnabled = false
+		localDriver := buildUVMDriver(localEngine, localTable, config)
+		localCtx := localDriver.Init()
+
+		base := uint64(localDriver.AllocateManaged(localCtx, 128*1024))
+
+		pte, found := localTable.Find(localCtx.pid, base)
+		gomega.Expect(found).To(gomega.BeTrue())
+		gomega.Expect(pte.RemoteAccessible).To(gomega.BeFalse())
+	})
+
+	// Spec 8.3 and 10.1: duplicate 4KB faults inside one 64KB region join the
+	// same transaction and are charged the fixed latency only once.
+	ginkgo.It("coalesces 4KB faults into one 64KB fault service", func() {
 		ptr := driver.AllocateManaged(ctx, 128*1024)
 		base := uint64(ptr)
-		pid := ctx.pid
-		regionBase := base &^ (64*1024 - 1)
+		regionBase := base &^ (testRegionSize - 1)
 
-		driver.uvm.onManagedAccess(pid, base, 1, "req1", "")
+		driver.uvm.onPageFault(ctx.pid, regionBase, 1, false)
+		driver.uvm.onPageFault(ctx.pid, regionBase+4096, 1, false)
+		driver.uvm.onPageFault(ctx.pid, regionBase+8192, 1, true)
+
+		gomega.Expect(driver.uvm.stats.RawPageFaults).To(gomega.Equal(uint64(3)))
+		gomega.Expect(driver.uvm.stats.UniqueFaultServices).
+			To(gomega.Equal(uint64(1)))
+		gomega.Expect(driver.uvm.stats.CoalescedFaults).
+			To(gomega.Equal(uint64(2)))
+	})
+
+	// Spec 8.4: exactly one 64KB fault-service transaction is active at a time.
+	ginkgo.It("services one 64KB region at a time, FIFO", func() {
+		ptr := driver.AllocateManaged(ctx, 512*1024)
+		base := uint64(ptr) &^ (testRegionSize - 1)
+
+		driver.uvm.onPageFault(ctx.pid, base+testRegionSize, 1, false)
+		driver.uvm.onPageFault(ctx.pid, base+2*testRegionSize, 1, false)
+		driver.uvm.onPageFault(ctx.pid, base+3*testRegionSize, 1, false)
+
+		gomega.Expect(driver.uvm.stats.UniqueFaultServices).
+			To(gomega.Equal(uint64(3)))
+		gomega.Expect(driver.uvm.activeFaultID).NotTo(gomega.BeEmpty())
+		gomega.Expect(len(driver.uvm.faultServiceCue)).To(gomega.Equal(2))
+
 		engine.Run()
-		mp := driver.uvm.pages[PageKey{PID: pid, VAddr: base}]
-		gomega.Expect(mp.TimesMigrated).To(gomega.Equal(uint64(0)))
 
-		// When: the GPU GMMU reaches the access-counter threshold for the
-		// page's 64KB region and notifies the driver.
-		driver.uvm.onAccessCounterNotify(pid, regionBase, 1)
-		engine.Run()
-		drainUVMTestQuiescence(driver, engine) // sbin_codex
-
-		// Then: the region migrates to the GPU without any prior eviction.
-		gomega.Expect(driver.uvm.stats.AccessCounterMigr).To(gomega.Equal(uint64(1)))
-		gomega.Expect(driver.uvm.stats.CPUToGPUMigrations).To(gomega.Equal(uint64(1)))
-		gomega.Expect(mp.State).To(gomega.Equal(GPUResident))
-		gomega.Expect(mp.TimesMigrated).To(gomega.Equal(uint64(0)))
+		gomega.Expect(driver.uvm.activeFaultID).To(gomega.BeEmpty())
+		gomega.Expect(driver.uvm.faults).To(gomega.BeEmpty())
 	})
 
-	// sbin_codex: completion must clear demand ownership even when overlap leaves
-	// the demand page outside the migration's reserved page list.
-	ginkgo.It("should clear demand ownership when a migration reserved no page", func() {
-		// Given
-		ptr := driver.AllocateManaged(ctx, 128*1024)
-		demand := PageKey{PID: ctx.pid, VAddr: uint64(ptr) + 4096}
-		mig := &Migration{ID: "overlapped-migration", DeviceID: 1}
-		driver.uvm.migrations[mig.ID] = mig
-		driver.uvm.pageToMig[demand] = mig.ID
-		gomega.Expect(mig.Pages).To(gomega.BeEmpty())
+	// Spec 11.5: a lone 64KB demand leaf fills exactly 50% of its 128KB
+	// parent, and 50 > 51 is false, so TBN does not expand.
+	ginkgo.It("does not expand TBN at 50 percent occupancy", func() {
+		base := allocateFullVABlock(driver, ctx)
 
-		// When
-		driver.uvm.completeMigration(mig.ID)
+		key := RegionKey{PID: ctx.pid, Base: base, DeviceID: uvmDeviceID}
+		driver.uvm.onPageFault(ctx.pid, base, 1, false)
 
-		// Then
-		gomega.Expect(driver.uvm.pageToMig).To(gomega.BeEmpty())
+		block := driver.uvm.blocks[BlockKey{PID: ctx.pid, Base: base}]
+		gomega.Expect(block).NotTo(gomega.BeNil())
+
+		sel := driver.uvm.selectTBNRegion(key, block)
+		gomega.Expect(sel.selectedSize).To(gomega.Equal(uint64(testRegionSize)))
+		gomega.Expect(sel.regionBase % testRegionSize).To(gomega.Equal(uint64(0)))
 	})
 
-	// sbin_codex: parallel-engine migration events must serialize every mutation
-	// of the shared UVM maps, LRU list, page state, and statistics.
-	ginkgo.It("should complete migrations concurrently without racing", func() {
-		const migrationCount = 64
-		ptr := driver.AllocateManaged(ctx, migrationCount*4096)
-		start := make(chan struct{})
-		var wg sync.WaitGroup
+	// Spec 11.4 and 11.6: the ancestor walk is bottom-up and stops at the
+	// first candidate that fails, so a 256KB node is only reached through a
+	// 128KB node that already passed. Here leaves 1 and 2 are GPU resident and
+	// the fault lands on leaf 0: the 128KB parent is fully occupied, the 256KB
+	// node reaches 192KB of 256KB, and the 512KB node fails.
+	ginkgo.It("expands TBN when resident neighbors exceed the threshold", func() {
+		base := allocateFullVABlock(driver, ctx)
 
-		for i := 0; i < migrationCount; i++ {
-			pk := PageKey{PID: ctx.pid, VAddr: uint64(ptr) + uint64(i)*4096}
-			migID := "parallel-migration-" + itoa(uint64(i))
-			driver.uvm.migrations[migID] = &Migration{
-				ID:       migID,
-				DeviceID: 1,
-				Pages:    []PageKey{pk},
-			}
-			driver.uvm.pageToMig[pk] = migID
-
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				<-start
-				driver.uvm.completeMigration(migID)
-			}()
-		}
-
-		close(start)
-		wg.Wait()
-
-		gomega.Expect(driver.uvm.migrations).To(gomega.BeEmpty())
-		gomega.Expect(driver.uvm.pageToMig).To(gomega.BeEmpty())
-	})
-
-	ginkgo.It("should enforce GPU capacity with eviction", func() {
-		// GPU capacity is 128MB; allocate 192MB and touch everything.
-		ptr := driver.AllocateManaged(ctx, 192*1024*1024)
-		base := uint64(ptr)
-		pid := ctx.pid
-
-		// Touch one page per 64KB region, letting each fault complete before
-		// the next so eviction can find eligible (fault-free) victim regions.
-		// sbin_codex: first touch remote-maps the page; the explicit counter
-		// notification then migrates the region and exercises capacity.
-		for off := uint64(0); off < 192*1024*1024; off += 64 * 1024 {
-			driver.uvm.onManagedAccess(pid, base+off, 1, "req", "")
-			engine.Run()
-			driver.uvm.onAccessCounterNotify(pid, (base+off)&^(64*1024-1), 1) // sbin_codex
-			engine.Run()                                                      // sbin_codex
-			// sbin_codex: simulate the GPU TLB-shootdown ACK so the reserved
-			// eviction finalizes and the pending migration resumes.
-			// if driver.uvm.hasPendingEvictions() { // sbin_codex: all UVM shootdowns now require ACKs.
-			// 	driver.uvm.finalizeEviction()
-			// 	engine.Run()
-			// }
-			drainUVMTestQuiescence(driver, engine) // sbin_codex
-		}
-
-		gomega.Expect(driver.uvm.stats.Evictions).To(gomega.BeNumerically(">", 0))
-		residentBytes := driver.uvm.stats.GPUResidentPages * driver.uvm.config.PageSize
-		gomega.Expect(residentBytes).To(gomega.BeNumerically("<=", 128*1024*1024))
-	})
-
-	ginkgo.It("should migrate a region on access-counter notification", func() {
-		ptr := driver.AllocateManaged(ctx, 128*1024)
-		base := uint64(ptr)
-		pid := ctx.pid
-		regionBase := base &^ (64*1024 - 1)
-
-		// Simulate the GPU GMMU reaching its counter threshold and notifying
-		// the driver.
-		driver.uvm.onAccessCounterNotify(pid, regionBase, 1)
-		engine.Run()
-		drainUVMTestQuiescence(driver, engine) // sbin_codex
-
-		gomega.Expect(driver.uvm.stats.AccessCounterNotif).To(gomega.Equal(uint64(1)))
-		gomega.Expect(driver.uvm.stats.AccessCounterMigr).To(gomega.Equal(uint64(1)))
-		gomega.Expect(driver.uvm.stats.CPUToGPUMigrations).To(gomega.Equal(uint64(1)))
-
-		mp := driver.uvm.pages[PageKey{PID: pid, VAddr: base}]
-		gomega.Expect(mp.State).To(gomega.Equal(GPUResident))
-	})
-
-	ginkgo.It("should keep ideal-uvm timing zero", func() {
-		gomega.Expect(driver.uvm.config.faultHandlingCycles()).To(gomega.Equal(0))
-	})
-
-	ginkgo.It("should queue capacity requests during a pending eviction", func() {
-		// GPU capacity is 128MB; touching a 192MB working set forces
-		// evictions. Two faults arriving while an eviction is pending must
-		// queue and resume in order without stalling.
-		ptr := driver.AllocateManaged(ctx, 192*1024*1024)
-		base := uint64(ptr)
-		pid := ctx.pid
-
-		for off := uint64(0); off < 128*1024*1024; off += 64 * 1024 {
-			driver.uvm.onManagedAccess(pid, base+off, 1, "req", "")
-			engine.Run()
-			driver.uvm.onAccessCounterNotify(pid, (base+off)&^(64*1024-1), 1) // sbin_codex
-			engine.Run()                                                      // sbin_codex
-			// if driver.uvm.hasPendingEvictions() { // sbin_codex: all UVM shootdowns now require ACKs.
-			// 	driver.uvm.finalizeEviction()
-			// 	engine.Run()
-			// }
-			drainUVMTestQuiescence(driver, engine) // sbin_codex
-		}
-		// Beyond capacity, consecutive faults must queue behind the pending
-		// eviction instead of being dropped.
-		for off := uint64(128 * 1024 * 1024); off < 192*1024*1024; off += 64 * 1024 {
-			driver.uvm.onManagedAccess(pid, base+off, 1, "req", "")
-			engine.Run()
-			driver.uvm.onAccessCounterNotify(pid, (base+off)&^(64*1024-1), 1) // sbin_codex
-			engine.Run()                                                      // sbin_codex
-			// if driver.uvm.hasPendingEvictions() { // sbin_codex: all UVM shootdowns now require ACKs.
-			// 	driver.uvm.finalizeEviction()
-			// 	engine.Run()
-			// }
-			drainUVMTestQuiescence(driver, engine) // sbin_codex
-		}
-
-		gomega.Expect(driver.uvm.stats.Evictions).To(gomega.BeNumerically(">", 0))
-		residentBytes := driver.uvm.stats.GPUResidentPages * driver.uvm.config.PageSize
-		gomega.Expect(residentBytes).To(gomega.BeNumerically("<=", 128*1024*1024))
-	})
-
-	ginkgo.It("should count repeated migrations under thrashing", func() {
-		// GPU capacity is 128MB; two 96MB working sets exceed it together.
-		// Alternating accesses force evictions. Evicted pages are remotely
-		// accessible, so re-migration is driven by the access counter: each
-		// region is touched AccessCounterThreshold times per pass.
-		ptr := driver.AllocateManaged(ctx, 192*1024*1024)
-		base := uint64(ptr)
-		pid := ctx.pid
-		// thresh := driver.uvm.config.AccessCounterThreshold
-		// sbin_codex: direct driver accesses do not model GPU-side counting.
-
-		for pass := 0; pass < 2; pass++ {
-			for off := uint64(0); off < 96*1024*1024; off += 64 * 1024 {
-				// for i := uint64(0); i < thresh; i++ { // sbin_codex: replaced by first touch plus threshold notification.
-				// 	driver.uvm.onManagedAccess(pid, base+off, 1, "req", "")
-				// }
-				mp := driver.uvm.pages[PageKey{PID: pid, VAddr: base + off}] // sbin_codex
-				if !mp.RemoteMapped {                                        // sbin_codex: only cold pages need first-touch setup.
-					driver.uvm.onManagedAccess(pid, base+off, 1, "req", "") // sbin_codex
-					engine.Run()                                            // sbin_codex
-				}
-				driver.uvm.onAccessCounterNotify(pid, (base+off)&^(64*1024-1), 1) // sbin_codex
-				engine.Run()                                                      // sbin_codex
-				// if driver.uvm.hasPendingEvictions() { // sbin_codex: all UVM shootdowns now require ACKs.
-				// 	driver.uvm.finalizeEviction()
-				// 	engine.Run()
-				// }
-				drainUVMTestQuiescence(driver, engine) // sbin_codex
-			}
-			for off := uint64(96 * 1024 * 1024); off < 192*1024*1024; off += 64 * 1024 {
-				// for i := uint64(0); i < thresh; i++ { // sbin_codex: replaced by first touch plus threshold notification.
-				// 	driver.uvm.onManagedAccess(pid, base+off, 1, "req", "")
-				// }
-				mp := driver.uvm.pages[PageKey{PID: pid, VAddr: base + off}] // sbin_codex
-				if !mp.RemoteMapped {                                        // sbin_codex: only cold pages need first-touch setup.
-					driver.uvm.onManagedAccess(pid, base+off, 1, "req", "") // sbin_codex
-					engine.Run()                                            // sbin_codex
-				}
-				driver.uvm.onAccessCounterNotify(pid, (base+off)&^(64*1024-1), 1) // sbin_codex
-				engine.Run()                                                      // sbin_codex
-				// if driver.uvm.hasPendingEvictions() { // sbin_codex: all UVM shootdowns now require ACKs.
-				// 	driver.uvm.finalizeEviction()
-				// 	engine.Run()
-				// }
-				drainUVMTestQuiescence(driver, engine) // sbin_codex
+		for _, leaf := range []uint64{base + testRegionSize, base + 2*testRegionSize} {
+			for off := uint64(0); off < testRegionSize; off += 4096 {
+				managedPage := driver.uvm.pages[PageKey{
+					PID: ctx.pid, VAddr: leaf + off,
+				}]
+				managedPage.State = GPUResident
+				managedPage.GPUFrameValid = true
 			}
 		}
 
-		gomega.Expect(driver.uvm.stats.Evictions).To(gomega.BeNumerically(">", 0))
-		gomega.Expect(driver.uvm.stats.RepeatedMigrations).To(gomega.BeNumerically(">", 0))
+		key := RegionKey{PID: ctx.pid, Base: base, DeviceID: uvmDeviceID}
+		driver.uvm.onPageFault(ctx.pid, base, 1, false)
+
+		block := driver.uvm.blocks[BlockKey{PID: ctx.pid, Base: base}]
+		sel := driver.uvm.selectTBNRegion(key, block)
+
+		gomega.Expect(sel.selectedSize).To(gomega.Equal(uint64(256 * 1024)))
+		gomega.Expect(sel.regionBase).To(gomega.Equal(base))
+		// Already-resident pages are never transferred again (spec 11.9), so
+		// only the fault leaf and the empty fourth leaf move.
+		gomega.Expect(len(sel.pageKeys)).To(gomega.Equal(32))
+	})
+
+	// Spec 16: a threshold crossing migrates the whole 64KB region.
+	ginkgo.It("migrates a region on an access-counter notification", func() {
+		ptr := driver.AllocateManaged(ctx, 128*1024)
+		base := uint64(ptr)
+		regionBase := base &^ (testRegionSize - 1)
+
+		driver.uvm.onAccessCounterNotify(ctx.pid, regionBase, uvmDeviceID)
+		engine.Run()
+
+		gomega.Expect(driver.uvm.stats.AccessCounterNotify).
+			To(gomega.Equal(uint64(1)))
+		gomega.Expect(driver.uvm.stats.AccessCounterMigrations).
+			To(gomega.Equal(uint64(1)))
+		gomega.Expect(driver.uvm.stats.CPUToGPUMigrations).
+			To(gomega.Equal(uint64(1)))
+
+		managedPage := driver.uvm.pages[PageKey{PID: ctx.pid, VAddr: base}]
+		gomega.Expect(managedPage.State).To(gomega.Equal(GPUResident))
+
+		pte, found := pageTable.Find(ctx.pid, base)
+		gomega.Expect(found).To(gomega.BeTrue())
+		gomega.Expect(pte.DeviceID).To(gomega.Equal(uvmDeviceID))
+		gomega.Expect(pte.RemoteAccessible).To(gomega.BeFalse())
+	})
+
+	// Spec 16: a region already owned by a transaction swallows the
+	// notification instead of creating a duplicate migration.
+	ginkgo.It("ignores an access-counter notification while migrating", func() {
+		ptr := driver.AllocateManaged(ctx, 128*1024)
+		regionBase := uint64(ptr) &^ (testRegionSize - 1)
+
+		region := driver.uvm.regions[RegionKey{
+			PID: ctx.pid, Base: regionBase, DeviceID: uvmDeviceID,
+		}]
+		region.Phase = RegionMigratingToGPU
+
+		driver.uvm.onAccessCounterNotify(ctx.pid, regionBase, uvmDeviceID)
+
+		gomega.Expect(driver.uvm.stats.AccessCounterSuppressed).
+			To(gomega.Equal(uint64(1)))
+		gomega.Expect(driver.uvm.stats.CPUToGPUMigrations).
+			To(gomega.Equal(uint64(0)))
+	})
+
+	// Spec 17: managed allocations may exceed GPU capacity, and residency must
+	// stay inside the budget.
+	ginkgo.It("enforces GPU capacity with eviction", func() {
+		const capacityBytes = 128 * 1024 * 1024
+
+		ptr := driver.AllocateManaged(ctx, 192*1024*1024)
+		base := uint64(ptr)
+
+		for off := uint64(0); off < 192*1024*1024; off += testRegionSize {
+			driver.uvm.onAccessCounterNotify(
+				ctx.pid, (base+off)&^(testRegionSize-1), uvmDeviceID)
+			engine.Run()
+		}
+
+		gomega.Expect(driver.uvm.stats.Evictions).
+			To(gomega.BeNumerically(">", 0))
+
+		residentBytes := driver.uvm.stats.GPUResidentPages *
+			driver.uvm.config.PageSize
+		gomega.Expect(residentBytes).
+			To(gomega.BeNumerically("<=", uint64(capacityBytes)))
+	})
+
+	// Spec 1.2 and 10.4: ideal mode zeroes the timing but keeps the counters.
+	ginkgo.It("keeps ideal-uvm timing at zero", func() {
+		gomega.Expect(driver.uvm.config.faultHandlingCycles()).
+			To(gomega.Equal(0))
+
+		ptr := driver.AllocateManaged(ctx, 128*1024)
+		driver.uvm.onAccessCounterNotify(
+			ctx.pid, uint64(ptr)&^(testRegionSize-1), uvmDeviceID)
+		engine.Run()
+
+		gomega.Expect(driver.uvm.stats.FaultHandlingTime).
+			To(gomega.Equal(sim.VTimeInSec(0)))
+		gomega.Expect(driver.uvm.stats.MigrationTime).
+			To(gomega.Equal(sim.VTimeInSec(0)))
+		gomega.Expect(driver.uvm.stats.MigratedBytes).
+			To(gomega.BeNumerically(">", 0))
 	})
 })

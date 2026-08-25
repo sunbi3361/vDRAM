@@ -31,7 +31,13 @@ func newAccessCounterResetDriver(t *testing.T, bufferSize int) (*Driver, *Contex
 		WithGlobalStorage(mem.NewStorage(1 << 24)).
 		WithD2HCycles(1).
 		WithH2DCycles(1).
-		WithUVM(UVMConfig{Enabled: true, Ideal: true, GPUCapacityBytes: 1 << 20}).
+		WithUVM(UVMConfig{
+			Enabled:                true,
+			Ideal:                  true,
+			AccessCounterEnabled:   true, // sbin_codex: resets only exist in counter mode.
+			AccessCounterThreshold: 8,
+			GPUCapacityBytes:       1 << 20,
+		}).
 		Build("Driver")
 	d.uvmPort = sim.NewPort(d, bufferSize, bufferSize, "Driver.ResetTestUVM")
 	(&resetTestConnection{}).PlugIn(d.uvmPort)

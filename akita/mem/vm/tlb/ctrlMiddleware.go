@@ -31,6 +31,8 @@ func (m *ctrlMiddleware) handleIncomingCommands() bool {
 		madeProgress = m.handleControlMsg(msg) || madeProgress
 	case *FlushReq:
 		madeProgress = m.handleTLBFlush(msg) || madeProgress
+	case *InvalidateRangeReq: // sbin_codex: non-stalling UVM range invalidation.
+		madeProgress = m.handleInvalidateRange(msg) || madeProgress
 	case *RestartReq:
 		madeProgress = m.handleTLBRestart(msg) || madeProgress
 	default:
@@ -124,7 +126,10 @@ func (m *ctrlMiddleware) flushMsgMustBeValidInCurrentStage(req *FlushReq) {
 	case tlbStateFlush:
 		log.Panic("TLB is already flushing")
 	default:
-		log.Panicf("Unknown TLB state: %s, msg: %s", state, reflect.TypeOf(req))
+		// Pre-edit format (commented per AGENTS.md convention). state is an
+		// int, so %s made this line fail go vet:
+		// log.Panicf("Unknown TLB state: %s, msg: %s", state, reflect.TypeOf(req))
+		log.Panicf("Unknown TLB state: %d, msg: %s", state, reflect.TypeOf(req)) // sbin_codex
 	}
 }
 

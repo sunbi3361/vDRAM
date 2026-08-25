@@ -19,6 +19,7 @@ import (
 	"github.com/sarchlab/akita/v4/simulation"
 	"github.com/sarchlab/mgpusim/v4/amd/samples/runner/timingconfig/gpubuilder"
 	"github.com/sarchlab/mgpusim/v4/amd/samples/runner/timingconfig/shaderarray"
+	"github.com/sarchlab/mgpusim/v4/amd/timing/accesscounter" // sbin_codex
 	"github.com/sarchlab/mgpusim/v4/amd/timing/cp"
 	"github.com/sarchlab/mgpusim/v4/amd/timing/pagemigrationcontroller"
 	"github.com/sarchlab/mgpusim/v4/amd/timing/rdma"
@@ -67,9 +68,11 @@ type Builder struct {
 	remoteMemoryProvider *mem.SinglePortMapper
 	l1tlbFactory         func(name string, engine sim.Engine, freq sim.Freq, pageTable vm.PageTable, mapper mem.AddressToPortMapper, numReqPerCycle int) sim.Component //nolint:lll // sbin_codex: ideal-L1-TLB factory injection (todo 5).
 	pmcAddressMapper     mem.AddressToPortMapper
-	driverPort           sim.Port       // sbin_codex: driver destination for CP control responses.
-	uvmServiceProvider   sim.RemotePort // sbin_codex: driver UVM fault service provider.
-	// accessCounterThresh uint64 // sbin_codex
+	driverPort           sim.Port            // sbin_codex: driver destination for CP control responses.
+	uvmServiceProvider   sim.RemotePort      // sbin_codex: driver UVM port.
+	tlbCtrlPorts         []sim.RemotePort    // sbin_codex: UVM range-invalidation targets.
+	accessCounter        *accesscounter.Comp // sbin_codex: GPU-side UVM counter.
+	accessCounterThresh  uint64              // sbin_codex
 }
 
 // MakeBuilder creates a new builder.
@@ -188,10 +191,14 @@ func (b Builder) WithUVMServiceProvider(provider sim.RemotePort) gpubuilder.GPUB
 	return b
 }
 
-// func (b Builder) WithAccessCounterThreshold(thresh uint64) gpubuilder.GPUBuilder { // sbin_codex
-// 	b.accessCounterThresh = thresh
-// 	return b
-// }
+// WithAccessCounterThreshold sets the GPU-side UVM remote-access counter
+// threshold. // sbin_codex
+func (b Builder) WithAccessCounterThreshold(
+	thresh uint64,
+) gpubuilder.GPUBuilder {
+	b.accessCounterThresh = thresh
+	return b
+}
 
 // WithL1TLBFactory sets the factory that builds L1 TLBs for this GPU.
 // When nil, the default tlb.MakeBuilder is used. // sbin_codex
@@ -286,8 +293,16 @@ func (b *Builder) populateExternalPorts() {
 	// external translation endpoint. // sbin_codex
 	b.gpu.AddPort("Translation", b.gmmu.GetPortByName("Bottom"))
 
-	if b.uvmServiceProvider != "" { // sbin_codex: expose the GMMU UVM fault port.
-		b.gpu.AddPort("UVM", b.gmmu.GetPortByName("UVM"))
+	// Pre-edit code (commented per AGENTS.md convention). The GMMU used to be
+	// the driver's direct peer:
+	// if b.uvmServiceProvider != "" {
+	// 	b.gpu.AddPort("UVM", b.gmmu.GetPortByName("UVM"))
+	// }
+	//
+	// sbin_codex: the Command Processor is now the GPU-side UVM control
+	// endpoint (spec 2.1); the GMMU only faces it internally.
+	if b.uvmServiceProvider != "" {
+		b.gpu.AddPort("UVM", b.cp.ToUVMDriver)
 	}
 }
 
@@ -322,6 +337,7 @@ func (b *Builder) connectCP() {
 	b.dataPathTopology.connectCP(b) // sbin_codex
 	b.memoryTopology.connectCP(b)   // sbin_codex
 	b.connectCPWithCaches()
+	b.connectUVMControlPlane() // sbin_codex: every TLB control port is known now.
 }
 
 func (b *Builder) connectL1ToL2() {
@@ -401,7 +417,56 @@ func (b *Builder) addSharedL2TLBs() { // sbin_codex
 
 func (b *Builder) addTLB(port sim.Port) { // sbin_codex
 	b.cp.TLBs = append(b.cp.TLBs, port)
+	// sbin_codex: the GMMU coordinates UVM range invalidation, so it needs the
+	// same control ports (spec 21.1).
+	b.tlbCtrlPorts = append(b.tlbCtrlPorts, port.AsRemote())
 	b.internalConn.PlugIn(port)
+}
+
+// registerUVMTranslators gives the Command Processor every address translator
+// that must drain a UVM region before its cache lines are written back. They
+// are kept out of the legacy shootdown groups so the non-UVM migration path is
+// unchanged. // sbin_codex
+func (b *Builder) registerUVMTranslators() {
+	groups := [][]sim.Port{
+		b.cp.PreCacheTranslators.Ports,
+		b.cp.PostCacheTranslators.Ports,
+	}
+
+	for _, group := range groups {
+		for _, port := range group {
+			b.cp.UVMTranslators = append(
+				b.cp.UVMTranslators, port.AsRemote())
+		}
+	}
+}
+
+// connectUVMControlPlane joins the Command Processor and the GMMU on the GPU's
+// internal control network and tells each side about the other. // sbin_codex
+func (b *Builder) connectUVMControlPlane() {
+	if b.uvmServiceProvider == "" {
+		return
+	}
+
+	gmmuUVMPort := b.gmmu.GetPortByName("UVM")
+	gmmuTLBCtrlPort := b.gmmu.GetPortByName("TLBCtrl")
+
+	b.internalConn.PlugIn(b.cp.ToUVMInternal)
+	b.internalConn.PlugIn(gmmuUVMPort)
+	b.internalConn.PlugIn(gmmuTLBCtrlPort)
+
+	b.cp.GMMU = gmmuUVMPort.AsRemote()
+	b.cp.UVMDriverPort = b.uvmServiceProvider
+
+	b.gmmu.SetTLBs(b.tlbCtrlPorts)
+
+	b.registerUVMTranslators()
+
+	if b.accessCounter != nil {
+		b.internalConn.PlugIn(b.accessCounter.Ctrl)
+		b.accessCounter.SetCtrlDestination(b.cp.ToUVMInternal.AsRemote())
+		b.cp.AccessCounter = b.accessCounter.Ctrl.AsRemote()
+	}
 }
 
 func (b *Builder) addPreCacheTranslator(port sim.Port) { // sbin_codex
@@ -600,7 +665,13 @@ func (b *Builder) buildRDMAEngine() {
 		Build(name)
 
 	b.rdmaEngine.RemoteRDMAAddressTable = b.rdmaAddressMapper
-	b.remoteMemoryProvider.Port = b.rdmaEngine.RDMARequestInside.AsRemote() // sbin_codex
+	// Pre-edit code (commented per AGENTS.md convention): remote traffic used
+	// to reach the RDMA ingress directly.
+	// b.remoteMemoryProvider.Port = b.rdmaEngine.RDMARequestInside.AsRemote()
+	//
+	// sbin_codex: the UVM access counter is now interposed on the remote
+	// egress so every CPU-remote access is observed after translation.
+	b.buildAccessCounter()
 
 	b.simulation.RegisterComponent(b.rdmaEngine)
 }
@@ -613,6 +684,33 @@ func (b *Builder) buildPageMigrationController() {
 		nil)
 
 	b.simulation.RegisterComponent(b.pmc)
+}
+
+// buildAccessCounter interposes the GPU-side UVM counter between the address
+// translators' remote egress and the RDMA ingress that carries it over PCIe.
+// sbin_codex
+func (b *Builder) buildAccessCounter() {
+	if b.uvmServiceProvider == "" {
+		b.remoteMemoryProvider.Port = b.rdmaEngine.RDMARequestInside.AsRemote()
+		return
+	}
+
+	threshold := b.accessCounterThresh
+	if threshold == 0 {
+		threshold = 8
+	}
+
+	b.accessCounter = accesscounter.MakeBuilder().
+		WithEngine(b.simulation.GetEngine()).
+		WithFreq(b.freq).
+		WithDeviceID(b.gpuID).
+		WithThreshold(threshold).
+		WithBottomDestination(b.rdmaEngine.RDMARequestInside.AsRemote()).
+		Build(fmt.Sprintf("%s.UVMAccessCounter", b.name))
+
+	b.simulation.RegisterComponent(b.accessCounter)
+
+	b.remoteMemoryProvider.Port = b.accessCounter.Top.AsRemote()
 }
 
 func (b *Builder) buildDMAEngine() {
@@ -655,7 +753,13 @@ func (b *Builder) buildGMMU() {
 		WithMemoryPerChiplet(b.dramSize)
 
 	if b.uvmServiceProvider != "" { // sbin_codex
-		gmmuBuilder = gmmuBuilder.WithUVMServiceProvider(b.uvmServiceProvider)
+		// Pre-edit code (commented per AGENTS.md convention). The GMMU used to
+		// send faults straight to the driver:
+		// gmmuBuilder = gmmuBuilder.WithUVMServiceProvider(b.uvmServiceProvider)
+		//
+		// sbin_codex: faults now leave through the Command Processor.
+		gmmuBuilder = gmmuBuilder.WithUVMServiceProvider(
+			b.cp.ToUVMInternal.AsRemote())
 		// if b.accessCounterThresh > 0 { // sbin_codex
 		// 	gmmuBuilder = gmmuBuilder.WithAccessCounterThreshold(b.accessCounterThresh)
 		// }

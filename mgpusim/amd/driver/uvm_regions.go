@@ -1,14 +1,31 @@
 package driver
 
+// sbin_codex: access-counter driven migration (spec 12, 14, 16).
+//
+// The GPU-side counter observes remote accesses after translation and notifies
+// the driver the moment a 64KB region crosses the threshold. If that region is
+// already being brought to the GPU, the notification is ignored: the existing
+// transaction is authoritative and no duplicate DMA is issued.
+
 import (
+	"fmt"
+	"os"
+
 	"github.com/sarchlab/akita/v4/mem/vm"
 )
 
-// RemoteAccessible reports whether a CPU-resident managed page may be returned
-// to the GPU for a remote access instead of faulting.
+var uvmDbg = os.Getenv("UVM_DEBUG") != ""
+
+func dbgd(format string, args ...interface{}) {
+	if uvmDbg {
+		fmt.Fprintf(os.Stderr, "[drvdbg] "+format+"\n", args...)
+	}
+}
+
+// RemoteAccessible reports whether a CPU-resident managed page may be reached
+// over PCIe instead of faulting.
 func (mp *ManagedPage) RemoteAccessible() bool {
-	// return mp.State == CPUResident && mp.TimesMigrated > 0 // sbin_codex: pre-first-touch behavior retained.
-	return mp.State == CPUResident && (mp.RemoteMapped || mp.TimesMigrated > 0) // sbin_codex
+	return mp.State == CPUResident && mp.RemoteMapped
 }
 
 // regionForKey returns the 64KB region state for a key, or nil.
@@ -21,105 +38,63 @@ func (m *UVMManager) blockForKey(key BlockKey) *VABlock {
 	return m.blocks[key]
 }
 
-// onAccessCounterNotify handles a GPU-side 64KB access-counter threshold
-// notification. The PCIe accesscounter counts remote accesses to a
-// CPU-resident region; at the threshold it asks the driver to migrate the
-// region to the GPU. // sbin_codex
-func (m *UVMManager) onAccessCounterNotify(pid vm.PID, regionBase uint64, deviceID uint64) {
-	m.stateMu.Lock() // sbin_codex: serialize counter-triggered migration with fault events.
+// onAccessCounterNotify handles a 64KB remote-access threshold crossing.
+func (m *UVMManager) onAccessCounterNotify(
+	pid vm.PID,
+	regionBase uint64,
+	deviceID uint64,
+) {
+	m.stateMu.Lock() // sbin_codex: serialize with the fault and migration paths.
 	defer m.stateMu.Unlock()
 
-	m.stats.AccessCounterNotif++
-	m.triggerAccessCounterMigration(AccessCounterKey{
-		PID:        pid,
-		RegionBase: regionBase,
-		DeviceID:   deviceID,
-	})
+	m.stats.AccessCounterNotify++
+
+	m.migrateRegionLocked(
+		RegionKey{PID: pid, Base: regionBase, DeviceID: deviceID})
 }
 
-// triggerAccessCounterMigration migrates a hot 64KB CPU-resident region to the
-// GPU without charging the fixed fault latency.
-func (m *UVMManager) triggerAccessCounterMigration(key AccessCounterKey) {
-	region := m.regions[RegionKey{PID: key.PID, Base: key.RegionBase, DeviceID: key.DeviceID}]
+// migrateRegionLocked admits one 64KB region to the GPU.
+func (m *UVMManager) migrateRegionLocked(key RegionKey) {
+	region := m.regions[key]
 	if region == nil {
-		return
-	}
-	// Only migrate pages that are CPU-resident and remotely accessible.
-	var pages []PageKey
-	for _, pk := range region.Pages {
-		mp := m.pages[pk]
-		if mp != nil && mp.State == CPUResident {
-			pages = append(pages, pk)
-		}
-	}
-	if len(pages) == 0 {
+		dbgd("SUPPRESS-NOREGION region=%#x", key.Base)
 		return
 	}
 
-	var required uint64
-	for _, pk := range pages {
-		mp := m.pages[pk]
-		if mp == nil || !mp.GPUFrameValid {
-			required++
+	// Spec 16: a region already in a fault, migration, or prefetch transaction
+	// swallows the notification.
+	if region.busy() || region.MigrationID != "" || region.FaultID != "" {
+		m.stats.AccessCounterSuppressed++
+		dbgd("SUPPRESS-BUSY region=%#x phase=%d mig=%q fault=%q",
+			key.Base, region.Phase, region.MigrationID, region.FaultID)
+
+		return
+	}
+
+	pages := make([]PageKey, 0, len(region.Pages))
+
+	for _, pk := range region.Pages {
+		if managedPage := m.pages[pk]; managedPage != nil &&
+			managedPage.State == CPUResident {
+			if _, inFlight := m.migrationsByPage[pk]; !inFlight {
+				pages = append(pages, pk)
+			}
 		}
 	}
-	exclude := make(map[PageKey]bool)
+
+	if len(pages) == 0 {
+		m.stats.AccessCounterSuppressed++
+		dbgd("SUPPRESS-NOPAGES region=%#x phase=%d", key.Base, region.Phase)
+
+		return
+	}
+
+	exclude := make(map[PageKey]bool, len(pages))
 	for _, pk := range pages {
 		exclude[pk] = true
 	}
-	// sbin_codex: ensure capacity (with TLB shootdown evictions) then migrate.
-	m.withCapacity(required, exclude, func() {
-		m.finishAccessCounterMigration(key, pages)
+
+	m.withCapacity(uint64(len(pages)), exclude, func() {
+		m.startCPUToGPUMigration(nil, pages, TriggerAccessCounter)
 	})
-}
-
-// finishAccessCounterMigration runs the access-counter-triggered migration
-// after capacity has been ensured. // sbin_codex
-func (m *UVMManager) finishAccessCounterMigration(key AccessCounterKey, pages []PageKey) {
-	cfg := m.config
-	mig := &Migration{
-		ID:            m.newID("acmig"),
-		Direction:     CPUToGPU,
-		Trigger:       TriggerAccessCounter,
-		DeviceID:      key.DeviceID,
-		CreatedAt:     m.d.TickScheduler.CurrentTime(),
-		DemandPages:   uint64(len(pages)),
-		PrefetchPages: 0,
-	}
-	m.migrations[mig.ID] = mig
-
-	for _, pk := range pages {
-		mp := m.pages[pk]
-		if mp == nil || mp.GPUFrameValid {
-			continue
-		}
-		if m.freeGPUFrames == 0 {
-			continue
-		}
-		frame, ok := m.d.memAllocator.TryAllocatePhysicalPage(1)
-		if !ok {
-			continue
-		}
-		mp.GPUFramePAddr = frame
-		mp.GPUFrameValid = true
-		mp.State = MigratingToGPU
-		if mp.TimesMigrated > 0 {
-			m.stats.RepeatedMigrations++
-		}
-		m.stats.GPUResidentPages++
-		m.stats.GPUResidentBytes += cfg.PageSize
-		m.freeGPUFrames--
-		mig.Pages = append(mig.Pages, pk)
-		mig.Bytes += cfg.PageSize
-	}
-	m.stats.DemandMigPages += uint64(len(mig.Pages))
-	m.stats.CPUToGPUMigrations++
-	m.stats.MigratedPages += uint64(len(mig.Pages))
-	m.stats.MigratedBytes += mig.Bytes
-	m.stats.AccessCounterMigr++
-
-	// m.migrateData(mig) // sbin_codex: access-counter migrations also quiesce before copying.
-	// m.updateResidencyPeak()
-	m.publishMigratingPagesLocked(mig)    // sbin_codex
-	m.beginMigrationQuiescenceLocked(mig) // sbin_codex
 }

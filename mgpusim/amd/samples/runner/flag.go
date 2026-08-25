@@ -55,8 +55,31 @@ var idealUVMFlag = flag.Bool("uvm-ideal", false,
 	"Run UVM with zero fault-handling and zero migration timing. Valid only with -uvm=true.")
 var uvmFaultLatencyUSFlag = flag.Float64("uvm-fault-latency-us", 20,
 	"Fixed host/driver page-fault handling latency in microseconds (UVM).")
-var uvmAccessCounterThresholdFlag = flag.Uint64("uvm-access-counter-threshold", 64,
+var uvmAccessCounterFlag = flag.Bool("uvm-access-counter", true,
+	"Let the GPU read host-resident managed memory remotely and migrate a 64KB "+
+		"region once its remote-access counter reaches the threshold. When "+
+		"false, a cold managed page is INVALID and the first access is a "+
+		"demand fault.")
+
+// Pre-edit default (commented per AGENTS.md convention): the threshold used to
+// be 64. The specification fixes it at 8. // sbin_codex
+var uvmAccessCounterThresholdFlag = flag.Uint64("uvm-access-counter-threshold", 8,
 	"Access Counter threshold that triggers a 64KB CPU->GPU migration (UVM).")
+var uvmDisablePrefetchFlag = flag.Bool("uvm-disable-prefetch", false,
+	"Restrict every UVM fault service to its own 64KB leaf (no TBN expansion).")
+var uvmDisableEvictionFlag = flag.Bool("uvm-disable-eviction", false,
+	"Disable capacity-driven UVM eviction.")
+var uvmGPUCapacityFlag = flag.Uint64("uvm-gpu-memory-capacity", 0,
+	"GPU bytes available to UVM managed memory. 0 uses the whole GPU memory.")
+var uvmGPUCapacityRatioFlag = flag.Float64("uvm-gpu-memory-capacity-ratio", 0,
+	"Fraction of GPU memory available to UVM managed memory. "+
+		"Ignored when -uvm-gpu-memory-capacity is set.")
+var uvmOversubRatioFlag = flag.Float64("uvm-oversubscription-ratio", 0,
+	"Total AllocateManaged bytes divided by the UVM GPU capacity. 1.5 gives "+
+		"every benchmark 150% oversubscription regardless of its footprint. "+
+		"Unlike -uvm-gpu-memory-capacity-ratio this is relative to what the "+
+		"benchmark allocated, not to the GPU's physical memory. "+
+		"Overrides -uvm-gpu-memory-capacity and its ratio form.")
 var uvmTBNExpandRatioFlag = flag.Float64("uvm-tbn-expand-ratio", 0.51,
 	"Minimum GPU-resident page ratio inside a TBN node to migrate the whole node (UVM).")
 var uvmTBNMaxFetchSizeFlag = flag.Uint64("uvm-tbn-max-fetch-size", 1<<21,
@@ -159,9 +182,15 @@ func (r *Runner) parseSimulationFlags() {
 		r.IdealUVM = true
 	}
 	r.UVMFaultLatencyUS = *uvmFaultLatencyUSFlag
+	r.UVMAccessCounter = *uvmAccessCounterFlag // sbin_codex
 	r.UVMACThreshold = *uvmAccessCounterThresholdFlag
 	r.UVMExpandRatio = *uvmTBNExpandRatioFlag
 	r.UVMmaxFetchSize = *uvmTBNMaxFetchSizeFlag
+	r.UVMNoPrefetch = *uvmDisablePrefetchFlag        // sbin_codex
+	r.UVMNoEviction = *uvmDisableEvictionFlag        // sbin_codex
+	r.UVMGPUCapacityBytes = *uvmGPUCapacityFlag      // sbin_codex
+	r.UVMGPUCapacityRatio = *uvmGPUCapacityRatioFlag // sbin_codex
+	r.UVMOversubRatio = *uvmOversubRatioFlag         // sbin_codex
 
 	r.validateUVMFlags()
 
@@ -186,6 +215,15 @@ func (r *Runner) validateUVMFlags() {
 	}
 	if r.UVM && r.ArchType == arch.CDNA3 {
 		log.Panic("-uvm currently supports GCN3 only")
+	}
+	if r.UVM && r.UVMACThreshold == 0 { // sbin_codex
+		log.Panic("-uvm-access-counter-threshold must be at least 1")
+	}
+	if r.UVMOversubRatio < 0 { // sbin_codex
+		log.Panic("-uvm-oversubscription-ratio must not be negative")
+	}
+	if !r.UVM && r.UVMOversubRatio > 0 { // sbin_codex
+		log.Panic("-uvm-oversubscription-ratio requires -uvm")
 	}
 }
 

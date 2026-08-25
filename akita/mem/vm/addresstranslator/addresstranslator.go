@@ -47,6 +47,10 @@ type Comp struct {
 
 	transactions        []*transaction
 	inflightReqToBottom []reqToBottom
+
+	// sbin_codex: requests the UVM access counter refused to perform remotely.
+	// They are translated again, which now yields a GPU-local mapping.
+	retryReqs []mem.AccessReq
 }
 
 func (c *Comp) Tick() bool {
@@ -93,6 +97,17 @@ func (m *middleware) runPipeline() bool {
 }
 
 func (m *middleware) translate() bool {
+	// sbin_codex: a UVM retry is re-translated ahead of new top traffic so a
+	// stalled write is released as soon as its page becomes GPU-local.
+	if len(m.retryReqs) > 0 {
+		if m.retranslate(m.retryReqs[0]) {
+			m.retryReqs = m.retryReqs[1:]
+			return true
+		}
+
+		return false
+	}
+
 	item := m.topPort.PeekIncoming()
 	if item == nil {
 		return false
@@ -148,6 +163,47 @@ func (m *middleware) translate() bool {
 	)
 
 	m.topPort.RetrieveIncoming()
+
+	return true
+}
+
+// retranslate re-issues the translation of a request that must not use its
+// previous mapping. // sbin_codex
+func (m *middleware) retranslate(req mem.AccessReq) bool {
+	_, isWrite := req.(*mem.WriteReq)
+	transReq := vm.TranslationReqBuilder{}.
+		WithSrc(m.translationPort.AsRemote()).
+		WithDst(m.translationPortMapper.Find(req.GetAddress())).
+		WithPID(req.GetPID()).
+		WithVAddr(m.addrToPageID(req.GetAddress())).
+		WithDeviceID(m.deviceID).
+		WithIsWrite(isWrite).
+		Build()
+
+	if err := m.translationPort.Send(transReq); err != nil {
+		return false
+	}
+
+	m.transactions = append(m.transactions, &transaction{
+		incomingReqs:   []mem.AccessReq{req},
+		translationReq: transReq,
+	})
+
+	return true
+}
+
+// handleRemoteRetry moves a refused remote request back to the retry queue.
+// sbin_codex
+func (m *middleware) handleRemoteRetry(rsp *vm.UVMRemoteRetryRsp) bool {
+	if !m.isReqInBottomByID(rsp.RespondTo) {
+		m.remoteBottomPort.RetrieveIncoming()
+		return true
+	}
+
+	combo := m.findReqToBottomByID(rsp.RespondTo)
+	m.retryReqs = append(m.retryReqs, combo.reqFromTop)
+	m.removeReqToBottomByID(rsp.RespondTo)
+	m.remoteBottomPort.RetrieveIncoming()
 
 	return true
 }
@@ -236,6 +292,10 @@ func (m *middleware) respond() bool {
 	)
 
 	reqInBottom := false
+
+	if retry, ok := rsp.(*vm.UVMRemoteRetryRsp); ok { // sbin_codex
+		return m.handleRemoteRetry(retry)
+	}
 
 	switch rsp := rsp.(type) {
 	case *mem.DataReadyRsp:
@@ -374,6 +434,10 @@ func (m *middleware) handleCtrlRequest() bool {
 		return false
 	}
 
+	if drain, ok := req.(*vm.UVMDrainRangeReq); ok { // sbin_codex
+		return m.handleDrainRange(drain)
+	}
+
 	msg := req.(*mem.ControlMsg)
 
 	if msg.DiscardTransations {
@@ -383,6 +447,71 @@ func (m *middleware) handleCtrlRequest() bool {
 	}
 
 	panic("never")
+}
+
+// handleDrainRange answers once nothing this translator issued for the region
+// is still outstanding. Unrelated traffic keeps flowing while it waits.
+// sbin_codex
+func (m *middleware) handleDrainRange(req *vm.UVMDrainRangeReq) bool {
+	if m.hasOutstandingInRange(req.PID, req.StartVA, req.Size) {
+		return false
+	}
+
+	rsp := vm.NewUVMDrainRangeRsp(m.ctrlPort.AsRemote(), req.Src, req.ID)
+	if err := m.ctrlPort.Send(rsp); err != nil {
+		return false
+	}
+
+	m.ctrlPort.RetrieveIncoming()
+
+	return true
+}
+
+// hasOutstandingInRange reports whether a request that already holds a mapping
+// for the region is still travelling toward the caches.
+//
+// Only resolved requests count. One still waiting for a translation cannot
+// reach a cache without a mapping, and the driver has already parked the
+// region's page-table entries, so it will fault and wait in the GMMU replay
+// queue until this eviction completes. Waiting for it here would deadlock the
+// eviction against its own invalidation. // sbin_codex
+func (m *middleware) hasOutstandingInRange(
+	pid vm.PID,
+	startVA, size uint64,
+) bool {
+	for _, trans := range m.transactions {
+		if !trans.translationDone {
+			continue
+		}
+
+		for _, req := range trans.incomingReqs {
+			if inVARange(req, pid, startVA, size) {
+				return true
+			}
+		}
+	}
+
+	for _, entry := range m.inflightReqToBottom {
+		if inVARange(entry.reqFromTop, pid, startVA, size) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func inVARange(
+	req mem.AccessReq,
+	pid vm.PID,
+	startVA, size uint64,
+) bool {
+	if req.GetPID() != pid {
+		return false
+	}
+
+	addr := req.GetAddress()
+
+	return addr >= startVA && addr < startVA+size
 }
 
 func (m *middleware) handleFlushReq(

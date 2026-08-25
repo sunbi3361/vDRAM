@@ -344,7 +344,12 @@ func (m *tlbMiddleware) parseBottom() bool {
 	// if !ok { panic("failed to evict") }
 	// set.Update(wayID, page)
 	// set.Visit(wayID)
-	if m.pageAdmissionPredicate(page) { // sbin_codex: admission affects storage only.
+	mshrEntry := m.mshr.GetEntry(rsp.Page.PID, rsp.Page.VAddr)
+
+	// sbin_codex: a range invalidation that landed while this lookup was in
+	// flight makes the returned page stale. Answer the waiters but do not
+	// install the entry, so the next access re-walks the page table.
+	if m.pageAdmissionPredicate(page) && !mshrEntry.staleOnFill { // sbin_codex: admission affects storage only.
 		setID := m.vAddrToSetID(page.VAddr)
 		set := m.sets[setID]
 		wayID, ok := set.Evict()
@@ -355,7 +360,6 @@ func (m *tlbMiddleware) parseBottom() bool {
 		set.Visit(wayID)
 	}
 
-	mshrEntry := m.mshr.GetEntry(rsp.Page.PID, rsp.Page.VAddr)
 	m.respondingMSHREntry = mshrEntry
 	mshrEntry.page = page
 

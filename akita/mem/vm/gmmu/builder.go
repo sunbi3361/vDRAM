@@ -204,5 +204,10 @@ func (b Builder) createPorts(name string, c *Comp) {
 	if b.uvmServiceProvider != "" {
 		c.uvmPort = sim.NewPort(c, 4096, 4096, name+".UVMPort")
 		c.AddPort("UVM", c.uvmPort)
+
+		// sbin_codex: master port used to fan a UVM range invalidation out to
+		// every TLB level.
+		c.tlbCtrlPort = sim.NewPort(c, 4096, 4096, name+".TLBCtrlPort")
+		c.AddPort("TLBCtrl", c.tlbCtrlPort)
 	}
 }

@@ -42,8 +42,12 @@ type transaction struct {
 	msgID     string
 	state     transactionState
 
-	// sbin_codex: set when the transaction is parked on a UVM page fault.
-	waitingOnUVM bool
+	// Pre-edit field (commented per AGENTS.md convention). A parked fault used
+	// to keep occupying a page-walk slot:
+	// waitingOnUVM bool
+	//
+	// sbin_codex: parked faults now leave walkingTranslations entirely and live
+	// in replayQueue until the driver reports the region replayable.
 }
 
 // Comp is the default gmmu implementation. It is also an akita Component.
@@ -60,11 +64,25 @@ type Comp struct {
 	commandProcessor sim.Port // sbin_gmmu
 	LowModule        sim.Port
 
-	// sbin_codex: UVM demand-paging fault port. The GMMU forwards managed-page
-	// faults to the driver UVM manager and parks the translation until the
-	// driver replies with PageFaultRsp.
+	// sbin_codex: UVM control port. The GMMU forwards managed-page faults to
+	// the GPU Command Processor, which relays them to the host UVM driver over
+	// PCIe. The same port carries the driver's range invalidation and fault
+	// replay commands back.
 	uvmPort            sim.Port
 	UVMServiceProvider sim.RemotePort
+
+	// sbin_codex: the GMMU is the range-invalidation coordinator (spec 21.1).
+	// It broadcasts a 64KB invalidation to every TLB level that may cache the
+	// mapping and reports one aggregated completion.
+	tlbCtrlPort sim.Port
+	TLBs        []sim.RemotePort
+
+	pendingTLBInvalidate    *vm.UVMTLBInvalidateReq
+	pendingTLBInvalidateACK int
+
+	// sbin_codex: translations stalled on an unresolved UVM mapping. The GMMU
+	// owns them (spec 22); the driver only owns 64KB service transactions.
+	replayQueue []transaction
 
 	// accessCounters         map[uint64]uint64 // sbin_codex
 	// accessCounterNotified  map[uint64]bool   // sbin_codex
@@ -92,4 +110,10 @@ func (c *Comp) Tick() bool {
 // sbin_mcm
 func (c *Comp) SetCommandProcessor(cp sim.Port) {
 	c.commandProcessor = cp
+}
+
+// SetTLBs registers every TLB control port that the GMMU must reach when it
+// coordinates a UVM range invalidation. // sbin_codex
+func (c *Comp) SetTLBs(ports []sim.RemotePort) {
+	c.TLBs = ports
 }

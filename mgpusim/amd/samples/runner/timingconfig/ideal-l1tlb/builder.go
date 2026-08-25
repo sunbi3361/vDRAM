@@ -29,7 +29,7 @@ func MakeBuilder() Builder {
 	// return Builder{inner: r9nano.MakeBuilder().
 	// 	WithL1TLBFactory(newIdealTLB)}
 	return Builder{r9nano.MakeBuilder(). // sbin_codex
-		WithL1TLBFactory(newIdealTLB)}
+						WithL1TLBFactory(newIdealTLB)}
 }
 
 // newIdealTLB builds an ideal TLB component for the given name. // sbin_codex

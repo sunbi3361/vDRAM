@@ -119,6 +119,156 @@ func (b FlushRspBuilder) Build() *FlushRsp {
 	return r
 }
 
+// An InvalidateRangeReq asks the TLB to invalidate every entry of one PID whose
+// covered virtual page overlaps [StartVA, StartVA+Size). Unlike FlushReq it is
+// non-stalling: the TLB stays in its current state, keeps accepting
+// translations, and only the matching entries are dropped. UVM uses it for the
+// mandatory 64KB range invalidation. // sbin_codex
+type InvalidateRangeReq struct {
+	sim.MsgMeta
+
+	PID     vm.PID
+	StartVA uint64
+	Size    uint64
+}
+
+// Meta returns the meta data associated with the message. // sbin_codex
+func (r *InvalidateRangeReq) Meta() *sim.MsgMeta {
+	return &r.MsgMeta
+}
+
+// Clone returns a cloned InvalidateRangeReq with a different ID. // sbin_codex
+func (r *InvalidateRangeReq) Clone() sim.Msg {
+	cloneMsg := *r
+	cloneMsg.ID = sim.GetIDGenerator().Generate()
+
+	return &cloneMsg
+}
+
+// InvalidateRangeReqBuilder builds range invalidation requests. // sbin_codex
+type InvalidateRangeReqBuilder struct {
+	src, dst sim.RemotePort
+	pid      vm.PID
+	startVA  uint64
+	size     uint64
+}
+
+// WithSrc sets the source of the request to build. // sbin_codex
+func (b InvalidateRangeReqBuilder) WithSrc(
+	src sim.RemotePort,
+) InvalidateRangeReqBuilder {
+	b.src = src
+	return b
+}
+
+// WithDst sets the destination of the request to build. // sbin_codex
+func (b InvalidateRangeReqBuilder) WithDst(
+	dst sim.RemotePort,
+) InvalidateRangeReqBuilder {
+	b.dst = dst
+	return b
+}
+
+// WithPID sets the address space whose entries are invalidated. // sbin_codex
+func (b InvalidateRangeReqBuilder) WithPID(
+	pid vm.PID,
+) InvalidateRangeReqBuilder {
+	b.pid = pid
+	return b
+}
+
+// WithRange sets the virtual address range to invalidate. // sbin_codex
+func (b InvalidateRangeReqBuilder) WithRange(
+	startVA, size uint64,
+) InvalidateRangeReqBuilder {
+	b.startVA = startVA
+	b.size = size
+
+	return b
+}
+
+// Build creates a new InvalidateRangeReq. // sbin_codex
+func (b InvalidateRangeReqBuilder) Build() *InvalidateRangeReq {
+	r := &InvalidateRangeReq{}
+	r.ID = sim.GetIDGenerator().Generate()
+	r.Src = b.src
+	r.Dst = b.dst
+	r.PID = b.pid
+	r.StartVA = b.startVA
+	r.Size = b.size
+	r.TrafficClass = reflect.TypeOf(InvalidateRangeReq{}).String()
+
+	return r
+}
+
+// An InvalidateRangeRsp acknowledges a completed range invalidation.
+// sbin_codex
+type InvalidateRangeRsp struct {
+	sim.MsgMeta
+
+	RespondTo string
+}
+
+// Meta returns the meta data associated with the message. // sbin_codex
+func (r *InvalidateRangeRsp) Meta() *sim.MsgMeta {
+	return &r.MsgMeta
+}
+
+// Clone returns a cloned InvalidateRangeRsp with a different ID. // sbin_codex
+func (r *InvalidateRangeRsp) Clone() sim.Msg {
+	cloneMsg := *r
+	cloneMsg.ID = sim.GetIDGenerator().Generate()
+
+	return &cloneMsg
+}
+
+// GetRspTo returns the request ID that this response replies to. // sbin_codex
+func (r *InvalidateRangeRsp) GetRspTo() string {
+	return r.RespondTo
+}
+
+// InvalidateRangeRspBuilder builds range invalidation responses. // sbin_codex
+type InvalidateRangeRspBuilder struct {
+	src, dst  sim.RemotePort
+	respondTo string
+}
+
+// WithSrc sets the source of the response to build. // sbin_codex
+func (b InvalidateRangeRspBuilder) WithSrc(
+	src sim.RemotePort,
+) InvalidateRangeRspBuilder {
+	b.src = src
+	return b
+}
+
+// WithDst sets the destination of the response to build. // sbin_codex
+func (b InvalidateRangeRspBuilder) WithDst(
+	dst sim.RemotePort,
+) InvalidateRangeRspBuilder {
+	b.dst = dst
+	return b
+}
+
+// WithRspTo sets the request that this response replies to. // sbin_codex
+func (b InvalidateRangeRspBuilder) WithRspTo(
+	id string,
+) InvalidateRangeRspBuilder {
+	b.respondTo = id
+	return b
+}
+
+// Build creates a new InvalidateRangeRsp. // sbin_codex
+func (b InvalidateRangeRspBuilder) Build() *InvalidateRangeRsp {
+	r := &InvalidateRangeRsp{}
+	r.ID = sim.GetIDGenerator().Generate()
+	r.Src = b.src
+	r.Dst = b.dst
+	r.RespondTo = b.respondTo
+	r.TrafficClass = reflect.TypeOf(InvalidateRangeRsp{}).String()
+
+	return r
+}
+
 // A RestartReq is a request to TLB to start accepting requests and resume
 // operations
 type RestartReq struct {

@@ -137,6 +137,14 @@ func (b *Builder) plugL1ToL2(conn *directconnection.Comp) { // sbin_codex
 	b.l1AddressMapper.ModuleForOtherAddresses = b.rdmaEngine.RDMARequestInside.AsRemote()
 	conn.PlugIn(b.rdmaEngine.RDMARequestInside)
 	conn.PlugIn(b.rdmaEngine.RDMADataInside)
+
+	// sbin_codex: the UVM access counter sits on the remote egress between the
+	// address translators and the RDMA ingress, so both of its data ports live
+	// on this network.
+	if b.accessCounter != nil {
+		conn.PlugIn(b.accessCounter.Top)
+		conn.PlugIn(b.accessCounter.Bottom)
+	}
 	for _, l2 := range b.l2Caches {
 		conn.PlugIn(l2.GetPortByName("Top"))
 	}

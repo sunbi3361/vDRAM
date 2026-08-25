@@ -43,12 +43,33 @@ type Builder struct {
 	gpuPageTables     []vm.PageTable // sbin_codex: one isolated page table per GPU GMMU.
 
 	// sbin_codex: UVM demand-paging configuration.
-	uvmEnabled    bool
-	uvmIdeal      bool
-	uvmFaultUS    float64
-	uvmACThresh   uint64
-	uvmTBNExpand  float64
-	uvmTBNMaxSize uint64
+	uvmEnabled       bool
+	uvmIdeal         bool
+	uvmFaultUS       float64
+	uvmAccessCounter bool
+	uvmACThresh      uint64
+	uvmTBNExpand     float64
+	uvmTBNMaxSize    uint64
+	uvmNoPrefetch    bool
+	uvmNoEviction    bool
+	uvmGPUCapacity   uint64
+	uvmCapacityRatio float64
+	uvmOversubRatio  float64
+}
+
+// uvmCapacity resolves the GPU capacity UVM managed memory may occupy. An
+// explicit byte count wins over a ratio of the GPU DRAM; with neither, the
+// whole GPU memory is available and no oversubscription occurs. // sbin_codex
+func (b *Builder) uvmCapacity() uint64 {
+	if b.uvmGPUCapacity > 0 {
+		return b.uvmGPUCapacity
+	}
+
+	if b.uvmCapacityRatio > 0 {
+		return uint64(float64(b.gpuMemSize) * b.uvmCapacityRatio)
+	}
+
+	return b.gpuMemSize
 }
 
 // MakeBuilder creates a new Builder with default parameters.
@@ -94,21 +115,38 @@ func (b Builder) WithGPUType(gpuType string) Builder {
 }
 
 // WithUVM enables UVM demand-paged managed memory on the timing platform.
-func (b Builder) WithUVM(
-	enabled bool,
-	ideal bool,
-	faultLatencyUS float64,
-	acThreshold uint64,
-	tbnExpandRatio float64,
-	tbnMaxSize uint64,
-) Builder {
-	b.uvmEnabled = enabled
-	b.uvmIdeal = ideal
-	b.uvmFaultUS = faultLatencyUS
-	b.uvmACThresh = acThreshold
-	b.uvmTBNExpand = tbnExpandRatio
-	b.uvmTBNMaxSize = tbnMaxSize
+func (b Builder) WithUVM(config UVMPlatformConfig) Builder {
+	b.uvmEnabled = config.Enabled
+	b.uvmIdeal = config.Ideal
+	b.uvmFaultUS = config.FaultLatencyUS
+	b.uvmAccessCounter = config.AccessCounterEnabled
+	b.uvmACThresh = config.AccessCounterThreshold
+	b.uvmTBNExpand = config.TBNExpandRatio
+	b.uvmTBNMaxSize = config.TBNMaxFetchSize
+	b.uvmNoPrefetch = config.PrefetchDisabled
+	b.uvmNoEviction = config.EvictionDisabled
+	b.uvmGPUCapacity = config.GPUCapacityBytes
+	b.uvmCapacityRatio = config.GPUCapacityRatio
+	b.uvmOversubRatio = config.OversubscriptionRatio
+
 	return b
+}
+
+// UVMPlatformConfig carries the UVM knobs from the runner into the platform
+// builder. // sbin_codex
+type UVMPlatformConfig struct {
+	Enabled                bool
+	Ideal                  bool
+	FaultLatencyUS         float64
+	AccessCounterEnabled   bool
+	AccessCounterThreshold uint64
+	TBNExpandRatio         float64
+	TBNMaxFetchSize        uint64
+	PrefetchDisabled       bool
+	EvictionDisabled       bool
+	GPUCapacityBytes       uint64
+	GPUCapacityRatio       float64
+	OversubscriptionRatio  float64
 }
 
 // Build builds the hardware platform.
@@ -209,10 +247,14 @@ func (b *Builder) buildGPUDriver(
 			Enabled:                true,
 			Ideal:                  b.uvmIdeal,
 			FaultLatencyUS:         b.uvmFaultUS,
+			AccessCounterEnabled:   b.uvmAccessCounter, // sbin_codex
 			AccessCounterThreshold: b.uvmACThresh,
 			TBNExpandRatio:         b.uvmTBNExpand,
 			TBNMaxFetchSize:        b.uvmTBNMaxSize,
-			GPUCapacityBytes:       b.gpuMemSize,
+			PrefetchDisabled:       b.uvmNoPrefetch,   // sbin_codex
+			EvictionDisabled:       b.uvmNoEviction,   // sbin_codex
+			GPUCapacityBytes:       b.uvmCapacity(),   // sbin_codex
+			OversubscriptionRatio:  b.uvmOversubRatio, // sbin_codex
 		})
 	}
 
@@ -301,7 +343,10 @@ func (b *Builder) createConnection(
 		mmuComponent.GetPortByName("Migration"),
 		mmuComponent.GetPortByName("Top"),
 	}
-	if b.uvmEnabled && !b.uvmIdeal { // sbin_codex: UVM faults over PCIe in normal mode.
+	// sbin_codex: in ideal mode the whole UVM control channel is carried by a
+	// zero-latency direct connection instead of PCIe (spec 1.2), so the driver
+	// UVM port must stay off the root complex.
+	if b.uvmEnabled && !b.uvmIdeal {
 		rootComplexPorts = append(rootComplexPorts, gpuDriver.GetPortByName("UVM"))
 	}
 	rootComplexPorts = append(rootComplexPorts, b.cpuRemoteTop) // sbin_codex
@@ -336,10 +381,10 @@ func (b *Builder) createGPU(
 		WithRDMAAddressMapper(b.rdmaAddressMapper).
 		WithDriverPort(gpuDriver.GetPortByName("GPU")). // sbin_codex
 		WithPageTable(b.gpuPageTables[index-1])         // sbin_codex: bind GPU N to its driver-managed table.
-	if b.uvmEnabled { // sbin_codex: GMMU faults route to the driver UVM manager.
-		builder = builder.WithUVMServiceProvider(
-			gpuDriver.GetPortByName("UVM").AsRemote())
-		// builder = builder.WithAccessCounterThreshold(b.uvmACThresh) // sbin_codex
+	if b.uvmEnabled { // sbin_codex: the GPU UVM endpoint answers to the driver.
+		builder = builder.
+			WithUVMServiceProvider(gpuDriver.GetPortByName("UVM").AsRemote()).
+			WithAccessCounterThreshold(b.uvmACThresh)
 	}
 	gpu := builder.Build(name)
 
@@ -350,6 +395,10 @@ func (b *Builder) createGPU(
 			DRAMSize: b.gpuMemSize,
 		},
 	)
+
+	if b.uvmEnabled { // sbin_codex: the CP is the GPU-side UVM endpoint.
+		gpuDriver.RegisterUVMGPU(gpu.GetPortByName("UVM").AsRemote())
+	}
 	// gpu.CommandProcessor.Driver = gpuDriver.GetPortByName("GPU")
 
 	b.configRDMAEngine(gpu)

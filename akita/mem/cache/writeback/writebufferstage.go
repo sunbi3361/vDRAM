@@ -381,6 +381,10 @@ func (wb *writeBufferStage) processWriteDoneRsp(
 			wb.cache.bottomPort.RetrieveIncoming()
 			tracing.TraceReqFinalize(e.evictionWriteReq, wb.cache)
 
+			if e.rangeFlushID != "" { // sbin_codex
+				wb.cache.flusher.rangeEvictionCompleted()
+			}
+
 			// log.Printf("%.10f, %s, wb write to bottom，
 			//  %s, %04X, %04X, (%d, %d), %v\n",
 			//  now, wb.cache.Name(),

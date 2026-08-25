@@ -46,8 +46,8 @@ func MakeBuilder() Builder {
 	// 	WithDataPathTopology(r9nano.NewVirtualDataPathTopology()).
 	// 	WithMemoryTopology(r9nano.NewVirtualMemoryTopology())}
 	return Builder{r9nano.MakeBuilder(). // sbin_codex
-		WithDataPathTopology(r9nano.NewVirtualDataPathTopology()).
-		WithMemoryTopology(r9nano.NewVirtualMemoryTopology())}
+						WithDataPathTopology(r9nano.NewVirtualDataPathTopology()).
+						WithMemoryTopology(r9nano.NewVirtualMemoryTopology())}
 }
 
 // The four chain setters MUST return Builder (the wrapper type) so the fluent

@@ -17,6 +17,8 @@ type controlStage struct {
 	bankStages   []*bankStage
 
 	currFlushReq *cache.FlushReq
+
+	currRangeFlushReq *cache.RangeFlushReq // sbin_codex
 }
 
 func (s *controlStage) Tick() bool {
@@ -24,6 +26,7 @@ func (s *controlStage) Tick() bool {
 
 	madeProgress = s.processNewRequest() || madeProgress
 	madeProgress = s.processCurrentFlush() || madeProgress
+	madeProgress = s.processCurrentRangeFlush() || madeProgress // sbin_codex
 
 	return madeProgress
 }
@@ -99,6 +102,8 @@ func (s *controlStage) processNewRequest() bool {
 	switch req := req.(type) {
 	case *cache.FlushReq:
 		return s.startCacheFlush(req)
+	case *cache.RangeFlushReq: // sbin_codex
+		return s.startRangeFlush(req)
 	case *cache.RestartReq:
 		return s.doCacheRestart(req)
 	default:

@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 	// "sync" // sbin_codex: removed - instructionCountTracer no longer exists.
@@ -9,7 +10,8 @@ import (
 	"github.com/sarchlab/akita/v4/sim"
 	"github.com/sarchlab/akita/v4/simulation"
 	"github.com/sarchlab/akita/v4/tracing"
-	"github.com/sarchlab/mgpusim/v4/amd/driver" // sbin_codex: integrated from extendedreport.go.
+	"github.com/sarchlab/mgpusim/v4/amd/driver"               // sbin_codex: integrated from extendedreport.go.
+	"github.com/sarchlab/mgpusim/v4/amd/timing/accesscounter" // sbin_codex
 	"github.com/sarchlab/mgpusim/v4/amd/timing/cu"
 	"github.com/sarchlab/mgpusim/v4/amd/timing/rdma"
 )
@@ -96,6 +98,9 @@ type reporter struct {
 	ReportCPIStack             bool
 
 	driver *driver.Driver // sbin_codex: UVM statistics source.
+	// accessCounters are the GPU-side UVM remote-access counters. They own the
+	// remote-access and write-stall statistics. // sbin_codex
+	accessCounters []*accesscounter.Comp
 }
 
 func newReporter(s *simulation.Simulation) *reporter {
@@ -112,7 +117,44 @@ func newReporter(s *simulation.Simulation) *reporter {
 		r.driver = c.(*driver.Driver)
 	}
 
+	r.collectAccessCounters(s) // sbin_codex
+
 	return r
+}
+
+// collectAccessCounters finds every GPU-side UVM access counter. // sbin_codex
+func (r *reporter) collectAccessCounters(s *simulation.Simulation) {
+	for i := 1; ; i++ {
+		name := fmt.Sprintf("GPU[%d].UVMAccessCounter", i)
+
+		c := s.GetComponentByName(name)
+		if c == nil {
+			return
+		}
+
+		counter, ok := c.(*accesscounter.Comp)
+		if !ok {
+			return
+		}
+
+		r.accessCounters = append(r.accessCounters, counter)
+	}
+}
+
+// accessCounterStats aggregates the GPU-side counters of the platform.
+// sbin_codex
+func (r *reporter) accessCounterStats() accesscounter.Stats {
+	var total accesscounter.Stats
+
+	for _, counter := range r.accessCounters {
+		snapshot := counter.Snapshot()
+		total.RemoteAccesses += snapshot.RemoteAccesses
+		total.Notifications += snapshot.Notifications
+		total.StalledWrites += snapshot.StalledWrites
+		total.ReleasedWrites += snapshot.ReleasedWrites
+	}
+
+	return total
 }
 
 func (r *reporter) injectTracers(s *simulation.Simulation) {
@@ -406,11 +448,18 @@ func (r *reporter) report() {
 	r.reportUVM()        // sbin_codex: UVM demand-paging statistics.
 }
 
+// reportUVM emits the UVM counter set required by spec 27. Every counter has
+// the same definition in normal and in ideal mode. // sbin_codex
+//
+//nolint:funlen // one flat table of required counters reads better than splits.
 func (r *reporter) reportUVM() {
 	if r.driver == nil || !r.driver.UVMEnabled() {
 		return
 	}
+
 	stats := r.driver.UVMStats()
+	counters := r.accessCounterStats() // sbin_codex
+
 	rows := []struct {
 		what string
 		val  float64
@@ -418,31 +467,84 @@ func (r *reporter) reportUVM() {
 	}{
 		{"uvm_enabled", boolToFloat(stats.Enabled), ""},
 		{"uvm_ideal", boolToFloat(stats.Ideal), ""},
-		{"uvm_fault_requests", float64(stats.PageFaultRequests), ""},
-		{"uvm_unique_page_faults", float64(stats.UniquePageFaults), ""},
-		{"uvm_coalesced_fault_requests", float64(stats.CoalescedFaultReqs), ""},
-		{"uvm_tbn_fetches", float64(stats.TBNFetches), ""},
-		{"uvm_tbn_64kb_fetches", float64(stats.TBN64KBFetches), ""},
-		{"uvm_tbn_larger_fetches", float64(stats.TBNLargerFetches), ""},
-		{"uvm_demand_migrated_pages", float64(stats.DemandMigPages), ""},
-		{"uvm_prefetched_pages", float64(stats.PrefetchPages), ""},
-		{"uvm_cpu_to_gpu_migrations", float64(stats.CPUToGPUMigrations), ""},
-		{"uvm_gpu_to_cpu_migrations", float64(stats.GPUToCPUMigrations), ""},
+
+		{"uvm_raw_page_fault_count", float64(stats.RawPageFaults), ""},
+		{"uvm_unique_fault_service_count", float64(stats.UniqueFaultServices), ""},
+		{"uvm_coalesced_page_fault_count", float64(stats.CoalescedFaults), ""},
+
+		{"uvm_num_tbn_fault_events", float64(stats.TBNFaultEvents), ""},
+		{"uvm_num_tbn_64kb_selections", float64(stats.TBNSelections[0]), ""},
+		{"uvm_num_tbn_128kb_expansions", float64(stats.TBNSelections[1]), ""},
+		{"uvm_num_tbn_256kb_expansions", float64(stats.TBNSelections[2]), ""},
+		{"uvm_num_tbn_512kb_expansions", float64(stats.TBNSelections[3]), ""},
+		{"uvm_num_tbn_1mb_expansions", float64(stats.TBNSelections[4]), ""},
+		{"uvm_num_tbn_2mb_expansions", float64(stats.TBNSelections[5]), ""},
+		{"uvm_tbn_selected_bytes", float64(stats.TBNSelectedBytes), ""},
+		{"uvm_tbn_demand_bytes", float64(stats.TBNDemandBytes), ""},
+		{"uvm_tbn_prefetch_candidate_bytes",
+			float64(stats.TBNPrefetchCandidateByte), ""},
+		{"uvm_tbn_actual_prefetch_dma_bytes",
+			float64(stats.TBNActualPrefetchBytes), ""},
+		{"uvm_tbn_prefetch_suppressed_resident_bytes",
+			float64(stats.TBNSuppressedResident), ""},
+		{"uvm_tbn_prefetch_suppressed_inflight_bytes",
+			float64(stats.TBNSuppressedInflight), ""},
+
+		{"uvm_num_cpu_to_gpu_migrations", float64(stats.CPUToGPUMigrations), ""},
+		{"uvm_bytes_cpu_to_gpu", float64(stats.BytesCPUToGPU), ""},
+		{"uvm_num_gpu_to_cpu_migrations", float64(stats.GPUToCPUMigrations), ""},
+		{"uvm_bytes_gpu_to_cpu", float64(stats.BytesGPUToCPU), ""},
+		{"uvm_num_demand_migrations", float64(stats.DemandMigrations), ""},
+		{"uvm_num_access_counter_migrations",
+			float64(stats.AccessCounterMigrations), ""},
+		{"uvm_bytes_access_counter_migrated",
+			float64(stats.BytesAccessCounterMigrated), ""},
+		{"uvm_num_write_triggered_migrations",
+			float64(counters.StalledWrites), ""},
 		{"uvm_migrated_pages", float64(stats.MigratedPages), ""},
 		{"uvm_migrated_bytes", float64(stats.MigratedBytes), ""},
-		{"uvm_evictions", float64(stats.Evictions), ""},
-		{"uvm_evicted_pages", float64(stats.EvictedPages), ""},
-		{"uvm_evicted_bytes", float64(stats.EvictedBytes), ""},
 		{"uvm_repeated_migrations", float64(stats.RepeatedMigrations), ""},
-		{"uvm_remote_accesses", float64(stats.RemoteAccesses), ""},
-		{"uvm_access_counter_notifications", float64(stats.AccessCounterNotif), ""},
-		{"uvm_access_counter_triggered_migrations", float64(stats.AccessCounterMigr), ""},
+
+		{"uvm_num_evictions", float64(stats.Evictions), ""},
+		{"uvm_evicted_pages", float64(stats.EvictedPages), ""},
+		{"uvm_bytes_evicted", float64(stats.EvictedBytes), ""},
+		{"uvm_num_pre_evictions", float64(stats.PreEvictions), ""},
+		{"uvm_bytes_pre_evicted", float64(stats.PreEvictedBytes), ""},
+		{"uvm_max_concurrent_pre_evictions",
+			float64(stats.MaxConcurrentPreEvictions), ""},
+		{"uvm_num_pre_evictions_overlapped_with_h2d",
+			float64(stats.PreEvictionsOverlappedH2D), ""},
+		{"uvm_migration_wait_for_capacity",
+			float64(stats.MigrationWaitForCapacity), "second"},
+
+		{"uvm_num_remote_accesses", float64(counters.RemoteAccesses), ""},
+		{"uvm_num_remote_writes_detected", float64(counters.StalledWrites), ""},
+		{"uvm_num_write_replays", float64(counters.ReleasedWrites), ""},
+		{"uvm_num_access_counter_notifications",
+			float64(stats.AccessCounterNotify), ""},
+		{"uvm_num_access_counter_suppressed",
+			float64(stats.AccessCounterSuppressed), ""},
+		{"uvm_num_access_counter_resets", float64(stats.AccessCounterResets), ""},
+
+		{"uvm_num_remote_pte_installs", float64(stats.RemotePTEInstalls), ""},
+		{"uvm_num_local_pte_installs", float64(stats.LocalPTEInstalls), ""},
+		{"uvm_num_uvm_tlb_range_invalidations",
+			float64(stats.TLBRangeInvalidations), ""},
+		{"uvm_num_uvm_cache_range_flushes",
+			float64(stats.CacheRangeFlushes), ""},
+		{"uvm_num_fault_replays", float64(stats.FaultReplays), ""},
+		{"uvm_num_refused_migrations", float64(stats.RefusedMigrations), ""},
+		{"uvm_num_remote_writes_performed", float64(counters.RefusedWrites), ""},
+
 		{"uvm_gpu_resident_pages_peak", float64(stats.GPUResidentPagesPeak), ""},
 		{"uvm_gpu_resident_bytes_peak", float64(stats.GPUResidentBytesPeak), ""},
-		{"uvm_fault_handling_time", float64(stats.FaultHandlingTime), "second"},
+
+		{"uvm_fault_service_latency_total",
+			float64(stats.FaultHandlingTime), "second"},
 		{"uvm_migration_time", float64(stats.MigrationTime), "second"},
 		{"uvm_eviction_time", float64(stats.EvictionTime), "second"},
 	}
+
 	for _, row := range rows {
 		r.dataRecorder.InsertData(tableName, metric{
 			Location: "UVM",

@@ -1,41 +1,28 @@
 package timingconfig
 
+// sbin_codex: host memory as seen by the GPU over PCIe.
+//
+// Pre-edit design (commented per AGENTS.md convention): the UVM access counter
+// used to live here, on the CPU side of the root complex, and notified the
+// driver directly. The specification places the counter on the GPU, right
+// after translation identifies a request as CPU-remote, and routes its
+// notifications through the Command Processor (spec 14, 16). The CPU endpoint
+// is therefore a plain memory controller again.
+
 import (
 	"github.com/sarchlab/akita/v4/mem/idealmemcontroller"
 	"github.com/sarchlab/akita/v4/sim"
-	"github.com/sarchlab/akita/v4/sim/directconnection"
 	"github.com/sarchlab/mgpusim/v4/amd/driver"
-	"github.com/sarchlab/mgpusim/v4/amd/timing/accesscounter"
 )
 
-func (b *Builder) buildCPURemoteMemory(gpuDriver *driver.Driver) { // sbin_codex
+func (b *Builder) buildCPURemoteMemory(_ *driver.Driver) {
 	cpuMemory := idealmemcontroller.MakeBuilder().
 		WithEngine(b.simulation.GetEngine()).
 		WithFreq(sim.GHz).
 		WithStorage(b.globalStorage).
 		Build("CPU.Memory")
-	counterBuilder := accesscounter.MakeBuilder().
-		WithEngine(b.simulation.GetEngine()).
-		WithFreq(sim.GHz).
-		WithThreshold(b.uvmACThresh).
-		WithBottomDestination(cpuMemory.GetPortByName("Top").AsRemote())
-	if b.uvmEnabled {
-		counterBuilder = counterBuilder.WithDriverDestination(
-			gpuDriver.GetPortByName("UVM").AsRemote())
-	}
-	counter := counterBuilder.Build("CPU.AccessCounter")
-	if b.uvmEnabled { // sbin_codex: resolve the driver/counter build cycle.
-		gpuDriver.SetAccessCounterResetDestination(counter.Top.AsRemote())
-	}
-	connection := directconnection.MakeBuilder().
-		WithEngine(b.simulation.GetEngine()).
-		WithFreq(sim.GHz).
-		Build("CPU.AccessCounterToMemory")
-	connection.PlugIn(counter.Bottom)
-	connection.PlugIn(cpuMemory.GetPortByName("Top"))
 
 	b.simulation.RegisterComponent(cpuMemory)
-	b.simulation.RegisterComponent(counter)
-	b.simulation.RegisterComponent(connection)
-	b.cpuRemoteTop = counter.Top
+
+	b.cpuRemoteTop = cpuMemory.GetPortByName("Top")
 }

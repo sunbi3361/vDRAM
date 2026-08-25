@@ -30,6 +30,7 @@ type transaction struct {
 	read              *mem.ReadReq
 	write             *mem.WriteReq
 	flush             *cache.FlushReq
+	rangeFlush        *cache.RangeFlushReq // sbin_codex
 	block             *cache.Block
 	victim            *cache.Block
 	fetchPID          vm.PID
@@ -42,6 +43,11 @@ type transaction struct {
 	evictingDirtyMask []bool
 	evictionWriteReq  *mem.WriteReq
 	mshrEntry         *cache.MSHREntry
+
+	// rangeFlushID tags an eviction created by a UVM region flush so the
+	// flusher can tell when its own write-backs have reached memory.
+	// sbin_codex
+	rangeFlushID string
 }
 
 func (t transaction) accessReq() mem.AccessReq {
@@ -63,6 +69,10 @@ func (t transaction) req() sim.Msg {
 
 	if t.flush != nil {
 		return t.flush
+	}
+
+	if t.rangeFlush != nil { // sbin_codex
+		return t.rangeFlush
 	}
 
 	return nil

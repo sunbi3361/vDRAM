@@ -14,6 +14,7 @@ type ctrlMiddleware struct {
 func (m *ctrlMiddleware) Tick() bool {
 	madeProgress := false
 	madeProgress = m.handleIncomingCommands() || madeProgress
+	madeProgress = m.handleUVMControl() || madeProgress // sbin_codex
 	return madeProgress
 }
 

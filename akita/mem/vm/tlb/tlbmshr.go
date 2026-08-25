@@ -12,6 +12,12 @@ type mshrEntry struct {
 	Requests    []*vm.TranslationReq
 	reqToBottom *vm.TranslationReq
 	page        vm.Page
+
+	// staleOnFill marks a lookup that a range invalidation raced with. The
+	// waiting requests are still answered, but the returned page is not
+	// installed in the TLB so the next access re-walks the page table.
+	// sbin_codex
+	staleOnFill bool
 }
 
 // newMSHREntry returns a new MSHR entry object

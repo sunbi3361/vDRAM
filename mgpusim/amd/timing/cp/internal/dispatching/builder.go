@@ -11,12 +11,12 @@ import (
 
 // A Builder can build dispatchers
 type Builder struct {
-	cp                           tracing.NamedHookable
-	cuResourcePool               resource.CUResourcePool
-	alg                          string
-	respondingPort               sim.Port
-	dispatchingPort              sim.Port
-	monitor                      *monitoring.Monitor
+	cp                             tracing.NamedHookable
+	cuResourcePool                 resource.CUResourcePool
+	alg                            string
+	respondingPort                 sim.Port
+	dispatchingPort                sim.Port
+	monitor                        *monitoring.Monitor
 	constantKernelOverhead         int
 	constantKernelLaunchOverhead   int
 	subsequentKernelLaunchOverhead int
@@ -26,7 +26,7 @@ type Builder struct {
 // MakeBuilder creates a builder with default dispatching configurations.
 func MakeBuilder() Builder {
 	b := Builder{
-		alg:                           "partition",
+		alg:                            "partition",
 		constantKernelOverhead:         3600,
 		subsequentKernelLaunchOverhead: 1800,
 		wgScalingThreshold:             128,
@@ -118,7 +118,7 @@ func (b Builder) Build(name string) Dispatcher {
 		inflightWGs:     make(map[string]dispatchLocation),
 		originalReqs:    make(map[string]*protocol.MapWGReq),
 		latencyTable: []int{
-			0,           // 0 WFs
+			0,          // 0 WFs
 			0, 0, 0, 0, // 1-4 WFs
 			0, 0, 0, 0, // 5-8 WFs
 			0, 0, 0, 0, // 9-12 WFs

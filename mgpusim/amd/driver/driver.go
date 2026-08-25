@@ -67,6 +67,9 @@ type Driver struct {
 	RemotePMCPorts []sim.Port
 
 	uvm *UVMManager // sbin_codex: UVM demand-paging manager (nil when disabled).
+	// uvmGPUPorts holds the Command Processor UVM endpoint of every GPU, in
+	// device order. Device 1 is index 0. // sbin_codex
+	uvmGPUPorts []sim.RemotePort
 
 	codeObjGPUAddrs map[*insts.KernelCodeObject]Ptr
 }
@@ -176,8 +179,13 @@ func (d *Driver) Tick() bool {
 
 	// madeProgress = d.sendToGPUs() || madeProgress // sbin_codex
 	madeProgress = d.sendPendingAccessCounterReset() || d.sendToGPUs() || madeProgress // sbin_codex
+	madeProgress = d.sendUVMControl() || madeProgress                                  // sbin_codex
 	madeProgress = d.sendToMMU() || madeProgress
 	madeProgress = d.sendMigrationReqToCP() || madeProgress
+
+	// sbin_codex: UVM migration DMA responses must be claimed before the
+	// user-facing copy middleware inspects them.
+	madeProgress = d.processUVMDMAReturn() || madeProgress
 
 	for _, mw := range d.middlewares {
 		madeProgress = mw.Tick() || madeProgress
@@ -189,32 +197,6 @@ func (d *Driver) Tick() bool {
 	madeProgress = d.parseFromUVM() || madeProgress
 
 	return madeProgress
-}
-
-// parseFromUVM retrieves managed-page fault requests from GPU GMMUs and feeds
-// them into the UVM manager.
-func (d *Driver) parseFromUVM() bool {
-	if d.uvmPort == nil || d.uvm == nil {
-		return false
-	}
-	req := d.uvmPort.RetrieveIncoming()
-	if req == nil {
-		return false
-	}
-	switch req := req.(type) {
-	case *vm.PageFaultReq:
-		d.processUVMFaultReq(req)
-		return true
-	case *vm.AccessCounterNotifyReq: // sbin_codex: PCIe counter threshold.
-		if d.uvm != nil {
-			d.uvm.onAccessCounterNotify(req.PID, req.RegionBase, req.DeviceID)
-		}
-		return true
-	default:
-		log.Panicf("Driver cannot handle UVM request of type %s",
-			reflect.TypeOf(req))
-	}
-	return false
 }
 
 func (d *Driver) sendToGPUs() bool {
@@ -396,6 +378,10 @@ func (d *Driver) processLaunchKernelCommand(
 
 	req.Packet = cmd.Packet
 	req.PacketAddress = uint64(cmd.DPacket)
+
+	// sbin_codex: access counters are reset at every kernel boundary, so
+	// remote accesses never accumulate across kernels (spec 14.2).
+	d.resetUVMAccessCounters(queue.Context.pid, uint64(queue.GPUID))
 
 	queue.IsRunning = true
 	cmd.Reqs = append(cmd.Reqs, req)
@@ -626,11 +612,13 @@ func (d *Driver) initiateRDMADrain() bool {
 func (d *Driver) processRDMADrainRsp(
 	req *protocol.RDMADrainRspToDriver,
 ) bool {
-	if d.uvm != nil && d.uvm.hasPendingMigrationDrain() { // sbin_codex
-		log.Printf("DEBUG Driver received UVM RDMA drain response")
-		d.uvm.processMigrationDrainComplete() // sbin_codex
-		return true
-	}
+	// Pre-edit code (commented per AGENTS.md convention). UVM migration used
+	// to borrow this GPU-wide drain; it is now range-scoped and never gets
+	// here (spec 21):
+	// if d.uvm != nil && d.uvm.hasPendingMigrationDrain() {
+	// 	d.uvm.processMigrationDrainComplete()
+	// 	return true
+	// }
 
 	d.numRDMADrainACK--
 
@@ -677,19 +665,17 @@ func (d *Driver) sendShootDownReqs() bool {
 func (d *Driver) processShootdownCompleteRsp(
 	req *protocol.ShootDownCompleteRsp,
 ) bool {
-	if d.uvm != nil && d.uvm.hasPendingMigrationQuiescence() { // sbin_codex
-		log.Printf("DEBUG Driver received UVM shootdown response")
-		d.uvm.finalizeMigrationQuiescence() // sbin_codex
-		return true
-	}
-
-	// sbin_codex: UVM eviction shootdown ACK: finalize the reserved evictions
-	// and resume the pending migration. The response was already retrieved by
-	// processReturnReq.
-	if d.uvm != nil && d.uvm.hasPendingEvictions() {
-		d.uvm.finalizeEviction()
-		return true
-	}
+	// Pre-edit code (commented per AGENTS.md convention). UVM migration and
+	// eviction used to reuse the GPU-wide shootdown; both now use 64KB
+	// range-scoped invalidation (spec 19, 21):
+	// if d.uvm != nil && d.uvm.hasPendingMigrationQuiescence() {
+	// 	d.uvm.finalizeMigrationQuiescence()
+	// 	return true
+	// }
+	// if d.uvm != nil && d.uvm.hasPendingEvictions() {
+	// 	d.uvm.finalizeEviction()
+	// 	return true
+	// }
 
 	d.numShootDownACK--
 
@@ -860,11 +846,12 @@ func (d *Driver) preparePageMigrationRspToMMU() {
 func (d *Driver) handleGPURestartRsp(
 	req *protocol.GPURestartRsp,
 ) bool {
-	if d.uvm != nil && d.uvm.hasPendingMigrationGPURestart() { // sbin_codex
-		log.Printf("DEBUG Driver received UVM GPU restart response")
-		d.uvm.processMigrationGPURestartComplete() // sbin_codex
-		return true
-	}
+	// Pre-edit code (commented per AGENTS.md convention). No UVM transition
+	// restarts the GPU any more (spec 21):
+	// if d.uvm != nil && d.uvm.hasPendingMigrationGPURestart() {
+	// 	d.uvm.processMigrationGPURestartComplete()
+	// 	return true
+	// }
 
 	d.numRestartACK--
 	if d.numRestartACK == 0 {
@@ -885,11 +872,11 @@ func (d *Driver) prepareRDMARestartReqs() {
 func (d *Driver) processRDMARestartRspToDriver(
 	rsp *protocol.RDMARestartRspToDriver,
 ) bool {
-	if d.uvm != nil && d.uvm.hasPendingMigrationRDMARestart() { // sbin_codex
-		log.Printf("DEBUG Driver received UVM RDMA restart response")
-		d.uvm.processMigrationRDMARestartComplete() // sbin_codex
-		return true
-	}
+	// Pre-edit code (commented per AGENTS.md convention):
+	// if d.uvm != nil && d.uvm.hasPendingMigrationRDMARestart() {
+	// 	d.uvm.processMigrationRDMARestartComplete()
+	// 	return true
+	// }
 
 	d.numRDMARestartACK--
 

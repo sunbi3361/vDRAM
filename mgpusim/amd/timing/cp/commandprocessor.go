@@ -38,6 +38,19 @@ type CommandProcessor struct {
 	ToRDMA               sim.Port
 	ToPMC                sim.Port
 
+	// sbin_codex: UVM control plane. ToUVMDriver faces the host UVM driver
+	// across PCIe; ToUVMInternal faces the GPU-internal UVM endpoints.
+	ToUVMDriver   sim.Port
+	ToUVMInternal sim.Port
+
+	GMMU          sim.RemotePort
+	AccessCounter sim.RemotePort
+	UVMDriverPort sim.RemotePort
+	// UVMTranslators are every address translator that must drain a region
+	// before its cache lines are written back. Kept separate from the legacy
+	// shootdown groups so the non-UVM path is untouched. // sbin_codex
+	UVMTranslators []sim.RemotePort
+
 	currShootdownRequest *protocol.ShootDownCommand
 	currFlushRequest     *protocol.FlushReq
 
@@ -48,6 +61,13 @@ type CommandProcessor struct {
 	numTLBAck                      uint64
 	numCacheACK                    uint64
 
+	currCacheRangeFlush   *protocol.UVMCacheRangeFlushReq // sbin_codex
+	numCacheRangeFlushAck uint64                          // sbin_codex
+	numUVMDrainAck        uint64                          // sbin_codex
+	cacheFlushIssued      bool                            // sbin_codex
+	currRemoteDrain       *protocol.UVMRemoteDrainReq     // sbin_codex
+	remoteDrainID         string                          // sbin_codex
+
 	shootDownInProcess bool
 
 	bottomKernelLaunchReqIDToTopReqMap map[string]*protocol.LaunchKernelReq
@@ -56,6 +76,7 @@ type CommandProcessor struct {
 
 	middleware     *cpMiddleware
 	ctrlMiddleware *ctrlMiddleware
+	uvmMiddleware  *uvmMiddleware // sbin_codex
 }
 
 // TranslatorControlGroup is a lifecycle phase's ordered translator controls. // sbin_codex
@@ -87,6 +108,7 @@ func (p *CommandProcessor) Tick() bool {
 	madeProgress = p.tickDispatchers() || madeProgress
 	madeProgress = p.processReqFromDriver() || madeProgress
 	madeProgress = p.processRspFromInternal() || madeProgress
+	madeProgress = p.uvmMiddleware.Tick() || madeProgress // sbin_codex
 
 	return madeProgress
 }

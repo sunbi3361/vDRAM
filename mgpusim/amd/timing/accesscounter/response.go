@@ -7,25 +7,33 @@ import (
 
 func (c *Comp) processBottomResponse() bool {
 	message := c.Bottom.PeekIncoming()
+
 	response, ok := message.(mem.AccessRsp)
 	if message == nil || !ok {
 		return false
 	}
+
 	trans, found := c.transactions[response.GetRspTo()]
 	if !found {
 		c.Bottom.RetrieveIncoming()
 		return true
 	}
+
 	forwarded := c.cloneResponse(response, trans.originalRequest)
 	if sendError := c.Top.Send(forwarded); sendError != nil {
 		return false
 	}
+
 	c.Bottom.RetrieveIncoming()
 	delete(c.transactions, response.GetRspTo())
+
 	return true
 }
 
-func (c *Comp) cloneResponse(response mem.AccessRsp, original sim.Msg) mem.AccessRsp {
+func (c *Comp) cloneResponse(
+	response mem.AccessRsp,
+	original sim.Msg,
+) mem.AccessRsp {
 	switch response := response.(type) {
 	case *mem.DataReadyRsp:
 		return mem.DataReadyRspBuilder{}.

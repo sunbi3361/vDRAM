@@ -285,6 +285,10 @@ type PageFaultReq struct {
 	PID      PID
 	VAddr    uint64
 	DeviceID uint64
+	// IsWrite marks a fault raised by a write access. A write to a
+	// remotely-mapped managed page must migrate immediately instead of being
+	// committed to host memory. // sbin_codex
+	IsWrite bool
 	// WaitRequestID is the ID of the original TranslationReq being serviced.
 	WaitRequestID string
 }
@@ -387,6 +391,10 @@ type AccessCounterResetReq struct {
 	PID        PID
 	RegionBase uint64
 	DeviceID   uint64
+	// ResetAll clears every counter of the GPU instead of one region. The
+	// driver issues it at a kernel boundary so remote accesses never
+	// accumulate across kernels. // sbin_codex
+	ResetAll bool
 }
 
 // Meta returns the meta data associated with the message.
