@@ -94,24 +94,29 @@ func makeRegionGPUResidentViaFault(
 		t.Fatal("fault tick did not complete the migration")
 	}
 	reqs = drainRequests(d)
+	// sbin_codex (todo 25): §21.2 — an AC-off fault migration is
+	// INVALID -> GPU_LOCAL, which needs no TLB invalidation; only the AC-on
+	// (REMOTE -> GPU_LOCAL) path invalidates the cached REMOTE translation.
+	if d.uvm.config.AccessCounter {
+		if len(reqs) != 1 {
+			t.Fatalf("post-DMA requests = %d, want 1 TLB", len(reqs))
+		}
+		tlb, ok := reqs[0].(*protocol.UVMTLBInvalidateReq)
+		if !ok {
+			t.Fatalf("post-DMA request = %T, want UVMTLBInvalidateReq", reqs[0])
+		}
+		deliverTLBAck(t, d, tlb)
+		if !mw.Tick() {
+			t.Fatal("fault tick did not start the replay")
+		}
+		reqs = drainRequests(d)
+	}
 	if len(reqs) != 1 {
-		t.Fatalf("post-DMA requests = %d, want 1 TLB", len(reqs))
-	}
-	tlb, ok := reqs[0].(*protocol.UVMTLBInvalidateReq)
-	if !ok {
-		t.Fatalf("post-DMA request = %T, want UVMTLBInvalidateReq", reqs[0])
-	}
-	deliverTLBAck(t, d, tlb)
-	if !mw.Tick() {
-		t.Fatal("fault tick did not start the replay")
-	}
-	reqs = drainRequests(d)
-	if len(reqs) != 1 {
-		t.Fatalf("post-TLB requests = %d, want 1 replay", len(reqs))
+		t.Fatalf("post-DMA requests = %d, want 1 replay", len(reqs))
 	}
 	replay, ok := reqs[0].(*protocol.UVMFaultReplayReq)
 	if !ok {
-		t.Fatalf("post-TLB request = %T, want UVMFaultReplayReq", reqs[0])
+		t.Fatalf("post-DMA request = %T, want UVMFaultReplayReq", reqs[0])
 	}
 	deliverReplayAck(t, d, replay)
 	if !mw.Tick() {

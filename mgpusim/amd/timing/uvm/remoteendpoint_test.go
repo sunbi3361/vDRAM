@@ -102,7 +102,7 @@ func TestUVMRemoteEndpointCPUAddress(t *testing.T) {
 
 	var forwarded *mem.ReadReq
 	h.toGPU.EXPECT().PeekIncoming().Return(original)
-	h.toRDMA.EXPECT().Send(gomock.Any()).DoAndReturn(func(msg sim.Msg) *sim.SendError {
+	h.toRDMA.EXPECT().Deliver(gomock.Any()).DoAndReturn(func(msg sim.Msg) *sim.SendError {
 		forwarded = msg.(*mem.ReadReq)
 		return nil
 	})

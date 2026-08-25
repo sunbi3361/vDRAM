@@ -230,9 +230,13 @@ func (m *faultServiceMiddleware) driveActive() bool {
 		// sbin_codex (todo 20): retry the admission — in-flight pre-evictions
 		// free capacity and frames; the retry re-runs the projected-occupancy
 		// gate with the same missing pages.
+		// sbin_codex (todo 25): a failed retry reports no progress so the
+		// driver stops busy-waiting while the admission waits for capacity
+		// (the eviction's completions re-trigger the retry); the engine can
+		// then reach quiescence between stimuli.
 		m.driver.uvm.recordCapacityWait()
 		m.startMigration(tx, tx.missingPages)
-		return true
+		return tx.phase == faultPhaseMigrating
 	}
 	return false
 }
@@ -382,7 +386,20 @@ func (m *faultServiceMiddleware) completeMigration(tx *faultTransaction) {
 		m.driver.uvm.recordPrefetchMigration(prefetchBytes)
 	}
 	m.driver.uvm.recordLocalPTEInstalls(uint64(len(pages)))
-	m.startTLBI(tx)
+	// sbin_codex (todo 25): §21.2/§21.5 — INVALID -> GPU_LOCAL (Access
+	// Counter off) requires NO TLB invalidation: invalid/non-resident
+	// translations are not cached in the TLB hierarchy, so the required
+	// path is DMA H2D -> PTE install -> Fault Replay. Only REMOTE ->
+	// GPU_LOCAL (Access Counter on) invalidates the cached REMOTE
+	// translation. The Access Counter mode determines the PTE state
+	// deterministically (INVALID vs CPU_REMOTE at allocation and after
+	// eviction).
+	// m.startTLBI(tx)
+	if m.driver.uvm.config.AccessCounter {
+		m.startTLBI(tx)
+		return
+	}
+	m.startReplay(tx)
 }
 
 // startTLBI issues the one coordinated 64 KB TLB invalidation for the

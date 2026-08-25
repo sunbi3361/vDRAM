@@ -262,18 +262,21 @@ func TestUVMIdealDMAAccounting(t *testing.T) {
 		}
 		mw.Tick()
 		reqs = drainRequests(d)
-		var tlbReq *protocol.UVMTLBInvalidateReq
-		for _, r := range reqs {
-			if tlb, ok := r.(*protocol.UVMTLBInvalidateReq); ok {
-				tlbReq = tlb
-			}
-		}
-		if tlbReq == nil {
-			t.Fatal("post-DMA requests must include the TLB invalidate")
-		}
-		deliverTLBAck(t, d, tlbReq)
-		mw.Tick()
-		reqs = drainRequests(d)
+		// sbin_codex (todo 25): §21.2 — the AC-off fault migration is
+		// INVALID -> GPU_LOCAL, which needs no TLB invalidation; the replay
+		// follows the DMA directly.
+		// var tlbReq *protocol.UVMTLBInvalidateReq
+		// for _, r := range reqs {
+		// 	if tlb, ok := r.(*protocol.UVMTLBInvalidateReq); ok {
+		// 		tlbReq = tlb
+		// 	}
+		// }
+		// if tlbReq == nil {
+		// 	t.Fatal("post-DMA requests must include the TLB invalidate")
+		// }
+		// deliverTLBAck(t, d, tlbReq)
+		// mw.Tick()
+		// reqs = drainRequests(d)
 		var replayReq *protocol.UVMFaultReplayReq
 		for _, r := range reqs {
 			if replay, ok := r.(*protocol.UVMFaultReplayReq); ok {
@@ -281,7 +284,7 @@ func TestUVMIdealDMAAccounting(t *testing.T) {
 			}
 		}
 		if replayReq == nil {
-			t.Fatal("post-TLB requests must include the replay")
+			t.Fatal("post-DMA requests must include the replay")
 		}
 		deliverReplayAck(t, d, replayReq)
 		mw.Tick()

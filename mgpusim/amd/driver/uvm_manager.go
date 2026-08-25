@@ -1032,6 +1032,25 @@ func (m *UVMManager) intakeMigration(
 	defer m.Unlock()
 
 	reg := m.registrationForPageLocked(pid, vaddr)
+	// sbin_codex (todo 25): the AccessCounterNotification carries the
+	// 64 KB-aligned REGION base (uvm-manager.md §14), which can fall below a
+	// misaligned allocation's base (e.g. region base 0 for an allocation at
+	// VA 4096). The page lookup then fails even though the region is
+	// managed; fall back to the registration whose range intersects the
+	// region.
+	if reg == nil {
+		regionBase := SubBlockStartVA(vaddr)
+		for _, r := range m.registrations {
+			if r.PID != pid {
+				continue
+			}
+			if regionBase < r.Base+r.PageCount*r.PageSize &&
+				regionBase+subblockSizeBytes > r.Base {
+				reg = r
+				break
+			}
+		}
+	}
 	if reg == nil {
 		return nil, fmt.Errorf(
 			"uvm: migration trigger on unmanaged address pid=%d va=%#x", pid, vaddr)

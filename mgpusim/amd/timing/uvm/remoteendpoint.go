@@ -138,7 +138,14 @@ func (m *remoteEndpointMiddleware) serveRemoteRead(req *mem.ReadReq) bool {
 		WithByteSize(req.AccessByteSize).
 		WithPID(req.PID).
 		Build()
-	if err := m.ToRDMA.Send(forwarded); err != nil {
+	// sbin_codex (todo 25): the forwarded read is a loop-back message on the
+	// shared ToRDMA seam (Src == Dst == ToRDMA.AsRemote()); a real port's
+	// Send rejects src == dst, so the read is delivered directly into the
+	// shared port's incoming buffer, which the RDMA engine peeks.
+	// if err := m.ToRDMA.Send(forwarded); err != nil {
+	// 	return false
+	// }
+	if err := m.ToRDMA.Deliver(forwarded); err != nil {
 		return false
 	}
 
@@ -163,7 +170,9 @@ func (m *remoteEndpointMiddleware) serveRemoteRead(req *mem.ReadReq) bool {
 }
 
 // processDataRsp routes one modeled-PCIe data response back to the original
-// GPU requester.
+// GPU requester. A non-response message on the shared ToRDMA seam (e.g. the
+// endpoint's own loop-back forwarded read) is left for the RDMA engine.
+// sbin_codex (todo 25)
 func (m *remoteEndpointMiddleware) processDataRsp() bool {
 	msg := m.ToRDMA.PeekIncoming()
 	if msg == nil {
@@ -171,7 +180,10 @@ func (m *remoteEndpointMiddleware) processDataRsp() bool {
 	}
 	rsp, ok := msg.(*mem.DataReadyRsp)
 	if !ok {
-		log.Panicf("cannot process response of type %s", reflect.TypeOf(msg))
+		// sbin_codex (todo 25): the shared ToRDMA seam carries the
+		// endpoint's own loop-back forwarded reads; skip them instead of
+		// panicking.
+		return false
 	}
 	idx := m.findInflight(rsp.RespondTo)
 	if idx < 0 {

@@ -138,8 +138,11 @@ func TestUVMPreEvictionStats(t *testing.T) {
 		t.Errorf("prefetch = %d migrations/%d bytes, want 1/60KB",
 			snap.NumPrefetchMigrations, snap.BytesPrefetched)
 	}
-	if snap.NumUVMTLBRangeInvalidations != 1 || snap.NumLocalPTEInstalls != 31 {
-		t.Errorf("TLB/PTE = %d/%d, want 1/31",
+	// sbin_codex (todo 25): §21.2 — the AC-off fault migration is
+	// INVALID -> GPU_LOCAL, which needs no TLB invalidation; only the
+	// eviction's GPU_LOCAL -> INVALID transition invalidates.
+	if snap.NumUVMTLBRangeInvalidations != 0 || snap.NumLocalPTEInstalls != 31 {
+		t.Errorf("TLB/PTE = %d/%d, want 0/31",
 			snap.NumUVMTLBRangeInvalidations, snap.NumLocalPTEInstalls)
 	}
 	if snap.NumTBNFaultEvents != 1 || snap.NumTBN128KBExpansions != 1 ||
@@ -204,15 +207,6 @@ func TestUVMPreEvictionStats(t *testing.T) {
 	deliverGeneralRsp(t, d, h2d)
 	if !faultmw.Tick() {
 		t.Fatal("fault tick did not complete the migration")
-	}
-	reqs = drainRequests(d)
-	faultTLB, ok := reqs[0].(*protocol.UVMTLBInvalidateReq)
-	if !ok {
-		t.Fatalf("post-DMA request = %T, want UVMTLBInvalidateReq", reqs[0])
-	}
-	deliverTLBAck(t, d, faultTLB)
-	if !faultmw.Tick() {
-		t.Fatal("fault tick did not start the replay")
 	}
 	reqs = drainRequests(d)
 	faultReplay, ok := reqs[0].(*protocol.UVMFaultReplayReq)
@@ -295,8 +289,11 @@ func TestUVMPreEvictionStats(t *testing.T) {
 		t.Errorf("evictions = %d/%d bytes/%d dirty, want 1/60KB/0",
 			snap.NumEvictions, snap.BytesEvicted, snap.NumDirtyEvictions)
 	}
-	if snap.NumUVMTLBRangeInvalidations != 3 || snap.NumLocalPTEInstalls != 47 {
-		t.Errorf("TLB/PTE = %d/%d, want 3/47",
+	// sbin_codex (todo 25): §21.2 — the AC-off fault migrations need no TLB
+	// invalidation; only the eviction's GPU_LOCAL -> INVALID transition
+	// invalidates (1), so the total is 1, not 3.
+	if snap.NumUVMTLBRangeInvalidations != 1 || snap.NumLocalPTEInstalls != 47 {
+		t.Errorf("TLB/PTE = %d/%d, want 1/47",
 			snap.NumUVMTLBRangeInvalidations, snap.NumLocalPTEInstalls)
 	}
 	if snap.NumConcurrentPreEvictions != 0 ||
@@ -365,18 +362,21 @@ func TestUVMPredeclaredCrossModeValues(t *testing.T) {
 			t.Fatal("tick did not complete the migration")
 		}
 		reqs = drainRequests(d)
-		tlb, ok := reqs[0].(*protocol.UVMTLBInvalidateReq)
-		if !ok {
-			t.Fatalf("post-DMA request = %T, want UVMTLBInvalidateReq", reqs[0])
-		}
-		deliverTLBAck(t, d, tlb)
-		if !mw.Tick() {
-			t.Fatal("tick did not start the replay")
-		}
-		reqs = drainRequests(d)
+		// sbin_codex (todo 25): §21.2 — the AC-off fault migration is
+		// INVALID -> GPU_LOCAL, which needs no TLB invalidation; the replay
+		// follows the DMA directly.
+		// tlb, ok := reqs[0].(*protocol.UVMTLBInvalidateReq)
+		// if !ok {
+		// 	t.Fatalf("post-DMA request = %T, want UVMTLBInvalidateReq", reqs[0])
+		// }
+		// deliverTLBAck(t, d, tlb)
+		// if !mw.Tick() {
+		// 	t.Fatal("tick did not start the replay")
+		// }
+		// reqs = drainRequests(d)
 		replay, ok := reqs[0].(*protocol.UVMFaultReplayReq)
 		if !ok {
-			t.Fatalf("post-TLB request = %T, want UVMFaultReplayReq", reqs[0])
+			t.Fatalf("post-DMA request = %T, want UVMFaultReplayReq", reqs[0])
 		}
 		deliverReplayAck(t, d, replay)
 		if !mw.Tick() {
@@ -419,8 +419,10 @@ func TestUVMPredeclaredCrossModeValues(t *testing.T) {
 		t.Errorf("migration bytes = %d/%d/%d, want 64KB/60KB/4KB",
 			ns.BytesCPUToGPU, ns.BytesDemandMigrated, ns.BytesPrefetched)
 	}
-	if ns.NumUVMTLBRangeInvalidations != 1 || ns.NumLocalPTEInstalls != 16 {
-		t.Errorf("TLB/PTE = %d/%d, want 1/16",
+	// sbin_codex (todo 25): §21.2 — the AC-off fault migration is
+	// INVALID -> GPU_LOCAL, which needs no TLB invalidation.
+	if ns.NumUVMTLBRangeInvalidations != 0 || ns.NumLocalPTEInstalls != 16 {
+		t.Errorf("TLB/PTE = %d/%d, want 0/16",
 			ns.NumUVMTLBRangeInvalidations, ns.NumLocalPTEInstalls)
 	}
 	if ns.TBNActualPrefetchDMABytes != 4*mem.KB ||

@@ -62,7 +62,7 @@ func TestUVMAccessCounter(t *testing.T) {
 
 	var notif *protocol.AccessCounterNotification
 	h.toCP.EXPECT().PeekIncoming().Return(nil)
-	h.toCP.EXPECT().Send(gomock.Any()).DoAndReturn(func(msg sim.Msg) *sim.SendError {
+	h.toCP.EXPECT().Deliver(gomock.Any()).DoAndReturn(func(msg sim.Msg) *sim.SendError {
 		notif = msg.(*protocol.AccessCounterNotification)
 		return nil
 	})
@@ -99,7 +99,7 @@ func TestUVMAccessCounter(t *testing.T) {
 	}
 	var notif2 *protocol.AccessCounterNotification
 	h.toCP.EXPECT().PeekIncoming().Return(nil)
-	h.toCP.EXPECT().Send(gomock.Any()).DoAndReturn(func(msg sim.Msg) *sim.SendError {
+	h.toCP.EXPECT().Deliver(gomock.Any()).DoAndReturn(func(msg sim.Msg) *sim.SendError {
 		notif2 = msg.(*protocol.AccessCounterNotification)
 		return nil
 	})
@@ -141,7 +141,7 @@ func TestUVMAccessCounter(t *testing.T) {
 	}
 	var notif3 *protocol.AccessCounterNotification
 	h.toCP.EXPECT().PeekIncoming().Return(nil)
-	h.toCP.EXPECT().Send(gomock.Any()).DoAndReturn(func(msg sim.Msg) *sim.SendError {
+	h.toCP.EXPECT().Deliver(gomock.Any()).DoAndReturn(func(msg sim.Msg) *sim.SendError {
 		notif3 = msg.(*protocol.AccessCounterNotification)
 		return nil
 	})
@@ -159,7 +159,7 @@ func TestUVMAccessCounter(t *testing.T) {
 
 	var rsp *cp.CounterResetRsp
 	h.toCP.EXPECT().PeekIncoming().Return(reset)
-	h.toCP.EXPECT().Send(gomock.Any()).DoAndReturn(func(msg sim.Msg) *sim.SendError {
+	h.toCP.EXPECT().Deliver(gomock.Any()).DoAndReturn(func(msg sim.Msg) *sim.SendError {
 		rsp = msg.(*cp.CounterResetRsp)
 		return nil
 	})
@@ -182,7 +182,7 @@ func TestUVMAccessCounter(t *testing.T) {
 	}
 	var notif4 *protocol.AccessCounterNotification
 	h.toCP.EXPECT().PeekIncoming().Return(nil)
-	h.toCP.EXPECT().Send(gomock.Any()).DoAndReturn(func(msg sim.Msg) *sim.SendError {
+	h.toCP.EXPECT().Deliver(gomock.Any()).DoAndReturn(func(msg sim.Msg) *sim.SendError {
 		notif4 = msg.(*protocol.AccessCounterNotification)
 		return nil
 	})

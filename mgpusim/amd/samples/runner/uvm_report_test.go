@@ -157,27 +157,30 @@ func driveReportFault(
 		t.Fatalf("service request = %T, want MemCopyH2DReq", h2d)
 	}
 	deliverReportRsp(t, gpuPort, h2d)
-	engine.Run() // complete migration, TLB send + forward
+	engine.Run() // complete migration, replay send + forward
 
-	tlb := retrieveReportReq(t, registeredPort)
-	tlbReq, ok := tlb.(*protocol.UVMTLBInvalidateReq)
-	if !ok {
-		t.Fatalf("post-DMA request = %T, want UVMTLBInvalidateReq", tlb)
-	}
-	tlbRsp := protocol.UVMTLBInvalidateRspBuilder{}.
-		WithSrc(gpuPort.AsRemote()).
-		WithDst(gpuPort.AsRemote()).
-		WithRspTo(tlbReq.ID).
-		Build()
-	if err := gpuPort.Deliver(tlbRsp); err != nil {
-		t.Fatalf("Deliver TLB ack: %v", err)
-	}
-	engine.Run() // replay send + forward
+	// sbin_codex (todo 25): §21.2 — the AC-off demand fault is
+	// INVALID -> GPU_LOCAL, which needs NO TLB invalidation; the replay
+	// follows the DMA directly.
+	// tlb := retrieveReportReq(t, registeredPort)
+	// tlbReq, ok := tlb.(*protocol.UVMTLBInvalidateReq)
+	// if !ok {
+	// 	t.Fatalf("post-DMA request = %T, want UVMTLBInvalidateReq", tlb)
+	// }
+	// tlbRsp := protocol.UVMTLBInvalidateRspBuilder{}.
+	// 	WithSrc(gpuPort.AsRemote()).
+	// 	WithDst(gpuPort.AsRemote()).
+	// 	WithRspTo(tlbReq.ID).
+	// 	Build()
+	// if err := gpuPort.Deliver(tlbRsp); err != nil {
+	// 	t.Fatalf("Deliver TLB ack: %v", err)
+	// }
+	// engine.Run() // replay send + forward
 
 	replay := retrieveReportReq(t, registeredPort)
 	replayReq, ok := replay.(*protocol.UVMFaultReplayReq)
 	if !ok {
-		t.Fatalf("post-TLB request = %T, want UVMFaultReplayReq", replay)
+		t.Fatalf("post-DMA request = %T, want UVMFaultReplayReq", replay)
 	}
 	replayRsp := protocol.UVMFaultReplayRspBuilder{}.
 		WithSrc(gpuPort.AsRemote()).
@@ -291,8 +294,11 @@ func TestUVMSameModeCompleteRows(t *testing.T) {
 	if v, ok := metricValue(first, "bytes_cpu_to_gpu"); !ok || v != 64*1024 {
 		t.Errorf("bytes_cpu_to_gpu = %v (present=%v), want 65536", v, ok)
 	}
-	if v, ok := metricValue(first, "num_uvm_tlb_range_invalidations"); !ok || v != 1 {
-		t.Errorf("num_uvm_tlb_range_invalidations = %v (present=%v), want 1",
+	// sbin_codex (todo 25): §21.2 — the AC-off demand fault is
+	// INVALID -> GPU_LOCAL, which needs NO TLB invalidation; the scenario
+	// text's step 12 is stale.
+	if v, ok := metricValue(first, "num_uvm_tlb_range_invalidations"); !ok || v != 0 {
+		t.Errorf("num_uvm_tlb_range_invalidations = %v (present=%v), want 0",
 			v, ok)
 	}
 	if v, ok := metricValue(first, "uvm_capacity_bytes"); !ok || v != 4*1024*1024*1024 {

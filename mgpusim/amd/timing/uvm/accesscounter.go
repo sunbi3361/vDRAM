@@ -5,8 +5,8 @@
 package uvm
 
 import (
-	"log"
-	"reflect"
+	// log "log" // sbin_codex (todo 25): unused after the loop-back panics were removed.
+	// "reflect" // sbin_codex (todo 25): unused after the loop-back panics were removed.
 
 	"github.com/sarchlab/akita/v4/mem/vm"
 	"github.com/sarchlab/akita/v4/sim"
@@ -175,7 +175,8 @@ func (m *accessCounterMiddleware) Tick() bool {
 
 // processResetReq consumes one CounterResetReq, resets every counter, and
 // acknowledges the reset to the CP so the kernel-dispatch barrier can clear
-// (uvm-manager.md §14.2).
+// (uvm-manager.md §14.2). A non-reset message on the shared ToCP seam (e.g.
+// the counter's own loop-back notification) is left for the CP. // sbin_codex
 func (m *accessCounterMiddleware) processResetReq() bool {
 	msg := m.ToCP.PeekIncoming()
 	if msg == nil {
@@ -183,14 +184,23 @@ func (m *accessCounterMiddleware) processResetReq() bool {
 	}
 	req, ok := msg.(*cp.CounterResetReq)
 	if !ok {
-		log.Panicf("cannot process request of type %s", reflect.TypeOf(msg))
+		// sbin_codex (todo 25): the shared ToCP seam carries the counter's
+		// own loop-back notifications; skip them instead of panicking.
+		return false
 	}
 	m.Reset()
 	rsp := &cp.CounterResetRsp{}
 	rsp.ID = sim.GetIDGenerator().Generate()
 	rsp.Src = m.ToCP.AsRemote()
 	rsp.Dst = req.Src
-	if err := m.ToCP.Send(rsp); err != nil {
+	// sbin_codex (todo 25): the reset ack is a loop-back message on the
+	// shared ToCP seam (Src == Dst == ToCP.AsRemote()); a real port's Send
+	// rejects src == dst, so the ack is delivered directly into the shared
+	// port's incoming buffer, which the CP peeks.
+	// if err := m.ToCP.Send(rsp); err != nil {
+	// 	return false
+	// }
+	if err := m.ToCP.Deliver(rsp); err != nil {
 		return false
 	}
 	m.ToCP.RetrieveIncoming()
@@ -204,7 +214,14 @@ func (m *accessCounterMiddleware) flushNotifications() bool {
 		return false
 	}
 	notif := m.pendingNotifications[0]
-	if err := m.ToCP.Send(notif); err != nil {
+	// sbin_codex (todo 25): the notification is a loop-back message on the
+	// shared ToCP seam (Src == Dst == ToCP.AsRemote()); a real port's Send
+	// rejects src == dst, so the notification is delivered directly into the
+	// shared port's incoming buffer, which the CP peeks.
+	// if err := m.ToCP.Send(notif); err != nil {
+	// 	return false
+	// }
+	if err := m.ToCP.Deliver(notif); err != nil {
 		return false
 	}
 	m.pendingNotifications = m.pendingNotifications[1:]

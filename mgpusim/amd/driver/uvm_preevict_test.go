@@ -314,15 +314,6 @@ func TestUVMAllocatorFramesShortage(t *testing.T) {
 		t.Fatal("fault tick did not complete the migration")
 	}
 	reqs = drainRequests(d)
-	tlb, ok := reqs[0].(*protocol.UVMTLBInvalidateReq)
-	if !ok {
-		t.Fatalf("post-DMA request = %T, want UVMTLBInvalidateReq", reqs[0])
-	}
-	deliverTLBAck(t, d, tlb)
-	if !faultmw.Tick() {
-		t.Fatal("fault tick did not start the replay")
-	}
-	reqs = drainRequests(d)
 	replay, ok := reqs[0].(*protocol.UVMFaultReplayReq)
 	if !ok {
 		t.Fatalf("post-TLB request = %T, want UVMFaultReplayReq", reqs[0])
@@ -453,15 +444,6 @@ func TestUVMFeasibleHeadroomConcurrentAdmission(t *testing.T) {
 		t.Fatal("fault tick did not complete the migration")
 	}
 	reqs = drainRequests(d)
-	faultTLB, ok := reqs[0].(*protocol.UVMTLBInvalidateReq)
-	if !ok {
-		t.Fatalf("post-DMA request = %T, want UVMTLBInvalidateReq", reqs[0])
-	}
-	deliverTLBAck(t, d, faultTLB)
-	if !faultmw.Tick() {
-		t.Fatal("fault tick did not start the replay")
-	}
-	reqs = drainRequests(d)
 	faultReplay, ok := reqs[0].(*protocol.UVMFaultReplayReq)
 	if !ok {
 		t.Fatalf("post-TLB request = %T, want UVMFaultReplayReq", reqs[0])
@@ -568,15 +550,6 @@ func TestUVMOptionalHeadroomShortfall(t *testing.T) {
 	deliverGeneralRsp(t, d, h2d)
 	if !faultmw.Tick() {
 		t.Fatal("fault tick did not complete the migration")
-	}
-	reqs = drainRequests(d)
-	tlb, ok := reqs[0].(*protocol.UVMTLBInvalidateReq)
-	if !ok {
-		t.Fatalf("post-DMA request = %T, want UVMTLBInvalidateReq", reqs[0])
-	}
-	deliverTLBAck(t, d, tlb)
-	if !faultmw.Tick() {
-		t.Fatal("fault tick did not start the replay")
 	}
 	reqs = drainRequests(d)
 	replay, ok := reqs[0].(*protocol.UVMFaultReplayReq)
@@ -690,15 +663,6 @@ func TestUVMPreEvictionHardShortageQueues(t *testing.T) {
 		t.Fatal("fault tick did not complete the migration")
 	}
 	reqs = drainRequests(d)
-	faultTLB, ok := reqs[0].(*protocol.UVMTLBInvalidateReq)
-	if !ok {
-		t.Fatalf("post-DMA request = %T, want UVMTLBInvalidateReq", reqs[0])
-	}
-	deliverTLBAck(t, d, faultTLB)
-	if !faultmw.Tick() {
-		t.Fatal("fault tick did not start the replay")
-	}
-	reqs = drainRequests(d)
 	faultReplay, ok := reqs[0].(*protocol.UVMFaultReplayReq)
 	if !ok {
 		t.Fatalf("post-TLB request = %T, want UVMFaultReplayReq", reqs[0])
@@ -762,15 +726,6 @@ func TestUVMPreEvictionConcurrentVictims(t *testing.T) {
 	deliverGeneralRsp(t, d, h2d1)
 	if !faultmw.Tick() {
 		t.Fatal("fault tick did not complete migration 1")
-	}
-	reqs = drainRequests(d)
-	tlb1, ok := reqs[0].(*protocol.UVMTLBInvalidateReq)
-	if !ok {
-		t.Fatalf("post-DMA request = %T, want UVMTLBInvalidateReq", reqs[0])
-	}
-	deliverTLBAck(t, d, tlb1)
-	if !faultmw.Tick() {
-		t.Fatal("fault tick did not start replay 1")
 	}
 	reqs = drainRequests(d)
 	replay1, ok := reqs[0].(*protocol.UVMFaultReplayReq)
@@ -902,15 +857,6 @@ func TestUVMPreEvictionConcurrentVictims(t *testing.T) {
 	deliverGeneralRsp(t, d, h2d2)
 	if !faultmw.Tick() {
 		t.Fatal("fault tick did not complete migration 2")
-	}
-	reqs = drainRequests(d)
-	tlb2b, ok := reqs[0].(*protocol.UVMTLBInvalidateReq)
-	if !ok {
-		t.Fatalf("post-DMA request = %T, want UVMTLBInvalidateReq", reqs[0])
-	}
-	deliverTLBAck(t, d, tlb2b)
-	if !faultmw.Tick() {
-		t.Fatal("fault tick did not start replay 2")
 	}
 	reqs = drainRequests(d)
 	replay2, ok := reqs[0].(*protocol.UVMFaultReplayReq)

@@ -263,22 +263,25 @@ func TestUVMFaultFIFOABA(t *testing.T) {
 	deliverGeneralRsp(t, d, h2dB)
 	mw.Tick()
 	reqs = drainRequests(d)
+	// sbin_codex (todo 25): §21.2 — the AC-off fault migration is
+	// INVALID -> GPU_LOCAL, which needs NO TLB invalidation; the replay
+	// follows the DMA directly.
+	// if len(reqs) != 1 {
+	// 	t.Fatalf("post-DMA requests = %d, want 1 TLB invalidate", len(reqs))
+	// }
+	// tlbB, ok := reqs[0].(*protocol.UVMTLBInvalidateReq)
+	// if !ok {
+	// 	t.Fatalf("post-DMA request = %T, want UVMTLBInvalidateReq", reqs[0])
+	// }
+	// deliverTLBAck(t, d, tlbB)
+	// mw.Tick()
+	// reqs = drainRequests(d)
 	if len(reqs) != 1 {
-		t.Fatalf("post-DMA requests = %d, want 1 TLB invalidate", len(reqs))
-	}
-	tlbB, ok := reqs[0].(*protocol.UVMTLBInvalidateReq)
-	if !ok {
-		t.Fatalf("post-DMA request = %T, want UVMTLBInvalidateReq", reqs[0])
-	}
-	deliverTLBAck(t, d, tlbB)
-	mw.Tick()
-	reqs = drainRequests(d)
-	if len(reqs) != 1 {
-		t.Fatalf("post-TLB requests = %d, want 1 replay", len(reqs))
+		t.Fatalf("post-DMA requests = %d, want 1 replay", len(reqs))
 	}
 	replayB, ok := reqs[0].(*protocol.UVMFaultReplayReq)
 	if !ok {
-		t.Fatalf("post-TLB request = %T, want UVMFaultReplayReq", reqs[0])
+		t.Fatalf("post-DMA request = %T, want UVMFaultReplayReq", reqs[0])
 	}
 	deliverReplayAck(t, d, replayB)
 	mw.Tick()
@@ -457,21 +460,11 @@ func TestUVMFaultQueuedSatisfiedByTBN(t *testing.T) {
 	mw.Tick()
 	reqs = drainRequests(d)
 	if len(reqs) != 1 {
-		t.Fatalf("post-DMA requests = %d, want 1 TLB invalidate", len(reqs))
-	}
-	tlbA, ok := reqs[0].(*protocol.UVMTLBInvalidateReq)
-	if !ok {
-		t.Fatalf("post-DMA request = %T, want UVMTLBInvalidateReq", reqs[0])
-	}
-	deliverTLBAck(t, d, tlbA)
-	mw.Tick()
-	reqs = drainRequests(d)
-	if len(reqs) != 1 {
-		t.Fatalf("post-TLB requests = %d, want 1 replay", len(reqs))
+		t.Fatalf("post-DMA requests = %d, want 1 replay", len(reqs))
 	}
 	replayA, ok := reqs[0].(*protocol.UVMFaultReplayReq)
 	if !ok {
-		t.Fatalf("post-TLB request = %T, want UVMFaultReplayReq", reqs[0])
+		t.Fatalf("post-DMA request = %T, want UVMFaultReplayReq", reqs[0])
 	}
 	deliverReplayAck(t, d, replayA)
 	mw.Tick()
@@ -647,22 +640,25 @@ func TestUVMFaultQueuedPartiallySatisfiedByTBN(t *testing.T) {
 	}
 
 	// DMA completions: residency + PTE publication for the 9 pages only, then
-	// exactly one 64 KB TLB invalidation.
+	// exactly one replay (sbin_codex todo 25: §21.2 — the AC-off fault
+	// migration is INVALID -> GPU_LOCAL, which needs no TLB invalidation).
 	for _, req := range reqs {
 		deliverGeneralRsp(t, d, req)
 	}
 	mw.Tick()
 	reqs = drainRequests(d)
-	if len(reqs) != 1 {
-		t.Fatalf("post-DMA requests = %d, want 1 TLB invalidate", len(reqs))
-	}
-	tlbReq, ok := reqs[0].(*protocol.UVMTLBInvalidateReq)
-	if !ok {
-		t.Fatalf("post-DMA request = %T, want UVMTLBInvalidateReq", reqs[0])
-	}
-	if tlbReq.StartVA != 64*mem.KB || tlbReq.Size != 64*mem.KB {
-		t.Errorf("TLB invalidate = %#x+%d, want 64KB+64KB", tlbReq.StartVA, tlbReq.Size)
-	}
+	// sbin_codex (todo 25): the TLB invalidation is removed from the AC-off
+	// fault path (§21.2); the replay follows the DMA directly.
+	// if len(reqs) != 1 {
+	// 	t.Fatalf("post-DMA requests = %d, want 1 TLB invalidate", len(reqs))
+	// }
+	// tlbReq, ok := reqs[0].(*protocol.UVMTLBInvalidateReq)
+	// if !ok {
+	// 	t.Fatalf("post-DMA request = %T, want UVMTLBInvalidateReq", reqs[0])
+	// }
+	// if tlbReq.StartVA != 64*mem.KB || tlbReq.Size != 64*mem.KB {
+	// 	t.Errorf("TLB invalidate = %#x+%d, want 64KB+64KB", tlbReq.StartVA, tlbReq.Size)
+	// }
 	for page := uint64(15); page <= 31; page++ {
 		if !maskBit(reg.ResidentMask, page) {
 			t.Errorf("page %d not resident after migration", page)
@@ -695,16 +691,17 @@ func TestUVMFaultQueuedPartiallySatisfiedByTBN(t *testing.T) {
 		t.Errorf("reserved N = %d, want 0 after commit", got)
 	}
 
-	// TLB ack -> exactly one replay -> ack -> complete.
-	deliverTLBAck(t, d, tlbReq)
-	mw.Tick()
-	reqs = drainRequests(d)
+	// Exactly one replay -> ack -> complete (sbin_codex todo 25: no TLB on
+	// the AC-off INVALID -> GPU_LOCAL path).
+	// deliverTLBAck(t, d, tlbReq)
+	// mw.Tick()
+	// reqs = drainRequests(d)
 	if len(reqs) != 1 {
-		t.Fatalf("post-TLB requests = %d, want 1 replay", len(reqs))
+		t.Fatalf("post-DMA requests = %d, want 1 replay", len(reqs))
 	}
 	replayB, ok := reqs[0].(*protocol.UVMFaultReplayReq)
 	if !ok {
-		t.Fatalf("post-TLB request = %T, want UVMFaultReplayReq", reqs[0])
+		t.Fatalf("post-DMA request = %T, want UVMFaultReplayReq", reqs[0])
 	}
 	deliverReplayAck(t, d, replayB)
 	mw.Tick()
@@ -856,18 +853,21 @@ func TestUVMFaultCopyFaultOwnershipRace(t *testing.T) {
 	deliverGeneralRsp(t, d2, h2dF2)
 	mw2.Tick()
 	reqs = drainRequests(d2)
+	// sbin_codex (todo 25): §21.2 — the AC-off fault migration is
+	// INVALID -> GPU_LOCAL, which needs no TLB invalidation; the replay
+	// follows the DMA directly.
+	// if len(reqs) != 1 {
+	// 	t.Fatalf("post-DMA requests = %d, want 1 TLB invalidate", len(reqs))
+	// }
+	// tlbF2, ok := reqs[0].(*protocol.UVMTLBInvalidateReq)
+	// if !ok {
+	// 	t.Fatalf("post-DMA request = %T, want UVMTLBInvalidateReq", reqs[0])
+	// }
+	// deliverTLBAck(t, d2, tlbF2)
+	// mw2.Tick()
+	// reqs = drainRequests(d2)
 	if len(reqs) != 1 {
-		t.Fatalf("post-DMA requests = %d, want 1 TLB invalidate", len(reqs))
-	}
-	tlbF2, ok := reqs[0].(*protocol.UVMTLBInvalidateReq)
-	if !ok {
-		t.Fatalf("post-DMA request = %T, want UVMTLBInvalidateReq", reqs[0])
-	}
-	deliverTLBAck(t, d2, tlbF2)
-	mw2.Tick()
-	reqs = drainRequests(d2)
-	if len(reqs) != 1 {
-		t.Fatalf("post-TLB requests = %d, want 1 replay", len(reqs))
+		t.Fatalf("post-DMA requests = %d, want 1 replay", len(reqs))
 	}
 	replay := reqs[0].(*protocol.UVMFaultReplayReq)
 
@@ -937,17 +937,7 @@ func TestUVMFaultDuplicateCompletion(t *testing.T) {
 	mw.Tick()
 	reqs = drainRequests(d)
 	if len(reqs) != 1 {
-		t.Fatalf("post-DMA requests = %d, want 1 TLB invalidate", len(reqs))
-	}
-	tlb, ok := reqs[0].(*protocol.UVMTLBInvalidateReq)
-	if !ok {
-		t.Fatalf("post-DMA request = %T, want UVMTLBInvalidateReq", reqs[0])
-	}
-	deliverTLBAck(t, d, tlb)
-	mw.Tick()
-	reqs = drainRequests(d)
-	if len(reqs) != 1 {
-		t.Fatalf("post-TLB requests = %d, want 1 replay", len(reqs))
+		t.Fatalf("post-DMA requests = %d, want 1 replay", len(reqs))
 	}
 	replay := reqs[0].(*protocol.UVMFaultReplayReq)
 
