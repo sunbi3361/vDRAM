@@ -9,7 +9,6 @@ import (
 	"github.com/sarchlab/akita/v4/mem/cache/writearound"
 	"github.com/sarchlab/akita/v4/mem/cache/writethrough"
 	"github.com/sarchlab/akita/v4/mem/mem"
-	"github.com/sarchlab/akita/v4/mem/vm/addresstranslator" // sbin_codex
 	"github.com/sarchlab/akita/v4/simulation"
 	"github.com/sarchlab/mgpusim/v4/amd/timing/cu"
 	"github.com/sarchlab/mgpusim/v4/amd/timing/rob"
@@ -81,9 +80,9 @@ var _ = Describe("Shader array builder", func() {
 		}
 	})
 
-	// Pre-edit code (commented per AGENTS.md convention):
-	// It("builds virtual data caches without data translation paths", func() {
-	It("builds virtual data caches behind data translation paths", func() { // sbin_codex
+	// sbin_claude_vc: restored to the original intent - virtual caching means
+	// the vector and scalar data paths carry no translation at all.
+	It("builds virtual data caches without data translation paths", func() {
 		// Given
 		outputPrefix := filepath.Join(GinkgoT().TempDir(), "virtual-shader-array")
 		testSimulation := simulation.MakeBuilder().
@@ -106,8 +105,6 @@ var _ = Describe("Shader array builder", func() {
 			WithNumCUs(1).
 			WithL1AddressMapper(mem.NewInterleavedAddressPortMapper(64)).
 			WithL1TLBAddressMapper(&mem.SinglePortMapper{}).
-			WithRemoteMemoryProviderMapper(&mem.SinglePortMapper{Port: "RDMA"}). // sbin_codex
-			WithVirtualAddressForLocalMemory().                                  // sbin_codex
 			// sbin_codex: prove the injected non-default strategy is consumed.
 			WithDataPathTopology(NewVirtualDataPathTopology()).
 			Build("VirtualShaderArray")
@@ -119,35 +116,22 @@ var _ = Describe("Shader array builder", func() {
 		}
 		Expect(componentNames).To(ContainElements(
 			"VirtualShaderArray.L1VCache[0]",
-			"VirtualShaderArray.L1VAddrTrans[0]", // sbin_codex
-			"VirtualShaderArray.L1VTLB[0]",       // sbin_codex
 			"VirtualShaderArray.L1SCache",
-			"VirtualShaderArray.L1SAddrTrans", // sbin_codex
-			"VirtualShaderArray.L1STLB",       // sbin_codex
 			"VirtualShaderArray.L1IAddrTrans",
 			"VirtualShaderArray.L1ITLB",
 		))
-		// Pre-edit code (commented per AGENTS.md convention):
-		// for _, componentName := range []string{
-		// 	"VirtualShaderArray.L1VAddrTrans[0]",
-		// 	"VirtualShaderArray.L1VTLB[0]",
-		// 	"VirtualShaderArray.L1SAddrTrans",
-		// 	"VirtualShaderArray.L1STLB",
-		// } {
-		// 	Expect(componentNames).NotTo(ContainElement(componentName))
-		// }
+		for _, componentName := range []string{
+			"VirtualShaderArray.L1VAddrTrans[0]",
+			"VirtualShaderArray.L1VTLB[0]",
+			"VirtualShaderArray.L1SAddrTrans",
+			"VirtualShaderArray.L1STLB",
+		} {
+			Expect(componentNames).NotTo(ContainElement(componentName))
+		}
 
 		for _, portName := range []string{
-			"L1VAddrTransCtrl[0]",         // sbin_codex
-			"L1VAddrTransRemoteBottom[0]", // sbin_codex
-			"L1VTLBCtrl[0]",               // sbin_codex
-			"L1VTLBBottom[0]",             // sbin_codex
 			"L1VCacheCtrl[0]",
 			"L1VCacheBottom[0]",
-			"L1SAddrTransCtrl",         // sbin_codex
-			"L1SAddrTransRemoteBottom", // sbin_codex
-			"L1STLBCtrl",               // sbin_codex
-			"L1STLBBottom",             // sbin_codex
 			"L1SCacheCtrl",
 			"L1SCacheBottom",
 			"L1IAddrTransCtrl",
@@ -159,6 +143,21 @@ var _ = Describe("Shader array builder", func() {
 				_ = domain.GetPortByName(portName)
 			}).NotTo(Panic(), portName)
 		}
+		// sbin_claude_vc: the vector and scalar translation ports are gone.
+		for _, portName := range []string{
+			"L1VAddrTransCtrl[0]",
+			"L1VAddrTransRemoteBottom[0]",
+			"L1VTLBCtrl[0]",
+			"L1VTLBBottom[0]",
+			"L1SAddrTransCtrl",
+			"L1SAddrTransRemoteBottom",
+			"L1STLBCtrl",
+			"L1STLBBottom",
+		} {
+			Expect(func() {
+				_ = domain.GetPortByName(portName)
+			}).To(Panic(), portName)
+		}
 
 		computeUnit := testSimulation.GetComponentByName(
 			"VirtualShaderArray.CU[0]").(*cu.ComputeUnit)
@@ -166,28 +165,20 @@ var _ = Describe("Shader array builder", func() {
 			"VirtualShaderArray.L1VROB[0]").(*rob.ReorderBuffer)
 		vectorCache := testSimulation.GetComponentByName(
 			"VirtualShaderArray.L1VCache[0]").(*writearound.Comp)
-		vectorAT := testSimulation.GetComponentByName(
-			"VirtualShaderArray.L1VAddrTrans[0]").(*addresstranslator.Comp) // sbin_codex
 		Expect(computeUnit.VectorMemModules.Find(0)).To(Equal(
 			vectorROB.GetPortByName("Top").AsRemote()))
-		// Pre-edit code (commented per AGENTS.md convention):
-		// Expect(vectorROB.BottomUnit).To(Equal(vectorCache.GetPortByName("Top").AsRemote()))
+		// sbin_claude_vc: the reorder buffer talks to the cache directly.
 		Expect(vectorROB.BottomUnit).To(Equal(
-			vectorAT.GetPortByName("Top").AsRemote())) // sbin_codex
-		Expect(vectorCache.GetPortByName("Top")).NotTo(BeNil())
+			vectorCache.GetPortByName("Top").AsRemote()))
 
 		scalarROB := testSimulation.GetComponentByName(
 			"VirtualShaderArray.L1SROB").(*rob.ReorderBuffer)
 		scalarCache := testSimulation.GetComponentByName(
 			"VirtualShaderArray.L1SCache").(*writethrough.Comp)
-		scalarAT := testSimulation.GetComponentByName(
-			"VirtualShaderArray.L1SAddrTrans").(*addresstranslator.Comp) // sbin_codex
 		Expect(computeUnit.ScalarMem).To(Equal(scalarROB.GetPortByName("Top")))
-		// Pre-edit code (commented per AGENTS.md convention):
-		// Expect(scalarROB.BottomUnit).To(Equal(scalarCache.GetPortByName("Top").AsRemote()))
+		// sbin_claude_vc: same on the scalar path.
 		Expect(scalarROB.BottomUnit).To(Equal(
-			scalarAT.GetPortByName("Top").AsRemote())) // sbin_codex
-		Expect(scalarCache.GetPortByName("Top")).NotTo(BeNil())
+			scalarCache.GetPortByName("Top").AsRemote()))
 
 		instructionROB := testSimulation.GetComponentByName(
 			"VirtualShaderArray.L1IROB").(*rob.ReorderBuffer)

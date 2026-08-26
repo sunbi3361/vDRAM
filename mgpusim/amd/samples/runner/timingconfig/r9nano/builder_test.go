@@ -130,9 +130,8 @@ var _ = Describe("R9 Nano builder", func() {
 		// 	"GPU.L2AddrTrans[0]",
 		// 	"GPU.L2AddrTrans[1]",
 		// ))
+		// sbin_claude_vc: only the instruction path keeps an L1 translator.
 		Expect(componentNames.addressTranslators).To(ConsistOf(
-			"GPU.SA[0].L1VAddrTrans[0]", // sbin_codex
-			"GPU.SA[0].L1SAddrTrans",    // sbin_codex
 			"GPU.SA[0].L1IAddrTrans",
 			"GPU.L2AddrTrans[0]",
 			"GPU.L2AddrTrans[1]",
@@ -142,9 +141,8 @@ var _ = Describe("R9 Nano builder", func() {
 		// 	"GPU.SA[0].L1ITLB",
 		// 	"GPU.L2TLB",
 		// ))
+		// sbin_claude_vc: and only the instruction path keeps an L1 TLB.
 		Expect(componentNames.tlbs).To(ConsistOf(
-			"GPU.SA[0].L1VTLB[0]", // sbin_codex
-			"GPU.SA[0].L1STLB",    // sbin_codex
 			"GPU.SA[0].L1ITLB",
 			"GPU.L2TLB",
 		))
@@ -155,6 +153,9 @@ var _ = Describe("R9 Nano builder", func() {
 			"GPU.L2ToL2AddrTrans[1]",
 			"GPU.L2AddrTransToDRAM",
 			"GPU.TranslationToL2TLB",
+			// sbin_claude_vc: the memory-side translators get their own
+			// network to the L2 TLB's fill channel.
+			"GPU.L2AddrTransToL2TLB",
 			"GPU.L2TLBToGMMU",
 		))
 		Expect(componentNames.connections).NotTo(ContainElement("GPU.L2ToDRAM"))
@@ -165,22 +166,16 @@ var _ = Describe("R9 Nano builder", func() {
 		// Expect(componentNamesForPorts(commandProcessor.PreCacheTranslators.Ports)).To(
 		// 	ConsistOf("GPU.SA[0].L1IAddrTrans"))
 		Expect(componentNamesForPorts(commandProcessor.PreCacheTranslators.Ports)).To(
-			ConsistOf(
-				"GPU.SA[0].L1VAddrTrans[0]",
-				"GPU.SA[0].L1SAddrTrans",
-				"GPU.SA[0].L1IAddrTrans",
-			)) // sbin_codex
+			ConsistOf("GPU.SA[0].L1IAddrTrans")) // sbin_claude_vc
 		Expect(componentNamesForPorts(commandProcessor.PostCacheTranslators.Ports)).To(
 			ConsistOf(
 				"GPU.L2AddrTrans[0]",
 				"GPU.L2AddrTrans[1]",
 			)) // sbin_codex: every per-slice L2 AT is tracked separately.
 		Expect(componentNamesForPorts(commandProcessor.TLBs)).To(ConsistOf(
-			"GPU.SA[0].L1VTLB[0]", // sbin_codex
-			"GPU.SA[0].L1STLB",    // sbin_codex
 			"GPU.SA[0].L1ITLB",
 			"GPU.L2TLB",
-		))
+		)) // sbin_claude_vc
 		Expect(commandProcessor.L1VCaches).To(HaveLen(1))
 		Expect(commandProcessor.L1SCaches).To(HaveLen(1))
 		Expect(commandProcessor.L1ICaches).To(HaveLen(1))
@@ -205,15 +200,18 @@ var _ = Describe("R9 Nano builder", func() {
 			physicalPage: 3 * mem.GB,
 		}) // sbin_codex: L1I retains physical-range/RDMA mapping in virtual mode.
 
+		// sbin_claude_vc: the instruction TLB is the only L1 client left.
 		sharedTranslationPorts := []sim.Port{
-			testSimulation.GetComponentByName(
-				"GPU.SA[0].L1VTLB[0]").GetPortByName("Bottom"), // sbin_codex
-			testSimulation.GetComponentByName(
-				"GPU.SA[0].L1STLB").GetPortByName("Bottom"), // sbin_codex
 			testSimulation.GetComponentByName(
 				"GPU.SA[0].L1ITLB").GetPortByName("Bottom"),
 			testSimulation.GetComponentByName(
 				"GPU.L2TLB").GetPortByName("Top"),
+		}
+		// sbin_claude_vc: fill translations must not share the L1 TLBs'
+		// network - that shared, in-order queue is what deadlocked.
+		fillTranslationPorts := []sim.Port{
+			testSimulation.GetComponentByName(
+				"GPU.L2TLB").GetPortByName(l2FillTranslationPort),
 		}
 		physicalMemoryPorts := []sim.Port{
 			testSimulation.GetComponentByName("GPU.DMA").(*cp.DMAEngine).ToMem,
@@ -230,7 +228,7 @@ var _ = Describe("R9 Nano builder", func() {
 				expectPortConnectedTo(port,
 					fmt.Sprintf("GPU.L2ToL2AddrTrans[%d]", i))
 			}
-			sharedTranslationPorts = append(sharedTranslationPorts,
+			fillTranslationPorts = append(fillTranslationPorts, // sbin_claude_vc
 				translator.GetPortByName("Translation"))
 			physicalMemoryPorts = append(physicalMemoryPorts,
 				translator.GetPortByName("Bottom"),
@@ -239,6 +237,9 @@ var _ = Describe("R9 Nano builder", func() {
 		}
 		for _, port := range sharedTranslationPorts {
 			expectPortConnectedTo(port, "GPU.TranslationToL2TLB")
+		}
+		for _, port := range fillTranslationPorts { // sbin_claude_vc
+			expectPortConnectedTo(port, "GPU.L2AddrTransToL2TLB")
 		}
 		for _, port := range physicalMemoryPorts {
 			expectPortConnectedTo(port, "GPU.L2AddrTransToDRAM")
@@ -264,8 +265,9 @@ var _ = Describe("R9 Nano builder", func() {
 				fmt.Sprintf("GPU.L2AddrTrans[%d]", i)).(*addresstranslator.Comp)
 			expectTranslatorRoutesAccess(translator, translationRouteExpectation{
 				accessReq: accessReq,
-				tlb: testSimulation.GetComponentByName(
-					"GPU.L2TLB").GetPortByName("Top").AsRemote(),
+				// sbin_claude_vc: the fill channel, not the L1 TLBs' port.
+				tlb: testSimulation.GetComponentByName("GPU.L2TLB").
+					GetPortByName(l2FillTranslationPort).AsRemote(),
 				dram: testSimulation.GetComponentByName(
 					fmt.Sprintf("GPU.DRAM[%d]", i)).GetPortByName("Top").AsRemote(),
 				physicalPage: 0x8000,

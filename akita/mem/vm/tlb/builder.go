@@ -1,6 +1,8 @@
 package tlb
 
 import (
+	"fmt" // sbin_claude_vc
+
 	"github.com/sarchlab/akita/v4/mem/mem"
 	"github.com/sarchlab/akita/v4/mem/vm" // sbin_codex
 	"github.com/sarchlab/akita/v4/pipelining"
@@ -12,6 +14,7 @@ type Builder struct {
 	engine                 sim.Engine
 	freq                   sim.Freq
 	numReqPerCycle         int
+	numTopChannels         int // sbin_claude_vc
 	numSets                int
 	numWays                int
 	log2PageSize           uint64
@@ -30,6 +33,7 @@ func MakeBuilder() Builder {
 	return Builder{
 		freq:           1 * sim.GHz,
 		numReqPerCycle: 4,
+		numTopChannels: 1, // sbin_claude_vc: one top-side request class by default.
 		numSets:        1,
 		numWays:        32,
 		pageSize:       4096,
@@ -100,6 +104,30 @@ func (b Builder) WithPageSize(n uint64) Builder {
 // a TLB
 func (b Builder) WithNumReqPerCycle(n int) Builder {
 	b.numReqPerCycle = n
+	return b
+}
+
+// WithNumTopChannels sets how many independent top-side request classes the
+// TLB exposes. Each channel gets its own port ("Top" for channel 0, "Top[i]"
+// for the rest), its own lookup pipeline and its own response queue, so a
+// back-pressured client of one channel cannot hold up the answers of another.
+//
+// Use more than one channel when client classes with different drain paths
+// share the TLB - for example demand translations from the L1 TLBs and
+// fill/writeback translations from a memory-side address translator. Sharing
+// one port between such classes deadlocks: the port queue is in-order, so a
+// blocked client of one class blocks every answer queued behind it, including
+// the answers the other class needs in order to unblock.
+//
+// The default is 1, which keeps the single-channel behaviour unchanged.
+// sbin_claude_vc
+func (b Builder) WithNumTopChannels(n int) Builder {
+	if n < 1 {
+		panic("a TLB needs at least one top channel")
+	}
+
+	b.numTopChannels = n
+
 	return b
 }
 
@@ -186,14 +214,22 @@ func (b Builder) Build(name string) *Comp {
 
 	tlb.reset()
 
-	buf := sim.NewBuffer(name+".ResponsePipelineBuf", 16)
-	tlb.responseBuffer = buf
-	tlb.responsePipeline = pipelining.MakeBuilder().
-		WithNumStage(b.latency).
-		WithCyclePerStage(1).
-		WithPipelineWidth(tlb.numReqPerCycle).
-		WithPostPipelineBuffer(buf).
-		Build(name + ".ResponsePipeline")
+	// Pre-edit code (commented per project convention). A single lookup
+	// pipeline was built here, shared by every top-side requester:
+	//
+	// buf := sim.NewBuffer(name+".ResponsePipelineBuf", 16)
+	// tlb.responseBuffer = buf
+	// tlb.responsePipeline = pipelining.MakeBuilder().
+	// 	WithNumStage(b.latency).
+	// 	WithCyclePerStage(1).
+	// 	WithPipelineWidth(tlb.numReqPerCycle).
+	// 	WithPostPipelineBuffer(buf).
+	// 	Build(name + ".ResponsePipeline")
+	//
+	// sbin_claude_vc: each top channel gets its own pipeline, so a channel
+	// that cannot send its answers does not hold the other channels' lookups
+	// at the head of a shared buffer.
+	b.createPipelines(name, tlb)
 
 	ctrlMiddleware := &ctrlMiddleware{Comp: tlb}
 	tlb.AddMiddleware(ctrlMiddleware)
@@ -230,10 +266,26 @@ func (b Builder) createTranslationProviderMapper(c *Comp) {
 }
 
 func (b Builder) createPorts(name string, c *Comp) {
-	c.topPort = sim.NewPort(c,
-		b.numReqPerCycle, b.numReqPerCycle,
-		name+".TopPort")
-	c.AddPort("Top", c.topPort)
+	// Pre-edit code (commented per project convention). There was exactly one
+	// top port:
+	//
+	// c.topPort = sim.NewPort(c,
+	// 	b.numReqPerCycle, b.numReqPerCycle,
+	// 	name+".TopPort")
+	// c.AddPort("Top", c.topPort)
+	//
+	// sbin_claude_vc: channel 0 keeps the original port key and name, so
+	// single-channel TLBs are wired exactly as before.
+	for i := 0; i < b.numTopChannels; i++ {
+		portKey, portName := topChannelNames(name, i)
+		port := sim.NewPort(c,
+			b.numReqPerCycle, b.numReqPerCycle,
+			portName)
+		c.AddPort(portKey, port)
+		c.topChannels = append(c.topChannels, &topChannel{port: port})
+	}
+
+	c.topPort = c.topChannels[0].port
 
 	c.bottomPort = sim.NewPort(c,
 		b.numReqPerCycle, b.numReqPerCycle,
@@ -250,4 +302,39 @@ func (b Builder) createPorts(name string, c *Comp) {
 		b.numReqPerCycle, b.numReqPerCycle,
 		name+".CancelPort")
 	c.AddPort("Cancel", c.cancelPort)
+}
+
+// topChannelNames returns the port key and the port name of one top channel.
+// Channel 0 keeps the historical "Top"/".TopPort" naming. // sbin_claude_vc
+func topChannelNames(compName string, channelID int) (portKey, portName string) {
+	if channelID == 0 {
+		return "Top", compName + ".TopPort"
+	}
+
+	return fmt.Sprintf("Top[%d]", channelID),
+		fmt.Sprintf("%s.TopPort[%d]", compName, channelID)
+}
+
+// createPipelines builds one lookup pipeline per top channel. // sbin_claude_vc
+func (b Builder) createPipelines(name string, c *Comp) {
+	for i, channel := range c.topChannels {
+		bufName, pipelineName := name+".ResponsePipelineBuf",
+			name+".ResponsePipeline"
+		if i > 0 {
+			bufName = fmt.Sprintf("%s.ResponsePipelineBuf[%d]", name, i)
+			pipelineName = fmt.Sprintf("%s.ResponsePipeline[%d]", name, i)
+		}
+
+		buf := sim.NewBuffer(bufName, 16)
+		channel.buffer = buf
+		channel.pipeline = pipelining.MakeBuilder().
+			WithNumStage(b.latency).
+			WithCyclePerStage(1).
+			WithPipelineWidth(c.numReqPerCycle).
+			WithPostPipelineBuffer(buf).
+			Build(pipelineName)
+	}
+
+	c.responseBuffer = c.topChannels[0].buffer
+	c.responsePipeline = c.topChannels[0].pipeline
 }

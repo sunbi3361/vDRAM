@@ -65,6 +65,7 @@ var _ = Describe("TLB", func() {
 			WithTranslationProviderMapper(addressMapper).
 			Build("TLB")
 		tlb.topPort = topPort
+		tlb.topChannels[0].port = topPort // sbin_claude_vc: inject the mock into channel 0.
 		tlb.bottomPort = bottomPort
 		tlb.controlPort = controlPort
 		tlb.sets = []internal.Set{set}
@@ -130,7 +131,7 @@ var _ = Describe("TLB", func() {
 
 			set.EXPECT().Visit(wayID).Times(1)
 
-			madeProgress := tlbMW.lookup(req)
+			madeProgress := tlbMW.lookup(req, tlb.topChannels[0])
 
 			Expect(madeProgress).To(BeTrue())
 		})
@@ -177,7 +178,7 @@ var _ = Describe("TLB", func() {
 				}).
 				Return(nil)
 
-			madeProgress := tlbMW.lookup(req)
+			madeProgress := tlbMW.lookup(req, tlb.topChannels[0])
 
 			Expect(madeProgress).To(BeTrue())
 			Expect(tlb.mshr.IsEntryPresent(vm.PID(1), uint64(0x100))).

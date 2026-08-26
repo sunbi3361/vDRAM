@@ -13,6 +13,7 @@ type Builder struct {
 	threshold         uint64
 	bufferSize        int
 	numReqPerCycle    int
+	maxOutstanding    int // sbin_claude
 	bottomDestination sim.RemotePort
 	ctrlDestination   sim.RemotePort
 }
@@ -24,6 +25,7 @@ func MakeBuilder() Builder {
 		threshold:      8,
 		bufferSize:     4096,
 		numReqPerCycle: 32,
+		maxOutstanding: 256, // sbin_claude
 	}
 }
 
@@ -66,6 +68,24 @@ func (b Builder) WithNumReqPerCycle(n int) Builder {
 	return b
 }
 
+// WithMaxOutstanding caps how many remote accesses this GPU may have in
+// flight over PCIe at once. Zero means unlimited.
+//
+// A limit is what makes the PCIe model mean anything on the UVM path. With
+// access counters on, every managed page starts remotely mapped, so a kernel
+// that touches managed memory from thousands of work-items issues one PCIe
+// transaction per access. Unlimited, those queue in the root complex
+// endpoint - six figures of flits were measured - and everything else sharing
+// that endpoint queues behind them, including the migration DMA that would
+// have made the pages local and ended the remote traffic. Refusing to forward
+// past the limit pushes back through the address translator to the compute
+// units, which is what real hardware does when it runs out of tags.
+// sbin_claude
+func (b Builder) WithMaxOutstanding(n int) Builder {
+	b.maxOutstanding = n
+	return b
+}
+
 // WithBottomDestination sets the remote-memory destination.
 func (b Builder) WithBottomDestination(dst sim.RemotePort) Builder {
 	b.bottomDestination = dst
@@ -84,6 +104,7 @@ func (b Builder) Build(name string) *Comp {
 		deviceID:          b.deviceID,
 		threshold:         b.threshold,
 		numReqPerCycle:    b.numReqPerCycle,
+		maxOutstanding:    b.maxOutstanding, // sbin_claude
 		bottomDestination: b.bottomDestination,
 		ctrlDestination:   b.ctrlDestination,
 		counters:          make(map[RegionKey]*counterState),

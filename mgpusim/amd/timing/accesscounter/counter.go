@@ -170,6 +170,10 @@ func (c *Comp) sendPendingRemoteWrite() bool {
 		return false
 	}
 
+	if c.atOutstandingLimit() { // sbin_claude
+		return false
+	}
+
 	original := c.pendingRemoteWrites[0]
 	forwarded := original.Clone().(*mem.WriteReq)
 	forwarded.Meta().Src = c.Bottom.AsRemote()

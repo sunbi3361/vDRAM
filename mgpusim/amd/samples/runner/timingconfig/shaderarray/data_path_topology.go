@@ -38,11 +38,24 @@ func (baselineDataPathTopology) build(b *Builder) {
 	b.buildL1STLB()
 }
 
+// build omits the L1 vector and scalar address translators and TLBs.
+//
+// Virtual caching means the L1 and L2 data caches are tagged by virtual
+// address, so a data access needs no translation until it misses in the L2 -
+// that is the whole point of the design, and it is where the translation
+// bandwidth saving comes from. Keeping the baseline L1 translation path here
+// spent an L2 TLB translation on every L1 access while the address it
+// produced was, for local pages, the same virtual address it was handed.
+//
+// Pre-edit code (commented per project convention). The topology delegated
+// to the baseline, which built the full L1 translation path:
+//
+//	baselineDataPathTopology{}.build(b)
+//
+// sbin_claude_vc
 func (virtualDataPathTopology) build(b *Builder) {
-	// Pre-edit code (commented per AGENTS.md convention):
-	// b.buildL1VCaches()
-	// b.buildL1SCache()
-	baselineDataPathTopology{}.build(b) // sbin_codex
+	b.buildL1VCaches()
+	b.buildL1SCache()
 }
 
 func (baselineDataPathTopology) addExternalPorts(b *Builder) {
@@ -62,15 +75,24 @@ func (baselineDataPathTopology) addExternalPorts(b *Builder) {
 	b.sa.AddPort("L1STLBBottom", b.l1sTLB.GetPortByName("Bottom"))
 }
 
+// addExternalPorts exports only what exists on the virtual data path: the
+// caches. There are no L1 vector/scalar translator or TLB ports to export.
+//
+// Pre-edit code (commented per project convention):
+//
+//	baselineDataPathTopology{}.addExternalPorts(b)
+//
+// sbin_claude_vc
 func (virtualDataPathTopology) addExternalPorts(b *Builder) {
-	// Pre-edit code (commented per AGENTS.md convention):
-	// for i := range b.numCUs {
-	// 	b.sa.AddPort(fmt.Sprintf("L1VCacheCtrl[%d]", i), b.l1vCaches[i].GetPortByName("Control"))
-	// 	b.sa.AddPort(fmt.Sprintf("L1VCacheBottom[%d]", i), b.l1vCaches[i].GetPortByName("Bottom"))
-	// }
-	// b.sa.AddPort("L1SCacheCtrl", b.l1sCache.GetPortByName("Control"))
-	// b.sa.AddPort("L1SCacheBottom", b.l1sCache.GetPortByName("Bottom"))
-	baselineDataPathTopology{}.addExternalPorts(b) // sbin_codex
+	for i := range b.numCUs {
+		b.sa.AddPort(fmt.Sprintf("L1VCacheCtrl[%d]", i),
+			b.l1vCaches[i].GetPortByName("Control"))
+		b.sa.AddPort(fmt.Sprintf("L1VCacheBottom[%d]", i),
+			b.l1vCaches[i].GetPortByName("Bottom"))
+	}
+
+	b.sa.AddPort("L1SCacheCtrl", b.l1sCache.GetPortByName("Control"))
+	b.sa.AddPort("L1SCacheBottom", b.l1sCache.GetPortByName("Bottom"))
 }
 
 func (baselineDataPathTopology) connect(b *Builder) {
@@ -98,20 +120,35 @@ func (baselineDataPathTopology) connect(b *Builder) {
 	connectScalarCUs(b)
 }
 
+// connect wires the reorder buffers straight to the virtually tagged caches.
+//
+// Pre-edit code (commented per project convention). The topology delegated to
+// the baseline, which interposed an address translator between each reorder
+// buffer and its cache:
+//
+//	baselineDataPathTopology{}.connect(b)
+//
+// sbin_claude_vc
 func (virtualDataPathTopology) connect(b *Builder) {
-	// Pre-edit code (commented per AGENTS.md convention):
-	// bufferSize := dataPathBufferSize(b)
-	// for i := range b.numCUs {
-	// 	cu, rob, cache := b.cus[i], b.l1vROBs[i], b.l1vCaches[i]
-	// 	cu.VectorMemModules = &mem.SinglePortMapper{Port: rob.GetPortByName("Top").AsRemote()}
-	// 	b.connectWithDirectConnection(cu.ToVectorMem, rob.GetPortByName("Top"), bufferSize)
-	// 	rob.BottomUnit = cache.GetPortByName("Top").AsRemote()
-	// 	b.connectWithDirectConnection(rob.GetPortByName("Bottom"), cache.GetPortByName("Top"), bufferSize)
-	// }
-	// b.l1sROB.BottomUnit = b.l1sCache.GetPortByName("Top").AsRemote()
-	// b.connectWithDirectConnection(b.l1sROB.GetPortByName("Bottom"), b.l1sCache.GetPortByName("Top"), 32)
-	// connectScalarCUs(b)
-	baselineDataPathTopology{}.connect(b) // sbin_codex
+	bufferSize := dataPathBufferSize(b)
+
+	for i := range b.numCUs {
+		cu, rob, cache := b.cus[i], b.l1vROBs[i], b.l1vCaches[i]
+		cu.VectorMemModules = &mem.SinglePortMapper{
+			Port: rob.GetPortByName("Top").AsRemote(),
+		}
+		b.connectWithDirectConnection(
+			cu.ToVectorMem, rob.GetPortByName("Top"), bufferSize)
+		rob.BottomUnit = cache.GetPortByName("Top").AsRemote()
+		b.connectWithDirectConnection(rob.GetPortByName("Bottom"),
+			cache.GetPortByName("Top"), bufferSize)
+	}
+
+	b.l1sROB.BottomUnit = b.l1sCache.GetPortByName("Top").AsRemote()
+	b.connectWithDirectConnection(b.l1sROB.GetPortByName("Bottom"),
+		b.l1sCache.GetPortByName("Top"), 32)
+
+	connectScalarCUs(b)
 }
 
 func dataPathBufferSize(b *Builder) int {

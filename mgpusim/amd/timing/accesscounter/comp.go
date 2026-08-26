@@ -36,6 +36,7 @@ type Comp struct {
 	deviceID          uint64
 	threshold         uint64
 	numReqPerCycle    int
+	maxOutstanding    int // sbin_claude
 	bottomDestination sim.RemotePort
 	ctrlDestination   sim.RemotePort
 
@@ -149,6 +150,12 @@ func (c *Comp) forwardRequest(
 	forwarded sim.Msg,
 	remoteDemand *mem.RemoteDemandInfo,
 ) bool {
+	// sbin_claude: leaving the request in the Top port is the backpressure.
+	// See Builder.WithMaxOutstanding for why the cap exists.
+	if c.atOutstandingLimit() {
+		return false
+	}
+
 	forwarded.Meta().Src = c.Bottom.AsRemote()
 	forwarded.Meta().Dst = c.bottomDestination
 
@@ -164,6 +171,12 @@ func (c *Comp) forwardRequest(
 	}
 
 	return true
+}
+
+// atOutstandingLimit reports whether this GPU already has as many remote
+// accesses in flight as it is allowed. // sbin_claude
+func (c *Comp) atOutstandingLimit() bool {
+	return c.maxOutstanding > 0 && len(c.transactions) >= c.maxOutstanding
 }
 
 // trackTransaction remembers which region an outstanding remote access belongs

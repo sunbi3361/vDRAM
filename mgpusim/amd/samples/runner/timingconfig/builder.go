@@ -3,7 +3,6 @@ package timingconfig
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/sarchlab/akita/v4/mem/mem"
 	"github.com/sarchlab/akita/v4/mem/vm"
@@ -47,18 +46,19 @@ type Builder struct {
 	gpuPageTables     []vm.PageTable // sbin_codex: one isolated page table per GPU GMMU.
 
 	// sbin_codex: UVM demand-paging configuration.
-	uvmEnabled       bool
-	uvmIdeal         bool
-	uvmFaultUS       float64
-	uvmAccessCounter bool
-	uvmACThresh      uint64
-	uvmTBNExpand     float64
-	uvmTBNMaxSize    uint64
-	uvmNoPrefetch    bool
-	uvmNoEviction    bool
-	uvmGPUCapacity   uint64
-	uvmCapacityRatio float64
-	uvmOversubRatio  float64
+	uvmEnabled              bool
+	uvmIdeal                bool
+	uvmFaultUS              float64
+	uvmAccessCounter        bool
+	uvmACThresh             uint64
+	uvmTBNExpand            float64
+	uvmTBNMaxSize           uint64
+	uvmNoPrefetch           bool
+	uvmNoEviction           bool
+	uvmGPUCapacity          uint64
+	uvmCapacityRatio        float64
+	uvmOversubRatio         float64
+	uvmMaxOutstandingRemote int // sbin_claude
 
 	// sbin_claude_utopia: Utopia hybrid RestSeg/FlexSeg configuration.
 	utopiaCfg      UtopiaPlatformConfig
@@ -143,6 +143,7 @@ func (b Builder) WithUVM(config UVMPlatformConfig) Builder {
 	b.uvmGPUCapacity = config.GPUCapacityBytes
 	b.uvmCapacityRatio = config.GPUCapacityRatio
 	b.uvmOversubRatio = config.OversubscriptionRatio
+	b.uvmMaxOutstandingRemote = config.MaxOutstandingRemote // sbin_claude
 
 	return b
 }
@@ -362,6 +363,9 @@ type UVMPlatformConfig struct {
 	GPUCapacityBytes       uint64
 	GPUCapacityRatio       float64
 	OversubscriptionRatio  float64
+	// MaxOutstandingRemote caps the GPU's in-flight PCIe remote accesses.
+	// Zero means unlimited. // sbin_claude
+	MaxOutstandingRemote int
 }
 
 // Build builds the hardware platform.
@@ -649,14 +653,37 @@ func (b *Builder) createConnection(
 		mmuComponent.GetPortByName("Migration"),
 		mmuComponent.GetPortByName("Top"),
 	}
-	// sbin_codex: in ideal mode the whole UVM control channel is carried by a
-	// zero-latency direct connection instead of PCIe (spec 1.2), so the driver
-	// UVM port must stay off the root complex.
-	if b.uvmEnabled && !b.uvmIdeal {
-		rootComplexPorts = append(rootComplexPorts, gpuDriver.GetPortByName("UVM"))
-	}
+	// Pre-edit code (commented per project convention). The driver UVM port
+	// used to share the root complex endpoint with the data ports:
+	//
+	// // sbin_codex: in ideal mode the whole UVM control channel is carried by
+	// // a zero-latency direct connection instead of PCIe (spec 1.2), so the
+	// // driver UVM port must stay off the root complex.
+	// if b.uvmEnabled && !b.uvmIdeal {
+	// 	rootComplexPorts = append(
+	// 		rootComplexPorts, gpuDriver.GetPortByName("UVM"))
+	// }
 	rootComplexPorts = append(rootComplexPorts, b.cpuRemoteTop) // sbin_codex
 	rootComplexID := pcieConnector.AddRootComplex(rootComplexPorts)
+
+	// sbin_claude: the UVM control plane gets its own endpoint, which is to
+	// say its own virtual channel, on the same root complex switch.
+	//
+	// An endpoint serialises every port plugged into it through one flit
+	// queue, and that queue is unbounded. With access counters on, the CPU
+	// side answers the GPU's remote reads through b.cpuRemoteTop, and a
+	// kernel that touches managed memory from thousands of work-items queues
+	// six figures of data flits there. A migration's TLB invalidate or region
+	// drain then sat behind all of them. Because the driver services one 64KB
+	// region at a time and cannot start the next until that control message is
+	// acknowledged, no region ever migrated, so the pages stayed remote and
+	// produced yet more data flits: the run made no forward progress at all.
+	//
+	// Ideal mode keeps its zero-latency direct connection instead (spec 1.2).
+	if b.uvmEnabled && !b.uvmIdeal {
+		pcieConnector.PlugInDevice(rootComplexID,
+			[]sim.Port{gpuDriver.GetPortByName("UVM")})
+	}
 
 	return pcieConnector, rootComplexID
 }
@@ -690,7 +717,8 @@ func (b *Builder) createGPU(
 	if b.uvmEnabled { // sbin_codex: the GPU UVM endpoint answers to the driver.
 		builder = builder.
 			WithUVMServiceProvider(gpuDriver.GetPortByName("UVM").AsRemote()).
-			WithAccessCounterThreshold(b.uvmACThresh)
+			WithAccessCounterThreshold(b.uvmACThresh).
+			WithMaxOutstandingRemote(b.uvmMaxOutstandingRemote) // sbin_claude
 	}
 	gpu := builder.Build(name)
 
@@ -711,27 +739,64 @@ func (b *Builder) createGPU(
 	// b.configPMC(gpu, gpuDriver, pmcAddressTable)
 
 	ports := gpu.Ports()
-	if b.uvmEnabled && b.uvmIdeal { // sbin_codex: zero-latency UVM fault channel.
-		// Route UVM fault messages between the GMMU and the driver over a
-		// direct connection instead of PCIe, so ideal-uvm charges no
-		// interconnect latency on the control plane.
-		conn := directconnection.MakeBuilder().
-			WithEngine(b.simulation.GetEngine()).
-			WithFreq(1 * sim.GHz).
-			Build(name + ".UVMConn")
-		b.simulation.RegisterComponent(conn)
-		conn.PlugIn(gpuDriver.GetPortByName("UVM"))
-		conn.PlugIn(gpu.GetPortByName("UVM"))
+
+	// Pre-edit code (commented per project convention). The UVM port was
+	// separated from the data ports only in ideal mode, and by name match:
+	//
+	// if b.uvmEnabled && b.uvmIdeal {
+	// 	... build conn ...
+	// 	filtered := make([]sim.Port, 0, len(ports))
+	// 	for _, p := range ports {
+	// 		if !strings.Contains(p.Name(), "UVM") {
+	// 			filtered = append(filtered, p)
+	// 		}
+	// 	}
+	// 	ports = filtered
+	// }
+	//
+	// sbin_claude: the GPU end of the control plane needs the same separation
+	// the root complex end does, for the same reason - the access counter's
+	// remote egress leaves through the RDMA engine, whose port shares this
+	// endpoint's single flit queue with the CP's UVM port. Page faults and
+	// counter notifications were queued behind the remote traffic they were
+	// meant to stop. So the UVM port now always leaves `ports`, and is either
+	// direct-connected (ideal) or given its own endpoint (PCIe).
+	var uvmEndpointPort sim.Port
+
+	if b.uvmEnabled {
+		uvmPort := gpu.GetPortByName("UVM")
 		filtered := make([]sim.Port, 0, len(ports))
+
 		for _, p := range ports {
-			if !strings.Contains(p.Name(), "UVM") {
+			if p != uvmPort {
 				filtered = append(filtered, p)
 			}
 		}
+
 		ports = filtered
+
+		if b.uvmIdeal { // sbin_codex: zero-latency UVM fault channel.
+			// Route UVM fault messages between the GMMU and the driver over a
+			// direct connection instead of PCIe, so ideal-uvm charges no
+			// interconnect latency on the control plane.
+			conn := directconnection.MakeBuilder().
+				WithEngine(b.simulation.GetEngine()).
+				WithFreq(1 * sim.GHz).
+				Build(name + ".UVMConn")
+			b.simulation.RegisterComponent(conn)
+			conn.PlugIn(gpuDriver.GetPortByName("UVM"))
+			conn.PlugIn(uvmPort)
+		} else {
+			uvmEndpointPort = uvmPort
+		}
 	}
 
 	pcieConnector.PlugInDevice(pcieSwitchID, ports)
+
+	if uvmEndpointPort != nil { // sbin_claude: own endpoint, own flit queue.
+		pcieConnector.PlugInDevice(
+			pcieSwitchID, []sim.Port{uvmEndpointPort})
+	}
 
 	// b.gpus = append(b.gpus, gpu)
 
