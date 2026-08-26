@@ -45,9 +45,18 @@ func MakeBuilder() Builder {
 	// return Builder{inner: r9nano.MakeBuilder().
 	// 	WithDataPathTopology(r9nano.NewVirtualDataPathTopology()).
 	// 	WithMemoryTopology(r9nano.NewVirtualMemoryTopology())}
+	//
+	// sbin_claude_fbt: the FBT joins the pair. It is not an optional extra -
+	// the paper's design puts it in the IOMMU because a virtual cache
+	// hierarchy needs reverse translation and synonym detection to be
+	// correct at all, and its forward index then doubles as the second-level
+	// TLB that absorbs the page walks virtual caching would otherwise
+	// expose.
 	return Builder{r9nano.MakeBuilder(). // sbin_codex
 						WithDataPathTopology(r9nano.NewVirtualDataPathTopology()).
-						WithMemoryTopology(r9nano.NewVirtualMemoryTopology())}
+						WithMemoryTopology(r9nano.NewVirtualMemoryTopology()).
+						WithTranslationTopology(r9nano.NewFBTTranslationTopology(
+			r9nano.FBTSettings{}))}
 }
 
 // The four chain setters MUST return Builder (the wrapper type) so the fluent

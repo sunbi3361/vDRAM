@@ -12,6 +12,7 @@ import (
 	"github.com/sarchlab/akita/v4/sim/directconnection"
 	"github.com/sarchlab/mgpusim/v4/amd/timing/utopia/restseg"
 	"github.com/sarchlab/mgpusim/v4/amd/timing/utopia/rsw"
+	"github.com/sarchlab/mgpusim/v4/amd/timing/virtualcaching/fbt" // sbin_claude_fbt
 )
 
 // TranslationTopology selects the walker chain below the shared L2 TLB.
@@ -36,9 +37,18 @@ type UtopiaSettings struct {
 	MissLatency   int
 }
 
+// FBTSettings carries the Forward-Backward Table's geometry and timing.
+// sbin_claude_fbt
+type FBTSettings struct {
+	NumEntries    int
+	NumWays       int
+	LookupLatency int
+}
+
 type (
 	baselineTranslationTopology struct{}
 	utopiaTranslationTopology   struct{ settings UtopiaSettings }
+	fbtTranslationTopology      struct{ settings FBTSettings } // sbin_claude_fbt
 )
 
 // NewBaselineTranslationTopology returns the baseline L2TLB-to-GMMU wiring.
@@ -55,7 +65,67 @@ func NewUtopiaTranslationTopology(settings UtopiaSettings) TranslationTopology {
 	return utopiaTranslationTopology{settings: settings}
 }
 
+// NewFBTTranslationTopology returns the wiring with the Forward-Backward
+// Table between the shared L2 TLB and the GMMU. An L2 TLB miss consults the
+// FBT before a page walk may start. This is the paper's "VC With OPT"
+// configuration: virtual caching filters the bandwidth reaching the shared
+// TLB, which exposes the page-walk overhead behind it, and the FBT - which
+// has to exist for correctness anyway - recovers that as a second-level TLB.
+// sbin_claude_fbt
+func NewFBTTranslationTopology(settings FBTSettings) TranslationTopology {
+	return fbtTranslationTopology{settings: settings}
+}
+
 func (baselineTranslationTopology) buildWalkers(*Builder) {}
+
+func (t fbtTranslationTopology) buildWalkers(b *Builder) { // sbin_claude_fbt
+	b.fbt = fbt.MakeBuilder().
+		WithEngine(b.simulation.GetEngine()).
+		WithFreq(b.freq).
+		WithLog2PageSize(b.log2PageSize).
+		WithNumEntries(t.settings.NumEntries).
+		WithNumWays(t.settings.NumWays).
+		WithLookupLatency(t.settings.LookupLatency).
+		Build(b.name + ".FBT")
+
+	b.simulation.RegisterComponent(b.fbt)
+}
+
+// l2TLBTranslationProvider points L2 TLB misses at the FBT, not the GMMU.
+// sbin_claude_fbt
+func (fbtTranslationTopology) l2TLBTranslationProvider(
+	b *Builder,
+) sim.RemotePort {
+	return b.fbt.GetPortByName("Top").AsRemote()
+}
+
+// connectWalkers wires L2TLB.Bottom -> FBT.Top and FBT.Bottom -> GMMU.Top, so
+// a page walk can only start once the FBT has reported a miss.
+// sbin_claude_fbt
+func (fbtTranslationTopology) connectWalkers(b *Builder) {
+	l2ToFBT := directconnection.MakeBuilder().
+		WithEngine(b.simulation.GetEngine()).
+		WithFreq(b.freq).
+		Build(b.name + ".L2TLBToFBT")
+	b.simulation.RegisterComponent(l2ToFBT)
+
+	l2ToFBT.PlugIn(b.fbt.GetPortByName("Top"))
+
+	for _, l2TLB := range b.l2TLBs {
+		l2ToFBT.PlugIn(l2TLB.GetPortByName("Bottom"))
+	}
+
+	fbtToGMMU := directconnection.MakeBuilder().
+		WithEngine(b.simulation.GetEngine()).
+		WithFreq(b.freq).
+		Build(b.name + ".FBTToGMMU")
+	b.simulation.RegisterComponent(fbtToGMMU)
+
+	fbtToGMMU.PlugIn(b.fbt.GetPortByName("Bottom"))
+	fbtToGMMU.PlugIn(b.gmmu.GetPortByName("Top"))
+
+	b.fbt.SetPageWalker(b.gmmu.GetPortByName("Top").AsRemote())
+}
 
 func (baselineTranslationTopology) l2TLBTranslationProvider(
 	b *Builder,
