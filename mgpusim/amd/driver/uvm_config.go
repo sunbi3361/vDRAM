@@ -34,11 +34,15 @@ type UVMConfig struct {
 	// With access counters on, the eager path publishes a REMOTE PTE for every
 	// managed page at allocation time, so a cold page is never INVALID and the
 	// first access is a counted remote access rather than a fault. This makes
-	// the page start INVALID instead: the first access to a 64KB region is a
+	// the page start INVALID instead: the first read of a 64KB region is a
 	// page fault whose only effect is to turn that region's PTEs from INVALID
 	// to REMOTE. Nothing migrates - migration stays the access counter's
-	// decision at AccessCounterThreshold. Requires AccessCounterEnabled.
-	// sbin_claude_uvm
+	// decision at AccessCounterThreshold.
+	//
+	// A region whose first touch is a write is migrated on demand instead: a
+	// remote write is never performed (spec 15), so mapping it REMOTE would
+	// only add a round trip before the access counter asked for the same
+	// migration. Requires AccessCounterEnabled. // sbin_claude_uvm
 	LazyRemotePTE bool
 
 	// TBNExpandRatio is the occupancy percentage an ancestor node must exceed

@@ -164,10 +164,11 @@ var uvmAccessCounterThresholdFlag = flag.Uint64("uvm-access-counter-threshold", 
 // This defers that publication to the first access.
 var uvmLazyRemotePTEFlag = flag.Bool("uvm-lazy-remote-pte", false,
 	"Publish the CPU-remote mapping of a managed page on its first GPU "+
-		"access instead of at allocation time. The first touch of a 64KB "+
-		"region is then a page fault whose only effect is to turn that "+
-		"region's PTEs from INVALID to REMOTE; nothing migrates, and "+
-		"migration stays the access counter's decision. "+
+		"access instead of at allocation time. A 64KB region's first read is "+
+		"then a page fault whose only effect is to turn that region's PTEs "+
+		"from INVALID to REMOTE; nothing migrates, and migration stays the "+
+		"access counter's decision. A region whose first touch is a write is "+
+		"migrated on demand instead, since a remote write is never performed. "+
 		"Requires -uvm-access-counter=true.")
 var uvmDisablePrefetchFlag = flag.Bool("uvm-disable-prefetch", false,
 	"Restrict every UVM fault service to its own 64KB leaf (no TBN expansion).")

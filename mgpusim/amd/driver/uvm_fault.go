@@ -143,11 +143,25 @@ func (m *UVMManager) installRemotePTE(managedPage *ManagedPage) {
 // region's REMOTE mappings instead of opening a migration service.
 //
 // With LazyRemotePTE a managed page starts INVALID rather than REMOTE, so the
-// first access to a 64KB region faults. That fault is not a demand for
+// first access to a 64KB region faults. A read fault is not a demand for
 // residency: the driver only publishes the CPU-remote mapping the eager path
 // would have published at allocation time, and the access counter keeps sole
 // responsibility for deciding when the region migrates (spec 7.1, 15). The
 // fixed software latency is charged once, the same way a fault service is.
+//
+// A region whose first touch is a WRITE is migrated on the spot instead. A
+// remote write is never committed to host memory (spec 15): the access counter
+// stalls it and asks for the very migration this fault could have started. So
+// publishing REMOTE for it would buy a guaranteed-wasted round trip - fault,
+// install, replay, stall, notify, service - to reach the same place. Handing
+// the fault back to the ordinary path makes it a demand migration, and because
+// no page was ever REMOTE-mapped the transition is INVALID -> GPU_LOCAL, which
+// needs no TLB invalidation either (spec 2.1 transition table).
+//
+// Only the region's first fault decides. Once an install is pending, a write
+// arriving behind it rides the same replay and then takes the ordinary
+// REMOTE-write stall - which also keeps the install from racing a migration
+// for the same pages.
 //
 // The install is region-scoped because the fault-service granularity is, and
 // because the replay that releases the stalled translations names a 64KB range
@@ -155,7 +169,7 @@ func (m *UVMManager) installRemotePTE(managedPage *ManagedPage) {
 // to re-fault behind that same replay.
 //
 // It reports whether it took ownership of the fault. // sbin_claude_uvm
-func (m *UVMManager) tryLazyRemoteMapLocked(key RegionKey) bool {
+func (m *UVMManager) tryLazyRemoteMapLocked(key RegionKey, isWrite bool) bool {
 	if !m.config.AccessCounterEnabled || !m.config.LazyRemotePTE {
 		return false
 	}
@@ -177,6 +191,11 @@ func (m *UVMManager) tryLazyRemoteMapLocked(key RegionKey) bool {
 		m.stats.CoalescedFaults++
 
 		return true
+	}
+
+	// First touch is a write: migrate now rather than map remotely.
+	if isWrite {
+		return false
 	}
 
 	if !m.regionNeedsRemoteMapLocked(region) {
@@ -290,9 +309,10 @@ func (m *UVMManager) onPageFault(
 		return
 	}
 
-	// sbin_claude_uvm: under LazyRemotePTE the first access to a cold region
-	// is answered by publishing its REMOTE mappings, not by migrating it.
-	if m.tryLazyRemoteMapLocked(key) {
+	// sbin_claude_uvm: under LazyRemotePTE a cold region's first read is
+	// answered by publishing its REMOTE mappings rather than by migrating it.
+	// A first-touch write falls through to the ordinary demand path.
+	if m.tryLazyRemoteMapLocked(key, isWrite) {
 		return
 	}
 
