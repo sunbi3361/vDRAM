@@ -24,7 +24,8 @@ import (
 	"github.com/sarchlab/mgpusim/v4/amd/timing/cp"
 	"github.com/sarchlab/mgpusim/v4/amd/timing/pagemigrationcontroller"
 	"github.com/sarchlab/mgpusim/v4/amd/timing/rdma"
-	"github.com/sarchlab/mgpusim/v4/amd/timing/utopia/rsw" // sbin_claude_utopia: RestSeg walker component.
+	"github.com/sarchlab/mgpusim/v4/amd/timing/utopia/rsw"         // sbin_claude_utopia: RestSeg walker component.
+	"github.com/sarchlab/mgpusim/v4/amd/timing/virtualcaching/fbt" // sbin_claude_fbt: Forward-Backward Table component.
 )
 
 // Builder builds a hardware platform for timing simulation.
@@ -80,16 +81,23 @@ type Builder struct {
 	accessCounterThresh  uint64              // sbin_codex
 	maxOutstandingRemote int                 // sbin_claude
 	utu                  *rsw.Comp           // sbin_claude_utopia: RestSeg walker (nil on baseline).
+	fbt                  *fbt.Comp           // sbin_claude_fbt: Forward-Backward Table (nil unless the FBT topology is used).
 	asu                  *asu.Comp           // sbin_claude_avatar: speculation unit (nil on baseline).
 }
 
 // MakeBuilder creates a new builder.
 func MakeBuilder() Builder {
 	return Builder{
-		freq:                           1 * sim.GHz,
-		numCUPerShaderArray:            4,
-		numShaderArray:                 16,
-		l2CacheSize:                    2 * mem.MB,
+		freq:                1 * sim.GHz,
+		numCUPerShaderArray: 4,
+		numShaderArray:      16,
+		// Pre-edit code (commented per project convention):
+		// l2CacheSize: 2 * mem.MB,
+		//
+		// sbin_claude_fbt: the shared L2 is the second stage of the virtual
+		// cache hierarchy's translation filter; a miss here is what forces a
+		// translation.
+		l2CacheSize:                    4 * mem.MB,
 		numMemoryBank:                  16,
 		log2CacheLineSize:              6,
 		log2PageSize:                   12,
@@ -867,7 +875,13 @@ func (b *Builder) connectL2TLBToGMMU() {
 
 func (b *Builder) buildL2TLB() {
 	numEntries := 512
-	numWays := 64
+	// Pre-edit code (commented per project convention):
+	// numWays := 64
+	//
+	// sbin_claude_fbt: 64 ways over 512 entries left only 8 sets, so a
+	// working set of a few thousand pages piled onto them and the same page
+	// was evicted and re-walked repeatedly. 16 ways gives 32 sets.
+	numWays := 16
 	// numSets := int(numEntries/numWays)
 	numSets := numEntries / numWays // sbin_codex: restore the baseline expression shape; both operands are int.
 
@@ -877,7 +891,18 @@ func (b *Builder) buildL2TLB() {
 		WithNumWays(numWays).
 		WithNumSets(numSets).
 		WithNumMSHREntry(64).
-		WithNumReqPerCycle(1024).
+		// Pre-edit code (commented per project convention):
+		// WithNumReqPerCycle(1024).
+		//
+		// sbin_claude_fbt: 1024 requests per cycle made the shared L2 TLB an
+		// infinite-bandwidth structure. The serialisation at a shared TLB is
+		// the overhead virtual caching exists to filter, so modelling it away
+		// left virtual caching with nothing to win. It also sized every L2
+		// TLB port buffer at 1024 entries.
+		WithNumReqPerCycle(16).
+		// sbin_claude_fbt: a shared, second-level structure is not on the
+		// critical path of an L1 hit, so it is not latency-critical.
+		WithLatency(10).
 		// sbin_claude_vc: the memory topology decides whether the L2 TLB
 		// needs a second top channel for the memory-side translators.
 		WithNumTopChannels(b.memoryTopology.l2TLBTopChannels()).

@@ -16,7 +16,8 @@ import (
 	"github.com/sarchlab/mgpusim/v4/amd/timing/avatar/asu"    // sbin_claude_avatar
 	"github.com/sarchlab/mgpusim/v4/amd/timing/cu"
 	"github.com/sarchlab/mgpusim/v4/amd/timing/rdma"
-	"github.com/sarchlab/mgpusim/v4/amd/timing/utopia/rsw" // sbin_claude_utopia
+	"github.com/sarchlab/mgpusim/v4/amd/timing/utopia/rsw"         // sbin_claude_utopia
+	"github.com/sarchlab/mgpusim/v4/amd/timing/virtualcaching/fbt" // sbin_claude_fbt
 )
 
 const (
@@ -116,6 +117,10 @@ type reporter struct {
 	// hptGMMUs are the per-GPU page-table walkers running in FS-HPT mode.
 	// They own the hashed-walk counters. // sbin_claude_hpt
 	hptGMMUs []*gmmu.Comp
+
+	// fbtUnits are the per-GPU Forward-Backward Tables. They own the count of
+	// page walks the virtual cache hierarchy avoided. // sbin_claude_fbt
+	fbtUnits []*fbt.Comp
 }
 
 func newReporter(s *simulation.Simulation) *reporter {
@@ -136,8 +141,29 @@ func newReporter(s *simulation.Simulation) *reporter {
 	r.collectUtopiaUnits(s)    // sbin_claude_utopia
 	r.collectAvatarUnits(s)    // sbin_claude_avatar
 	r.collectHPTGMMUs(s)       // sbin_claude_hpt
+	r.collectFBTUnits(s)       // sbin_claude_fbt
 
 	return r
+}
+
+// collectFBTUnits finds every GPU-side Forward-Backward Table.
+// sbin_claude_fbt
+func (r *reporter) collectFBTUnits(s *simulation.Simulation) {
+	for i := 1; ; i++ {
+		name := fmt.Sprintf("GPU[%d].FBT", i)
+
+		c := s.GetComponentByName(name)
+		if c == nil {
+			return
+		}
+
+		unit, ok := c.(*fbt.Comp)
+		if !ok {
+			return
+		}
+
+		r.fbtUnits = append(r.fbtUnits, unit)
+	}
 }
 
 // collectHPTGMMUs finds every GPU-side page-table walker running in FS-HPT
@@ -535,6 +561,7 @@ func (r *reporter) report() {
 	r.reportL2TLBMPKI()  // sbin_codex: L2 TLB MPKI from the shared tracers.
 	r.reportUVM()        // sbin_codex: UVM demand-paging statistics.
 	r.reportUtopia()     // sbin_claude_utopia: RestSeg walk statistics.
+	r.reportFBT()        // sbin_claude_fbt: Forward-Backward Table statistics.
 	r.reportAvatar()     // sbin_claude_avatar: speculation statistics.
 	r.reportHPT()        // sbin_claude_hpt: hashed-walk statistics.
 }
@@ -620,6 +647,36 @@ func (r *reporter) reportAvatar() {
 				{"avatar_region_bound_count", float64(bound)},
 				{"avatar_region_free_count", float64(free)},
 			}...)
+		}
+
+		for _, row := range rows {
+			r.dataRecorder.InsertData(tableName, metric{
+				Location: location,
+				What:     row.what,
+				Value:    row.val,
+				Unit:     "",
+			})
+		}
+	}
+}
+
+// reportFBT emits the Forward-Backward Table counters. The hit count is the
+// number of page walks the virtual cache hierarchy avoided by consulting the
+// table on a shared TLB miss, which is what the paper's "VC With OPT"
+// configuration is measured on. // sbin_claude_fbt
+func (r *reporter) reportFBT() {
+	for i, unit := range r.fbtUnits {
+		stats := unit.Stats()
+		location := fmt.Sprintf("GPU[%d].FBT", i+1)
+
+		rows := []struct {
+			what string
+			val  float64
+		}{
+			{"fbt_hit_count", float64(stats.Hits)},
+			{"fbt_miss_count", float64(stats.Misses)},
+			{"fbt_install_count", float64(stats.Installs)},
+			{"fbt_eviction_count", float64(stats.Evictions)},
 		}
 
 		for _, row := range rows {

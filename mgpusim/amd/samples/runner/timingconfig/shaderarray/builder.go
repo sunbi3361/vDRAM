@@ -508,8 +508,17 @@ func (b *Builder) buildL1VTLBs() {
 		WithEngine(b.simulation.GetEngine()).
 		WithFreq(b.freq).
 		WithNumMSHREntry(64).
-		WithNumSets(4).
-		WithNumWays(64).
+		// Pre-edit code (commented per project convention):
+		// WithNumSets(4).
+		// WithNumWays(64).
+		//
+		// sbin_claude_fbt: 4 sets x 64 ways is a 256-entry per-CU TLB, eight
+		// times the 32-entry fully associative TLB the virtual caching paper
+		// evaluates as its baseline (ASPLOS'18 Table 1). A filter that large
+		// keeps the shared TLB nearly idle, which is the pressure virtual
+		// caching exists to relieve.
+		WithNumSets(1).
+		WithNumWays(32).
 		WithNumReqPerCycle(32).
 		WithLatency(1).
 		// WithTranslationProviderMapper(b.l1TLBAddressMapper) // sbin_codex: pre-edit chain ending.
@@ -525,7 +534,13 @@ func (b *Builder) buildL1VTLBs() {
 }
 
 func (b *Builder) buildL1VCaches() {
-	l1vSize := 16 * mem.KB
+	// Pre-edit code (commented per project convention):
+	// l1vSize := 16 * mem.KB
+	//
+	// sbin_claude_fbt: the per-CU L1 data cache is the first stage of the
+	// virtual cache hierarchy's translation filter, so its capacity decides
+	// how much translation traffic ever reaches the shared TLB.
+	l1vSize := 128 * mem.KB
 	if b.l1vCacheSize > 0 {
 		l1vSize = b.l1vCacheSize
 	}
