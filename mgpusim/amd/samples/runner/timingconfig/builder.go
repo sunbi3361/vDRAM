@@ -70,6 +70,9 @@ type Builder struct {
 
 	// sbin_claude_hpt: hashed-page-table (FS-HPT) walk configuration.
 	hptCfg HPTPlatformConfig
+
+	// sbin_claude_latpc: LATPC (MICRO'25) translation-path configuration.
+	latpcCfg LATPCPlatformConfig
 }
 
 // uvmCapacity resolves the GPU capacity UVM managed memory may occupy. An
@@ -123,7 +126,8 @@ func (b Builder) WithMagicMemoryCopy() Builder {
 }
 
 // WithGPUType sets the GPU type for timing simulation (r9nano, mi300a,
-// ideal-l1tlb, virtual-caching, utopia, avatar, or hpt). // sbin_claude_hpt
+// ideal-l1tlb, virtual-caching, utopia, avatar, hpt, or latpc).
+// sbin_claude_latpc: latpc added.
 func (b Builder) WithGPUType(gpuType string) Builder {
 	b.gpuType = gpuType
 	return b
@@ -169,6 +173,32 @@ func (b Builder) WithHPT(config HPTPlatformConfig) Builder {
 	return b
 }
 
+// WithLATPC sets the LATPC configuration. It only takes effect when the GPU
+// type is "latpc", except L1TLBMSHREntries, which also applies to the plain
+// r9nano and hpt configurations (the sizing knob must hit the baseline and
+// LATPC symmetrically). // sbin_claude_latpc
+func (b Builder) WithLATPC(config LATPCPlatformConfig) Builder {
+	b.latpcCfg = config
+	return b
+}
+
+// LATPCPlatformConfig carries the LATPC knobs from the runner into the
+// platform builder (refs/latpc-plan.md 2.6). // sbin_claude_latpc
+type LATPCPlatformConfig struct {
+	// L4RowHitLatency is the cycles one batched member's L4 PTE load costs
+	// in the GMMU (a DRAM row-buffer hit). 0 keeps the GMMU default (20).
+	L4RowHitLatency int
+	// L1TLBMSHREntries overrides the per-CU L1V TLB MSHR entry count for
+	// r9nano-based configurations. 0 keeps the default (64).
+	L1TLBMSHREntries int
+}
+
+// latpcEnabled reports whether the platform builds the LATPC GPU type.
+// sbin_claude_latpc
+func (b *Builder) latpcEnabled() bool {
+	return b.gpuType == "latpc"
+}
+
 // HPTPlatformConfig carries the FS-HPT knobs from the runner into the
 // platform builder (hpt-plan.md 1.3). // sbin_claude_hpt
 type HPTPlatformConfig struct {
@@ -204,6 +234,22 @@ func (b *Builder) validateHPTConfig() {
 	}
 	if b.numGPUs > 1 {
 		panic("-gpu=hpt currently supports a single GPU")
+	}
+}
+
+// validateLATPCConfig rejects unsupported LATPC combinations. UVM is a hard
+// constraint, not scope: the GMMU's batch drain answers members straight
+// from the page table and would bypass the managed-page fault gating
+// (refs/latpc-plan.md 1.4). // sbin_claude_latpc
+func (b *Builder) validateLATPCConfig() {
+	if !b.latpcEnabled() {
+		return
+	}
+	if b.numGPUs > 1 {
+		panic("-gpu=latpc currently supports a single GPU")
+	}
+	if b.uvmEnabled {
+		panic("-gpu=latpc does not support -uvm (non-UVM only)")
 	}
 }
 
@@ -386,6 +432,8 @@ func (b Builder) Build() *sim.Domain {
 	}
 	// sbin_claude_hpt: the hashed walk needs no shared state, only validation.
 	b.validateHPTConfig()
+	// sbin_claude_latpc: LATPC needs no shared state either, only validation.
+	b.validateLATPCConfig()
 
 	b.platform = &sim.Domain{}
 
@@ -571,6 +619,22 @@ func (b *Builder) createGPUBuilder(
 				Enabled:         true,
 				AccessesPerWalk: b.hptAccessesPerWalk(),
 			}).
+			WithL1TLBMSHREntries(b.latpcCfg.L1TLBMSHREntries). // sbin_claude_latpc: sizing knob.
+			WithSimulation(b.simulation).
+			WithMMU(mmuComponent).
+			WithLog2PageSize(b.log2PageSize).
+			WithGlobalStorage(b.globalStorage)
+	case "latpc": // sbin_claude_latpc: LATPC (MICRO'25) GPU config.
+		// Like HPT, LATPC swaps neither a component factory nor a topology -
+		// the Regularity Detector, the LATC MSHR, and LATP batching are all
+		// builder values on the baseline path - so the r9nano builder is
+		// returned directly instead of through a wrapper package.
+		return r9nano.MakeBuilder().
+			WithLATPCSettings(r9nano.LATPCSettings{
+				Enabled:         true,
+				L4RowHitLatency: b.latpcCfg.L4RowHitLatency,
+			}).
+			WithL1TLBMSHREntries(b.latpcCfg.L1TLBMSHREntries).
 			WithSimulation(b.simulation).
 			WithMMU(mmuComponent).
 			WithLog2PageSize(b.log2PageSize).
@@ -595,6 +659,7 @@ func (b *Builder) createGPUBuilder(
 			WithGlobalStorage(b.globalStorage)
 	default:
 		return r9nano.MakeBuilder().
+			WithL1TLBMSHREntries(b.latpcCfg.L1TLBMSHREntries). // sbin_claude_latpc: sizing knob.
 			WithSimulation(b.simulation).
 			WithMMU(mmuComponent).
 			WithLog2PageSize(b.log2PageSize).

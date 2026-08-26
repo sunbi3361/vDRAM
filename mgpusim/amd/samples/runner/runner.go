@@ -73,6 +73,11 @@ type Runner struct {
 	// sbin_claude_hpt: FS-HPT hashed-page-table configuration.
 	HPTAccessesPerWalk int
 
+	// sbin_claude_latpc: LATPC (MICRO'25) configuration. L1TLBMSHREntries
+	// also applies to the r9nano and hpt types (0 keeps the default 64).
+	LATPCL4RowHitLatency int
+	L1TLBMSHREntries     int
+
 	GPUIDs     []int
 	benchmarks []benchmarks.Benchmark
 
@@ -198,6 +203,14 @@ func (r *Runner) buildTimingPlatform() {
 			AccessesPerWalk: r.HPTAccessesPerWalk,
 		})
 	}
+
+	// sbin_claude_latpc: always handed over - L4RowHitLatency only takes
+	// effect with -gpu=latpc, while L1TLBMSHREntries also sizes the r9nano
+	// and hpt configurations (0 keeps the default).
+	b = b.WithLATPC(timingconfig.LATPCPlatformConfig{
+		L4RowHitLatency:  r.LATPCL4RowHitLatency,
+		L1TLBMSHREntries: r.L1TLBMSHREntries,
+	})
 
 	if *magicMemoryCopy {
 		b = b.WithMagicMemoryCopy()

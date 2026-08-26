@@ -39,9 +39,24 @@ var archFlag = flag.String("arch", "gcn3", "GPU architecture: gcn3 or cdna3.")
 //
 //	"GPU model for timing simulation: r9nano, mi300a, ideal-l1tlb, "+
 //		"virtual-caching, utopia, or avatar.") // sbin_claude_avatar
+// Pre-edit code (commented per project convention):
+// var gpuTypeFlag = flag.String("gpu", "r9nano",
+//
+//	"GPU model for timing simulation: r9nano, mi300a, ideal-l1tlb, "+
+//		"virtual-caching, utopia, avatar, or hpt.") // sbin_claude_hpt
 var gpuTypeFlag = flag.String("gpu", "r9nano",
 	"GPU model for timing simulation: r9nano, mi300a, ideal-l1tlb, "+
-		"virtual-caching, utopia, avatar, or hpt.") // sbin_claude_hpt
+		"virtual-caching, utopia, avatar, hpt, or latpc.") // sbin_claude_latpc
+
+// sbin_claude_latpc: LATPC (MICRO'25) flags. LATPC = Regularity Detector +
+// LATC compressed L1 TLB MSHR + LATP batched page walks; non-UVM only.
+var latpcL4RowHitLatencyFlag = flag.Int("latpc-l4-row-hit-latency", 20,
+	"Cycles one LATP batch member's L4 PTE load costs in the GMMU (a DRAM "+
+		"row-buffer hit). Only meaningful with -gpu=latpc.")
+var l1TLBMSHRFlag = flag.Int("l1tlb-mshr", 0,
+	"Per-CU L1V TLB MSHR entry count; 0 keeps the configuration default "+
+		"(64). Honored by the r9nano, hpt, and latpc GPU types, so the "+
+		"paper's 8-entry contention regime can be measured symmetrically.")
 
 // sbin_claude_hpt: FS-HPT (PACT'24) hashed-page-table flags. The cost of one
 // memory reference is the GMMU's existing per-level page-walking latency, so
@@ -259,6 +274,7 @@ func (r *Runner) parseFlag() *Runner {
 	r.validateUtopiaFlags()
 	r.validateAvatarFlags() // sbin_claude_avatar
 	r.validateHPTFlags()    // sbin_claude_hpt
+	r.validateLATPCFlags()  // sbin_claude_latpc
 
 	return r
 }
@@ -321,6 +337,10 @@ func (r *Runner) parseSimulationFlags() {
 	// sbin_claude_hpt: HPT flags.
 	r.HPTAccessesPerWalk = *hptAccessesPerWalkFlag
 
+	// sbin_claude_latpc: LATPC flags.
+	r.LATPCL4RowHitLatency = *latpcL4RowHitLatencyFlag
+	r.L1TLBMSHREntries = *l1TLBMSHRFlag
+
 	r.ArchType = parseArchFlag()
 	r.GPUType = parseGPUTypeFlag()
 }
@@ -369,6 +389,31 @@ func (r *Runner) validateHPTFlags() {
 	}
 	if r.HPTAccessesPerWalk < 1 {
 		log.Panic("-hpt-accesses-per-walk must be at least 1")
+	}
+}
+
+// validateLATPCFlags rejects invalid LATPC flag combinations. The single-GPU
+// cap is a scope choice; the -uvm rejection is a hard constraint: the GMMU's
+// batch drain answers members straight from the page table and would bypass
+// the managed-page fault gating (refs/latpc-plan.md 1.4). // sbin_claude_latpc
+func (r *Runner) validateLATPCFlags() {
+	if r.L1TLBMSHREntries < 0 {
+		log.Panic("-l1tlb-mshr must not be negative")
+	}
+	if r.GPUType != "latpc" {
+		return
+	}
+	if !r.Timing {
+		log.Panic("-gpu=latpc requires -timing")
+	}
+	if r.UVM {
+		log.Panic("-gpu=latpc does not support -uvm (non-UVM only)")
+	}
+	if len(r.GPUIDs) > 1 {
+		log.Panic("-gpu=latpc currently supports a single GPU")
+	}
+	if r.LATPCL4RowHitLatency < 1 {
+		log.Panic("-latpc-l4-row-hit-latency must be at least 1")
 	}
 }
 

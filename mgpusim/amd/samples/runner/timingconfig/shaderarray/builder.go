@@ -40,6 +40,13 @@ type Builder struct {
 	memPipelineBufferSize     int
 	maxCoalescingPenalty      int
 	registerScoreboard        bool
+	// latpcEnabled wraps each CU's coalescer with the LATPC Regularity
+	// Detector and builds the L1V TLBs with the LATC compressed MSHR
+	// (refs/latpc-plan.md 2.6). // sbin_claude_latpc
+	latpcEnabled bool
+	// l1TLBMSHRSize overrides the L1V TLB MSHR entry count when non-zero,
+	// for any configuration (paper regime: 8). // sbin_claude_latpc
+	l1TLBMSHRSize int
 	// sbin_codex: injected strategy owns vector/scalar data-path construction and wiring.
 	dataPathTopology   DataPathTopology
 	remoteDataPath     remoteDataPathConfig // sbin_codex
@@ -172,6 +179,22 @@ func (b Builder) WithL1TLBFactory(
 
 // WithPageTable sets the page table passed to the ideal L1 TLB factory.
 // sbin_codex: used by ideal-L1-TLB GPU configs (todo 4).
+// WithLATPC enables the LATPC translation path in this shader array: the
+// Regularity Detector on every CU's vector-memory coalescer and the LATC
+// compressed MSHR on every L1V TLB. // sbin_claude_latpc
+func (b Builder) WithLATPC(enabled bool) Builder {
+	b.latpcEnabled = enabled
+	return b
+}
+
+// WithL1TLBMSHRSize overrides the L1V TLB MSHR entry count (default 64).
+// Works for any configuration, so the paper's 8-entry contention regime can
+// be measured on the baseline and on LATPC symmetrically. // sbin_claude_latpc
+func (b Builder) WithL1TLBMSHRSize(n int) Builder {
+	b.l1TLBMSHRSize = n
+	return b
+}
+
 func (b Builder) WithPageTable(pageTable vm.PageTable) Builder {
 	b.pageTable = pageTable
 	return b
@@ -431,6 +454,12 @@ func (b *Builder) buildCUs() {
 		cuBuilder = cuBuilder.WithRegisterScoreboard(true)
 	}
 
+	// sbin_claude_latpc: the Regularity Detector needs the page size to
+	// derive VPNs from the coalesced addresses.
+	if b.latpcEnabled {
+		cuBuilder = cuBuilder.WithLATPCRegularityDetector(b.log2PageSize)
+	}
+
 	for i := 0; i < b.numCUs; i++ {
 		cuName := fmt.Sprintf("%s.CU[%d]", b.name, i)
 		computeUnit := cuBuilder.Build(cuName)
@@ -504,10 +533,26 @@ func (b *Builder) buildL1VTLBs() {
 		return
 	}
 
+	// Pre-edit code (commented per project convention):
+	// builder := tlb.MakeBuilder().
+	// 	WithEngine(b.simulation.GetEngine()).
+	// 	WithFreq(b.freq).
+	// 	WithNumMSHREntry(64).
+	// 	...
+	//
+	// sbin_claude_latpc: the MSHR entry count becomes overridable
+	// (-l1tlb-mshr) and the LATPC configuration selects the LATC compressed
+	// MSHR. Defaults are unchanged: 64 classic entries.
+	l1vTLBMSHREntries := 64
+	if b.l1TLBMSHRSize > 0 {
+		l1vTLBMSHREntries = b.l1TLBMSHRSize
+	}
+
 	builder := tlb.MakeBuilder().
 		WithEngine(b.simulation.GetEngine()).
 		WithFreq(b.freq).
-		WithNumMSHREntry(64).
+		WithNumMSHREntry(l1vTLBMSHREntries). // sbin_claude_latpc
+		WithCompressedMSHR(b.latpcEnabled).  // sbin_claude_latpc
 		// Pre-edit code (commented per project convention):
 		// WithNumSets(4).
 		// WithNumWays(64).
