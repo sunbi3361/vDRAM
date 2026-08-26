@@ -429,10 +429,40 @@ func (m *tlbMiddleware) handleTranslationHit(
 	return true
 }
 
+// mshrCanAccept reports whether the MSHR can track a new miss for the
+// request. The LATC MSHR accepts a miss that can be compressed into an
+// existing group even when every group entry is taken. // sbin_claude_latpc
+func (m *tlbMiddleware) mshrCanAccept(req *vm.TranslationReq) bool {
+	if latc, ok := m.mshr.(*latcMSHR); ok {
+		return latc.CanAccept(req)
+	}
+
+	return !m.mshr.IsFull()
+}
+
+// mshrAdd tracks a new outstanding miss, compressed when LATC is enabled.
+// sbin_claude_latpc
+func (m *tlbMiddleware) mshrAdd(req *vm.TranslationReq) *mshrEntry {
+	if latc, ok := m.mshr.(*latcMSHR); ok {
+		return latc.AddCompressed(req)
+	}
+
+	return m.mshr.Add(req.PID, req.VAddr)
+}
+
 func (m *tlbMiddleware) handleTranslationMiss(
 	req *vm.TranslationReq,
 ) bool {
-	if m.mshr.IsFull() {
+	// Pre-edit code (commented per project convention):
+	// if m.mshr.IsFull() {
+	// 	return false
+	// }
+	//
+	// sbin_claude_latpc: LATC-aware admission, and the blocked attempts the
+	// baseline dropped silently are now counted (one per stall cycle) so the
+	// paper's reservation-failure metric is reportable for every mode.
+	if !m.mshrCanAccept(req) {
+		m.reservationFailureCount++
 		return false
 	}
 
@@ -456,6 +486,32 @@ func (m *tlbMiddleware) handleTranslationMiss(
 		return true
 	}
 	return false
+}
+
+// ReservationFailureCount returns how many lookup attempts were blocked
+// because the MSHR could not accept the miss - one count per blocked attempt,
+// i.e. per stall cycle at the head of a channel. // sbin_claude_latpc
+func (c *Comp) ReservationFailureCount() uint64 {
+	return c.reservationFailureCount
+}
+
+// CompressedMSHREnabled reports whether this TLB uses the LATC compressed
+// MSHR. // sbin_claude_latpc
+func (c *Comp) CompressedMSHREnabled() bool {
+	_, ok := c.mshr.(*latcMSHR)
+	return ok
+}
+
+// LATCStats returns the compressed MSHR's counters: group entries allocated
+// and misses compressed into an existing group. Zeros when LATC is off.
+// sbin_claude_latpc
+func (c *Comp) LATCStats() (groupsAllocated, coalescedSubentries uint64) {
+	latc, ok := c.mshr.(*latcMSHR)
+	if !ok {
+		return 0, 0
+	}
+
+	return latc.groupsAllocated, latc.coalescedSubentries
 }
 
 func (m *tlbMiddleware) vAddrToSetID(vAddr uint64) (setID int) {
@@ -533,7 +589,8 @@ func (m *tlbMiddleware) fetchBottom(req *vm.TranslationReq) bool {
 		m.Comp,
 	)
 
-	mshrEntry := m.mshr.Add(req.PID, req.VAddr)
+	// mshrEntry := m.mshr.Add(req.PID, req.VAddr) // sbin_claude_latpc: pre-edit classic-only allocation.
+	mshrEntry := m.mshrAdd(req) // sbin_claude_latpc
 	mshrEntry.Requests = append(mshrEntry.Requests, req)
 	mshrEntry.reqToBottom = fetchBottom
 

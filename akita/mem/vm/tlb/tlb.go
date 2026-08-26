@@ -55,6 +55,11 @@ type Comp struct {
 	responsePipeline    pipelining.Pipeline
 	responseBuffer      sim.Buffer
 
+	// reservationFailureCount counts lookup attempts blocked because the
+	// MSHR could not accept the miss (one per stall cycle at a channel
+	// head); the paper's Figure-18b metric. // sbin_claude_latpc
+	reservationFailureCount uint64
+
 	// bottomCommitsThisCycle counts the MSHR fills committed in the current
 	// cycle. The multi-channel response path has no responding-entry
 	// register to serialise on, so the fill rate is capped explicitly to
