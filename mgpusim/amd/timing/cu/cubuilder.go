@@ -31,6 +31,11 @@ type Builder struct {
 	maxCoalescingPenalty int
 	registerScoreboard   bool
 
+	// latpcLog2PageSize, when non-zero, wraps the vector-memory coalescer
+	// with the LATPC Regularity Detector (refs/latpc-plan.md 2.3).
+	// sbin_claude_latpc
+	latpcLog2PageSize uint64
+
 	decoder    emu.Decoder
 	alu        emu.ALU
 	aluFactory emu.ALUFactory
@@ -98,6 +103,15 @@ func (b Builder) WithVGPRCount(counts []int) Builder {
 // WithSGPRCount equals the number of SGPRs in the Compute Unit.
 func (b Builder) WithSGPRCount(count int) Builder {
 	b.sgprCount = count
+	return b
+}
+
+// WithLATPCRegularityDetector wraps the vector-memory coalescer with the
+// LATPC Regularity Detector so each generated request carries its
+// <GroupID, Stride, Index> triple (refs/latpc-plan.md 2.3). A zero
+// log2PageSize leaves the detector off. // sbin_claude_latpc
+func (b Builder) WithLATPCRegularityDetector(log2PageSize uint64) Builder {
+	b.latpcLog2PageSize = log2PageSize
 	return b
 }
 
@@ -289,8 +303,23 @@ func (b *Builder) equipVectorMemoryUnit(cu *ComputeUnit) {
 	vectorMemDecoder := NewDecodeUnit(cu)
 	cu.VectorMemDecoder = vectorMemDecoder
 
-	coalescer := &defaultCoalescer{
+	// Pre-edit code (commented per project convention):
+	// coalescer := &defaultCoalescer{
+	// 	log2CacheLineSize: b.log2CachelineSize,
+	// }
+	// vectorMemoryUnit := NewVectorMemoryUnit(cu, coalescer)
+	//
+	// sbin_claude_latpc: the LATPC configuration wraps the coalescer with
+	// the Regularity Detector so every vector memory request carries its
+	// group triple.
+	var coalescer coalescer = &defaultCoalescer{
 		log2CacheLineSize: b.log2CachelineSize,
+	}
+	if b.latpcLog2PageSize > 0 {
+		coalescer = &latpcCoalescer{
+			inner:        coalescer,
+			log2PageSize: b.latpcLog2PageSize,
+		}
 	}
 	vectorMemoryUnit := NewVectorMemoryUnit(cu, coalescer)
 	vectorMemoryUnit.maxCoalescingPenalty = b.maxCoalescingPenalty
