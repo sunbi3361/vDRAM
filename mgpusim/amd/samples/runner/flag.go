@@ -39,9 +39,15 @@ var archFlag = flag.String("arch", "gcn3", "GPU architecture: gcn3 or cdna3.")
 //
 //	"GPU model for timing simulation: r9nano, mi300a, ideal-l1tlb, "+
 //		"virtual-caching, utopia, or avatar.") // sbin_claude_avatar
+//
+// Pre-edit code (commented per project convention):
+// var gpuTypeFlag = flag.String("gpu", "r9nano",
+//
+//	"GPU model for timing simulation: r9nano, mi300a, ideal-l1tlb, "+
+//		"virtual-caching, utopia, avatar, or hpt.") // sbin_claude_hpt
 var gpuTypeFlag = flag.String("gpu", "r9nano",
 	"GPU model for timing simulation: r9nano, mi300a, ideal-l1tlb, "+
-		"virtual-caching, utopia, avatar, or hpt.") // sbin_claude_hpt
+		"virtual-caching, utopia, avatar, hpt, or softwalker.") // sbin_claude_softwalker
 
 // sbin_claude_hpt: FS-HPT (PACT'24) hashed-page-table flags. The cost of one
 // memory reference is the GMMU's existing per-level page-walking latency, so
@@ -51,6 +57,36 @@ var hptAccessesPerWalkFlag = flag.Int("hpt-accesses-per-walk", 1,
 	"Memory references one hashed-page-table walk costs. 1 is ideal HPT "+
 		"(no hash collision); larger values model collision chains. Only "+
 		"meaningful with -gpu=hpt.")
+
+// sbin_claude_softwalker: SoftWalker (MICRO'25) software page-walk flags.
+// The per-level memory reference keeps the GMMU's existing page-walking
+// latency, so comm + setup + per-level instruction cycles are the only
+// difference between the baseline and software walks.
+var swSlotsPerCUFlag = flag.Int("sw-slots-per-cu", 32,
+	"SoftPWB entries (PW Warp threads) per CU; total walk concurrency is "+
+		"this times the CU count. Only meaningful with -gpu=softwalker.")
+var swCommCyclesFlag = flag.Int("sw-comm-cycles", 10,
+	"One-way L2TLB<->CU communication cycles, charged twice per software "+
+		"walk. The paper models it as the L2 TLB access latency.")
+var swSetupCyclesFlag = flag.Int("sw-setup-cycles", 20,
+	"PW Warp per-walk setup cycles (SoftPWB load, field decode).")
+var swLevelCyclesFlag = flag.Int("sw-level-cycles", 8,
+	"Non-memory instruction cycles per traversed page-table level "+
+		"(offset computation, PTE check, FPWC issue).")
+var swInTLBMSHRMaxFlag = flag.Int("sw-in-tlb-mshr-max", 512,
+	"L2 TLB ways that may serve as In-TLB MSHR slots. 0 disables In-TLB "+
+		"MSHR (the paper's SW-w/o-In-TLB-MSHR ablation). Max 512 (the L2 "+
+		"TLB entry count).")
+
+// sbin_claude_softwalker: baseline sweep knobs (paper Figure 5 replication).
+// Valid with -gpu=r9nano; 0 keeps the defaults (16 in-flight walks, 64
+// MSHR entries).
+var gmmuMaxInflightFlag = flag.Int("gmmu-max-inflight", 0,
+	"Override the GMMU's concurrent page-walk cap (the hardware PTW count "+
+		"analog). 0 keeps the default of 16.")
+var l2TLBMSHRFlag = flag.Int("l2-tlb-mshr", 0,
+	"Override the shared L2 TLB's dedicated MSHR entry count. 0 keeps the "+
+		"default of 64.")
 
 // sbin_claude_avatar: Avatar (speculative translation with rapid
 // validation) flags.
@@ -252,13 +288,15 @@ func metricFileNameFlagIsSet() bool {
 // parseFlag applies the runner flag to runner object
 func (r *Runner) parseFlag() *Runner {
 	r.parseSimulationFlags()
+	r.parseSoftWalkerFlags() // sbin_claude_softwalker
 	r.parseGPUFlag()
 
 	// sbin_claude_utopia: needs r.GPUType and r.GPUIDs, so it runs after both
 	// parse steps.
 	r.validateUtopiaFlags()
-	r.validateAvatarFlags() // sbin_claude_avatar
-	r.validateHPTFlags()    // sbin_claude_hpt
+	r.validateAvatarFlags()     // sbin_claude_avatar
+	r.validateHPTFlags()        // sbin_claude_hpt
+	r.validateSoftWalkerFlags() // sbin_claude_softwalker
 
 	return r
 }
@@ -325,6 +363,18 @@ func (r *Runner) parseSimulationFlags() {
 	r.GPUType = parseGPUTypeFlag()
 }
 
+// parseSoftWalkerFlags applies the SoftWalker flags and the baseline sweep
+// knobs. sbin_claude_softwalker
+func (r *Runner) parseSoftWalkerFlags() {
+	r.SWSlotsPerCU = *swSlotsPerCUFlag
+	r.SWCommCycles = *swCommCyclesFlag
+	r.SWSetupCycles = *swSetupCyclesFlag
+	r.SWLevelCycles = *swLevelCyclesFlag
+	r.SWInTLBMSHRMax = *swInTLBMSHRMaxFlag
+	r.GMMUMaxInflight = *gmmuMaxInflightFlag
+	r.L2TLBNumMSHR = *l2TLBMSHRFlag
+}
+
 // validateAvatarFlags rejects invalid Avatar flag combinations (v1 scope).
 // sbin_claude_avatar
 func (r *Runner) validateAvatarFlags() {
@@ -369,6 +419,34 @@ func (r *Runner) validateHPTFlags() {
 	}
 	if r.HPTAccessesPerWalk < 1 {
 		log.Panic("-hpt-accesses-per-walk must be at least 1")
+	}
+}
+
+// validateSoftWalkerFlags rejects invalid SoftWalker flag combinations. The
+// single-GPU cap matches hpt/utopia/avatar. -uvm is rejected by scope choice
+// (softwalker-plan.md: non-UVM only - the paper's FFB page-fault path is
+// not modeled). sbin_claude_softwalker
+func (r *Runner) validateSoftWalkerFlags() {
+	if r.GPUType != "softwalker" {
+		return
+	}
+	if !r.Timing {
+		log.Panic("-gpu=softwalker requires -timing")
+	}
+	if r.UVM {
+		log.Panic("-gpu=softwalker does not support -uvm (non-UVM scope)")
+	}
+	if len(r.GPUIDs) > 1 {
+		log.Panic("-gpu=softwalker currently supports a single GPU")
+	}
+	if r.SWSlotsPerCU < 1 {
+		log.Panic("-sw-slots-per-cu must be at least 1")
+	}
+	if r.SWCommCycles < 0 || r.SWSetupCycles < 0 || r.SWLevelCycles < 0 {
+		log.Panic("SoftWalker latency flags must not be negative")
+	}
+	if r.SWInTLBMSHRMax < 0 {
+		log.Panic("-sw-in-tlb-mshr-max must not be negative")
 	}
 }
 

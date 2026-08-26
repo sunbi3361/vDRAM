@@ -26,6 +26,7 @@ type Builder struct {
 	addressMapperType      string
 	remotePorts            []sim.RemotePort
 	pageAdmissionPredicate func(vm.Page) bool // sbin_codex
+	inTLBMSHRMax           int                // sbin_claude_softwalker
 }
 
 // MakeBuilder returns a Builder
@@ -148,6 +149,24 @@ func (b Builder) WithNumMSHREntry(num int) Builder {
 	return b
 }
 
+// WithInTLBMSHR lets the TLB repurpose up to maxEntries of its own ways as
+// temporary MSHR slots when the dedicated MSHR is full (In-TLB MSHR,
+// SoftWalker, MICRO'25 4.5). A miss that would otherwise be refused evicts
+// the LRU way of its own set and parks the miss metadata there until the
+// fill returns; a set whose ways are all reserved refuses further overflow
+// misses, which models the paper's per-set contention. The default of 0
+// disables the mechanism and keeps the pre-existing refuse-on-full
+// behaviour bit-identical. sbin_claude_softwalker
+func (b Builder) WithInTLBMSHR(maxEntries int) Builder {
+	if maxEntries < 0 {
+		panic("the In-TLB MSHR capacity cannot be negative")
+	}
+
+	b.inTLBMSHRMax = maxEntries
+
+	return b
+}
+
 // WithLatency sets the latency of the TLB lookup. The latency is counted in
 // both hit and miss cases.
 func (b Builder) WithLatency(cycles int) Builder {
@@ -208,6 +227,13 @@ func (b Builder) Build(name string) *Comp {
 	tlb.state = b.state
 	tlb.pageAdmissionPredicate = b.pageAdmissionPredicate // sbin_codex
 	tlb.pendingCancels = make(map[string]struct{})        // sbin_claude_avatar
+
+	// sbin_claude_softwalker: an In-TLB MSHR cannot hold more entries than
+	// the TLB has ways to repurpose.
+	if b.inTLBMSHRMax > b.numSets*b.numWays {
+		panic("the In-TLB MSHR capacity cannot exceed the TLB entry count")
+	}
+	tlb.inTLBMSHRMax = b.inTLBMSHRMax
 
 	b.createPorts(name, tlb)
 	b.createTranslationProviderMapper(tlb)

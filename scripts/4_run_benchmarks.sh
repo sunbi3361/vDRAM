@@ -11,6 +11,7 @@ configs=(virtual-caching)
 # configs=(utopia) # sbin_claude_utopia: active selection (last assignment wins)
 # configs=(avatar) # sbin_claude_avatar: speculative translation config
 # configs=(hpt) # sbin_claude_hpt: FS-HPT hashed page table config
+# configs=(softwalker) # sbin_claude_softwalker: software page-walk config
 # configs=(baseline)
 
 benchmarks=(

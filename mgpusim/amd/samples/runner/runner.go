@@ -73,6 +73,16 @@ type Runner struct {
 	// sbin_claude_hpt: FS-HPT hashed-page-table configuration.
 	HPTAccessesPerWalk int
 
+	// sbin_claude_softwalker: SoftWalker software page-walk configuration.
+	SWSlotsPerCU   int
+	SWCommCycles   int
+	SWSetupCycles  int
+	SWLevelCycles  int
+	SWInTLBMSHRMax int
+	// sbin_claude_softwalker: baseline sweep knobs (0 = defaults).
+	GMMUMaxInflight int
+	L2TLBNumMSHR    int
+
 	GPUIDs     []int
 	benchmarks []benchmarks.Benchmark
 
@@ -199,12 +209,38 @@ func (r *Runner) buildTimingPlatform() {
 		})
 	}
 
+	b = r.applySoftWalkerConfig(b) // sbin_claude_softwalker
+
 	if *magicMemoryCopy {
 		b = b.WithMagicMemoryCopy()
 	}
 
 	r.platform = b.Build()
 	r.reporter = newReporter(r.simulation)
+}
+
+// applySoftWalkerConfig hands the SoftWalker knobs (only effective with
+// -gpu=softwalker) and the baseline sweep knobs (0 keeps the defaults) to
+// the platform builder. sbin_claude_softwalker
+func (r *Runner) applySoftWalkerConfig(
+	b timingconfig.Builder,
+) timingconfig.Builder {
+	if r.GPUType == "softwalker" {
+		b = b.WithSoftWalker(timingconfig.SoftWalkerPlatformConfig{
+			SlotsPerCU:     r.SWSlotsPerCU,
+			CommCycles:     r.SWCommCycles,
+			SetupCycles:    r.SWSetupCycles,
+			PerLevelCycles: r.SWLevelCycles,
+			InTLBMSHRMax:   r.SWInTLBMSHRMax,
+		})
+	}
+
+	if r.GMMUMaxInflight > 0 || r.L2TLBNumMSHR > 0 {
+		b = b.WithGMMUMaxInflight(r.GMMUMaxInflight).
+			WithL2TLBNumMSHR(r.L2TLBNumMSHR)
+	}
+
+	return b
 }
 
 func (r *Runner) createUnifiedGPUs() {

@@ -41,6 +41,7 @@ configs = [
     'utopia',  # sbin_claude_utopia
     'avatar',  # sbin_claude_avatar
     'hpt',  # sbin_claude_hpt
+    'softwalker',  # sbin_claude_softwalker
     ]
 
 benchmarks=[
@@ -86,6 +87,7 @@ COLORS = {
     "utopia": "#CCB974",  # sbin_claude_utopia
     "avatar": "#64B5CD",  # sbin_claude_avatar
     "hpt": "#DA8BC3",  # sbin_claude_hpt
+    "softwalker": "#937860",  # sbin_claude_softwalker
 }
 
 

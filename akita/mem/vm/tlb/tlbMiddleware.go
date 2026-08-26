@@ -326,7 +326,15 @@ func (m *tlbMiddleware) handleTranslationCancel(
 
 			if len(entry.Requests) == 0 {
 				m.queueBottomCancel(entry)
-				m.mshr.Remove(cancel.PID, cancel.VAddr)
+				// Pre-edit code (commented per project convention):
+				// m.mshr.Remove(cancel.PID, cancel.VAddr)
+				//
+				// sbin_claude_softwalker: a canceled In-TLB entry must
+				// return its reserved way to the replacement rotation.
+				removed := m.mshr.Remove(cancel.PID, cancel.VAddr)
+				if removed.inTLB {
+					m.sets[removed.setID].Release(removed.wayID)
+				}
 			}
 
 			return
@@ -432,8 +440,24 @@ func (m *tlbMiddleware) handleTranslationHit(
 func (m *tlbMiddleware) handleTranslationMiss(
 	req *vm.TranslationReq,
 ) bool {
+	// Pre-edit code (commented per project convention):
+	// if m.mshr.IsFull() {
+	// 	return false
+	// }
+	//
+	// sbin_claude_softwalker: with the dedicated MSHR full, In-TLB MSHR
+	// (SoftWalker, MICRO'25 4.5) repurposes a way of the miss's own set as a
+	// temporary MSHR slot instead of refusing the miss.
+	inTLB := false
+	var setID, wayID int
+
 	if m.mshr.IsFull() {
-		return false
+		var ok bool
+		setID, wayID, ok = m.pickInTLBWay(req)
+		if !ok {
+			return false
+		}
+		inTLB = true
 	}
 
 	tracing.AddMilestone(
@@ -444,7 +468,7 @@ func (m *tlbMiddleware) handleTranslationMiss(
 		m.Comp,
 	)
 
-	fetched := m.fetchBottom(req)
+	fetched := m.fetchBottom(req, inTLB, setID, wayID)
 	if fetched {
 		tracing.TraceReqReceive(req, m.Comp)
 		tracing.AddTaskStep(
@@ -456,6 +480,34 @@ func (m *tlbMiddleware) handleTranslationMiss(
 		return true
 	}
 	return false
+}
+
+// pickInTLBWay names the way an In-TLB MSHR allocation for req would occupy,
+// committing nothing: the reservation happens only after the bottom-side
+// fetch is actually sent. Refusal means the mechanism is disabled, the
+// global cap is reached, or every way of the miss's set is already reserved
+// (the paper's per-set contention). sbin_claude_softwalker
+func (m *tlbMiddleware) pickInTLBWay(
+	req *vm.TranslationReq,
+) (setID, wayID int, ok bool) {
+	if m.inTLBMSHRMax == 0 {
+		return 0, 0, false
+	}
+
+	if m.mshr.InTLBCount() >= m.inTLBMSHRMax {
+		m.inTLBRefuseCapFull++
+		return 0, 0, false
+	}
+
+	setID = m.vAddrToSetID(req.VAddr)
+
+	wayID, ok = m.sets[setID].PeekEvict()
+	if !ok {
+		m.inTLBRefuseSetFull++
+		return 0, 0, false
+	}
+
+	return setID, wayID, true
 }
 
 func (m *tlbMiddleware) vAddrToSetID(vAddr uint64) (setID int) {
@@ -507,7 +559,17 @@ func (m *tlbMiddleware) processTLBMSHRHit(
 	return true
 }
 
-func (m *tlbMiddleware) fetchBottom(req *vm.TranslationReq) bool {
+// Pre-edit signature (commented per project convention):
+// func (m *tlbMiddleware) fetchBottom(req *vm.TranslationReq) bool {
+//
+// sbin_claude_softwalker: the caller decides whether the entry lives in the
+// dedicated MSHR or in a repurposed TLB way; the reservation is committed
+// only once the bottom-side fetch has actually left.
+func (m *tlbMiddleware) fetchBottom(
+	req *vm.TranslationReq,
+	inTLB bool,
+	setID, wayID int,
+) bool {
 	fetchBottom := vm.TranslationReqBuilder{}.
 		WithSrc(m.bottomPort.AsRemote()).
 		WithDst(m.addressMapper.Find(req.VAddr)).
@@ -530,7 +592,18 @@ func (m *tlbMiddleware) fetchBottom(req *vm.TranslationReq) bool {
 		m.Comp,
 	)
 
-	mshrEntry := m.mshr.Add(req.PID, req.VAddr)
+	// Pre-edit code (commented per project convention):
+	// mshrEntry := m.mshr.Add(req.PID, req.VAddr)
+	//
+	// sbin_claude_softwalker
+	var mshrEntry *mshrEntry
+	if inTLB {
+		m.sets[setID].Reserve(wayID)
+		mshrEntry = m.mshr.AddInTLB(req.PID, req.VAddr, setID, wayID)
+		m.inTLBAllocCount++
+	} else {
+		mshrEntry = m.mshr.Add(req.PID, req.VAddr)
+	}
 	mshrEntry.Requests = append(mshrEntry.Requests, req)
 	mshrEntry.reqToBottom = fetchBottom
 
@@ -592,15 +665,30 @@ func (m *tlbMiddleware) parseBottom() bool {
 	// sbin_codex: a range invalidation that landed while this lookup was in
 	// flight makes the returned page stale. Answer the waiters but do not
 	// install the entry, so the next access re-walks the page table.
-	if m.pageAdmissionPredicate(page) && !mshrEntry.staleOnFill { // sbin_codex: admission affects storage only.
+	//
+	// sbin_claude_softwalker: an In-TLB entry owns a reserved way already -
+	// the fill lands there instead of evicting a second way. A dedicated
+	// entry whose set has every way reserved skips installation: the waiters
+	// are still answered and the next access re-walks.
+	if mshrEntry.inTLB {
+		m.fillInTLBEntry(mshrEntry, page)
+	} else if m.pageAdmissionPredicate(page) && !mshrEntry.staleOnFill { // sbin_codex: admission affects storage only.
 		setID := m.vAddrToSetID(page.VAddr)
 		set := m.sets[setID]
 		wayID, ok := set.Evict()
-		if !ok {
+		// Pre-edit code (commented per project convention):
+		// if !ok {
+		// 	panic("failed to evict")
+		// }
+		// set.Update(wayID, page)
+		// set.Visit(wayID)
+		if !ok && m.inTLBMSHRMax == 0 { // sbin_claude_softwalker
 			panic("failed to evict")
 		}
-		set.Update(wayID, page)
-		set.Visit(wayID)
+		if ok {
+			set.Update(wayID, page)
+			set.Visit(wayID)
+		}
 	}
 
 	// Pre-edit code (commented per project convention):
@@ -624,6 +712,20 @@ func (m *tlbMiddleware) parseBottom() bool {
 func (m *tlbMiddleware) visit(setID, wayID int) {
 	set := m.sets[setID]
 	set.Visit(wayID)
+}
+
+// fillInTLBEntry returns an In-TLB entry's reserved way to the replacement
+// rotation and installs the fill into it, unless a raced invalidation or the
+// admission predicate forbids installation - then the way is released empty
+// and reused naturally from its old LRU position. sbin_claude_softwalker
+func (m *tlbMiddleware) fillInTLBEntry(entry *mshrEntry, page vm.Page) {
+	set := m.sets[entry.setID]
+	set.Release(entry.wayID)
+
+	if m.pageAdmissionPredicate(page) && !entry.staleOnFill {
+		set.Update(entry.wayID, page)
+		set.Visit(entry.wayID)
+	}
 }
 
 func (m *tlbMiddleware) handleFlush() bool {
@@ -688,6 +790,15 @@ func (m *tlbMiddleware) processTLBFlush() bool {
 		)
 		page.Valid = false
 		set.Update(wayID, page)
+	}
+
+	// sbin_claude_softwalker: reserved In-TLB ways must return to the
+	// replacement rotation before their entries are dropped, or the ways
+	// would be lost to the eviction rotation forever.
+	for _, entry := range m.mshr.AllEntries() {
+		if entry.inTLB {
+			m.sets[entry.setID].Release(entry.wayID)
+		}
 	}
 
 	m.mshr.Reset()

@@ -8,6 +8,7 @@ import (
 
 	"github.com/sarchlab/akita/v4/datarecording"
 	"github.com/sarchlab/akita/v4/mem/vm/gmmu" // sbin_claude_hpt
+	"github.com/sarchlab/akita/v4/mem/vm/tlb"  // sbin_claude_softwalker
 	"github.com/sarchlab/akita/v4/sim"
 	"github.com/sarchlab/akita/v4/simulation"
 	"github.com/sarchlab/akita/v4/tracing"
@@ -118,6 +119,12 @@ type reporter struct {
 	// They own the hashed-walk counters. // sbin_claude_hpt
 	hptGMMUs []*gmmu.Comp
 
+	// swGMMUs are the per-GPU walkers running in SoftWalker software-walk
+	// mode; swL2TLBs are the shared L2 TLBs with In-TLB MSHR enabled.
+	// sbin_claude_softwalker
+	swGMMUs  []*gmmu.Comp
+	swL2TLBs []*tlb.Comp
+
 	// fbtUnits are the per-GPU Forward-Backward Tables. They own the count of
 	// page walks the virtual cache hierarchy avoided. // sbin_claude_fbt
 	fbtUnits []*fbt.Comp
@@ -137,13 +144,53 @@ func newReporter(s *simulation.Simulation) *reporter {
 		r.driver = c.(*driver.Driver)
 	}
 
-	r.collectAccessCounters(s) // sbin_codex
-	r.collectUtopiaUnits(s)    // sbin_claude_utopia
-	r.collectAvatarUnits(s)    // sbin_claude_avatar
-	r.collectHPTGMMUs(s)       // sbin_claude_hpt
-	r.collectFBTUnits(s)       // sbin_claude_fbt
+	r.collectAccessCounters(s)  // sbin_codex
+	r.collectUtopiaUnits(s)     // sbin_claude_utopia
+	r.collectAvatarUnits(s)     // sbin_claude_avatar
+	r.collectHPTGMMUs(s)        // sbin_claude_hpt
+	r.collectSoftWalkerUnits(s) // sbin_claude_softwalker
+	r.collectFBTUnits(s)        // sbin_claude_fbt
 
 	return r
+}
+
+// collectSoftWalkerUnits finds every GMMU running in software-walk mode and
+// every L2 TLB with In-TLB MSHR enabled, so the sw_* and in_tlb_* metrics
+// appear only in an -gpu=softwalker run. GetComponentByName returns a wrong
+// component for unknown names, so the name is re-checked (the trap found
+// while wiring HPT). sbin_claude_softwalker
+func (r *reporter) collectSoftWalkerUnits(s *simulation.Simulation) {
+	for i := 1; ; i++ {
+		name := fmt.Sprintf("GPU[%d].GMMU", i)
+
+		c := s.GetComponentByName(name)
+		if c == nil {
+			break
+		}
+
+		walker, ok := c.(*gmmu.Comp)
+		if !ok || walker.Name() != name || !walker.SoftwareWalkEnabled() {
+			break
+		}
+
+		r.swGMMUs = append(r.swGMMUs, walker)
+	}
+
+	for i := 1; ; i++ {
+		name := fmt.Sprintf("GPU[%d].L2TLB", i)
+
+		c := s.GetComponentByName(name)
+		if c == nil {
+			return
+		}
+
+		l2TLB, ok := c.(*tlb.Comp)
+		if !ok || l2TLB.Name() != name || !l2TLB.InTLBMSHREnabled() {
+			return
+		}
+
+		r.swL2TLBs = append(r.swL2TLBs, l2TLB)
+	}
 }
 
 // collectFBTUnits finds every GPU-side Forward-Backward Table.
@@ -564,6 +611,59 @@ func (r *reporter) report() {
 	r.reportFBT()        // sbin_claude_fbt: Forward-Backward Table statistics.
 	r.reportAvatar()     // sbin_claude_avatar: speculation statistics.
 	r.reportHPT()        // sbin_claude_hpt: hashed-walk statistics.
+	r.reportSoftWalker() // sbin_claude_softwalker: software-walk statistics.
+}
+
+// reportSoftWalker emits the software-walk counters of every GMMU in
+// SoftWalker mode and the In-TLB MSHR counters of every enabled L2 TLB
+// (softwalker-plan.md 2.5). sbin_claude_softwalker
+func (r *reporter) reportSoftWalker() {
+	for i, walker := range r.swGMMUs {
+		stats := walker.SoftwareWalkStats()
+		location := fmt.Sprintf("GPU[%d].GMMU", i+1)
+
+		rows := []struct {
+			what string
+			val  float64
+		}{
+			{"sw_walk_count", float64(stats.WalkCount)},
+			{"sw_extra_cycles_total", float64(stats.ExtraCyclesTotal)},
+			{"sw_admission_blocked_ticks",
+				float64(stats.AdmissionBlockedTicks)},
+		}
+
+		for _, row := range rows {
+			r.dataRecorder.InsertData(tableName, metric{
+				Location: location,
+				What:     row.what,
+				Value:    row.val,
+				Unit:     "",
+			})
+		}
+	}
+
+	for i, l2TLB := range r.swL2TLBs {
+		stats := l2TLB.InTLBMSHRStats()
+		location := fmt.Sprintf("GPU[%d].L2TLB", i+1)
+
+		rows := []struct {
+			what string
+			val  float64
+		}{
+			{"in_tlb_mshr_alloc_count", float64(stats.AllocCount)},
+			{"in_tlb_mshr_refuse_cap_count", float64(stats.RefuseCapFull)},
+			{"in_tlb_mshr_refuse_set_count", float64(stats.RefuseSetFull)},
+		}
+
+		for _, row := range rows {
+			r.dataRecorder.InsertData(tableName, metric{
+				Location: location,
+				What:     row.what,
+				Value:    row.val,
+				Unit:     "",
+			})
+		}
+	}
 }
 
 // reportHPT emits the hashed-page-table walk counters of every GMMU running

@@ -70,6 +70,16 @@ type Builder struct {
 
 	// sbin_claude_hpt: hashed-page-table (FS-HPT) walk configuration.
 	hptCfg HPTPlatformConfig
+
+	// sbin_claude_softwalker: SoftWalker software page-walk configuration.
+	// swCfgSet records whether WithSoftWalker ran; without it (direct
+	// selector use in tests) the paper defaults apply.
+	swCfg    SoftWalkerPlatformConfig
+	swCfgSet bool
+	// sbin_claude_softwalker: baseline sweep knobs (paper Figure 5
+	// replication); 0 keeps the r9nano defaults.
+	gmmuMaxInflight int
+	l2TLBNumMSHR    int
 }
 
 // uvmCapacity resolves the GPU capacity UVM managed memory may occupy. An
@@ -122,8 +132,13 @@ func (b Builder) WithMagicMemoryCopy() Builder {
 	return b
 }
 
+// Pre-edit comment (commented per project convention):
 // WithGPUType sets the GPU type for timing simulation (r9nano, mi300a,
 // ideal-l1tlb, virtual-caching, utopia, avatar, or hpt). // sbin_claude_hpt
+//
+// WithGPUType sets the GPU type for timing simulation (r9nano, mi300a,
+// ideal-l1tlb, virtual-caching, utopia, avatar, hpt, or softwalker).
+// sbin_claude_softwalker
 func (b Builder) WithGPUType(gpuType string) Builder {
 	b.gpuType = gpuType
 	return b
@@ -204,6 +219,96 @@ func (b *Builder) validateHPTConfig() {
 	}
 	if b.numGPUs > 1 {
 		panic("-gpu=hpt currently supports a single GPU")
+	}
+}
+
+// WithSoftWalker sets the SoftWalker configuration. It only takes effect
+// when the GPU type is "softwalker". All fields are used verbatim - the
+// runner's flag defaults own the paper values. sbin_claude_softwalker
+func (b Builder) WithSoftWalker(config SoftWalkerPlatformConfig) Builder {
+	b.swCfg = config
+	b.swCfgSet = true
+	return b
+}
+
+// WithGMMUMaxInflight overrides the baseline GMMU's in-flight walk cap (the
+// hardware PTW count analog, paper Figure 5). 0 keeps the default.
+// sbin_claude_softwalker
+func (b Builder) WithGMMUMaxInflight(n int) Builder {
+	b.gmmuMaxInflight = n
+	return b
+}
+
+// WithL2TLBNumMSHR overrides the shared L2 TLB's dedicated MSHR entry
+// count. 0 keeps the default. sbin_claude_softwalker
+func (b Builder) WithL2TLBNumMSHR(n int) Builder {
+	b.l2TLBNumMSHR = n
+	return b
+}
+
+// SoftWalkerPlatformConfig carries the SoftWalker knobs from the runner into
+// the platform builder (softwalker-plan.md 1.3-1.4). // sbin_claude_softwalker
+type SoftWalkerPlatformConfig struct {
+	// SlotsPerCU is the SoftPWB depth per CU (32 in the paper).
+	SlotsPerCU int
+	// CommCycles is the one-way L2TLB<->CU communication latency, charged
+	// twice per walk. The paper models it as the L2 TLB access latency.
+	CommCycles int
+	// SetupCycles is the PW Warp's per-walk setup cost.
+	SetupCycles int
+	// PerLevelCycles is the non-memory instruction cost per traversed
+	// page-table level.
+	PerLevelCycles int
+	// InTLBMSHRMax caps the L2 TLB ways repurposed as In-TLB MSHR slots.
+	// 0 disables In-TLB MSHR (the "SW w/o In-TLB MSHR" ablation).
+	InTLBMSHRMax int
+}
+
+// softWalkerEnabled reports whether the platform builds the SoftWalker GPU
+// type. sbin_claude_softwalker
+func (b *Builder) softWalkerEnabled() bool {
+	return b.gpuType == "softwalker"
+}
+
+// softWalkerSettings resolves the r9nano settings. Without WithSoftWalker
+// (direct selector use in tests) the paper defaults apply: 32 slots per CU,
+// comm = the L2 TLB latency (10), setup 20, 8 cycles per level, and every L2
+// TLB way available as an In-TLB MSHR slot. sbin_claude_softwalker
+func (b *Builder) softWalkerSettings() r9nano.SoftWalkerSettings {
+	if !b.swCfgSet {
+		return r9nano.SoftWalkerSettings{
+			Enabled:        true,
+			SlotsPerCU:     32,
+			CommCycles:     10,
+			SetupCycles:    20,
+			PerLevelCycles: 8,
+			InTLBMSHRMax:   512,
+		}
+	}
+
+	return r9nano.SoftWalkerSettings{
+		Enabled:        true,
+		SlotsPerCU:     b.swCfg.SlotsPerCU,
+		CommCycles:     b.swCfg.CommCycles,
+		SetupCycles:    b.swCfg.SetupCycles,
+		PerLevelCycles: b.swCfg.PerLevelCycles,
+		InTLBMSHRMax:   b.swCfg.InTLBMSHRMax,
+	}
+}
+
+// validateSoftWalkerConfig rejects unsupported SoftWalker combinations. The
+// single-GPU cap matches hpt/utopia/avatar; UVM is rejected by scope choice
+// (softwalker-plan.md: non-UVM only - the paper's FFB fault path is not
+// modeled). sbin_claude_softwalker
+func (b *Builder) validateSoftWalkerConfig() {
+	if !b.softWalkerEnabled() {
+		return
+	}
+	if b.numGPUs > 1 {
+		panic("-gpu=softwalker currently supports a single GPU")
+	}
+	if b.uvmEnabled {
+		panic("-gpu=softwalker does not support -uvm (non-UVM scope)")
 	}
 }
 
@@ -386,6 +491,8 @@ func (b Builder) Build() *sim.Domain {
 	}
 	// sbin_claude_hpt: the hashed walk needs no shared state, only validation.
 	b.validateHPTConfig()
+	// sbin_claude_softwalker: the software walk needs no shared state either.
+	b.validateSoftWalkerConfig()
 
 	b.platform = &sim.Domain{}
 
@@ -575,6 +682,8 @@ func (b *Builder) createGPUBuilder(
 			WithMMU(mmuComponent).
 			WithLog2PageSize(b.log2PageSize).
 			WithGlobalStorage(b.globalStorage)
+	case "softwalker": // sbin_claude_softwalker: software page-walk GPU config.
+		return b.makeSoftWalkerGPUBuilder(mmuComponent)
 	case "utopia": // sbin_claude_utopia: hybrid RestSeg/FlexSeg GPU config.
 		// Build() creates the registry before the driver; direct selector use
 		// (tests) creates it here so the topology constructor never sees nil.
@@ -594,12 +703,38 @@ func (b *Builder) createGPUBuilder(
 			WithLog2PageSize(b.log2PageSize).
 			WithGlobalStorage(b.globalStorage)
 	default:
-		return r9nano.MakeBuilder().
-			WithSimulation(b.simulation).
-			WithMMU(mmuComponent).
-			WithLog2PageSize(b.log2PageSize).
-			WithGlobalStorage(b.globalStorage)
+		return b.makeDefaultGPUBuilder(mmuComponent)
 	}
+}
+
+// makeDefaultGPUBuilder returns the baseline r9nano builder. The baseline
+// sweep knobs (PTW count, L2 TLB MSHR count) are the two pre-edit-new
+// lines; 0 keeps the defaults. sbin_claude_softwalker
+func (b *Builder) makeDefaultGPUBuilder(
+	mmuComponent *mmu.Comp,
+) gpubuilder.GPUBuilder {
+	return r9nano.MakeBuilder().
+		WithGMMUMaxInflight(b.gmmuMaxInflight).
+		WithL2TLBNumMSHR(b.l2TLBNumMSHR).
+		WithSimulation(b.simulation).
+		WithMMU(mmuComponent).
+		WithLog2PageSize(b.log2PageSize).
+		WithGlobalStorage(b.globalStorage)
+}
+
+// makeSoftWalkerGPUBuilder returns the r9nano builder in SoftWalker mode.
+// Like HPT, SoftWalker changes only a GMMU walk mode plus an L2 TLB
+// capability, so no wrapper package exists. sbin_claude_softwalker
+func (b *Builder) makeSoftWalkerGPUBuilder(
+	mmuComponent *mmu.Comp,
+) gpubuilder.GPUBuilder {
+	return r9nano.MakeBuilder().
+		WithSoftWalkerSettings(b.softWalkerSettings()).
+		WithL2TLBNumMSHR(b.l2TLBNumMSHR).
+		WithSimulation(b.simulation).
+		WithMMU(mmuComponent).
+		WithLog2PageSize(b.log2PageSize).
+		WithGlobalStorage(b.globalStorage)
 }
 
 func (b *Builder) createGPUs(

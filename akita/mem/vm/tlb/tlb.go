@@ -70,6 +70,41 @@ type Comp struct {
 	// pendingBottomCancels are cancels bound for the downstream walker,
 	// waiting for the bottom port. // sbin_claude_avatar
 	pendingBottomCancels []*vm.TranslationCancelReq
+
+	// inTLBMSHRMax caps how many TLB ways may serve as In-TLB MSHR slots
+	// (SoftWalker, MICRO'25 4.5). 0 disables the mechanism and keeps the
+	// pre-existing refuse-on-full behaviour. // sbin_claude_softwalker
+	inTLBMSHRMax int
+	// In-TLB MSHR statistics. The refuse counters count blocked lookup
+	// attempts, which repeat while the head of a channel's pipeline stays
+	// blocked; allocCount counts committed allocations exactly.
+	// sbin_claude_softwalker
+	inTLBAllocCount    uint64
+	inTLBRefuseCapFull uint64
+	inTLBRefuseSetFull uint64
+}
+
+// InTLBMSHRStats reports the In-TLB MSHR activity of one TLB.
+// sbin_claude_softwalker
+type InTLBMSHRStats struct {
+	AllocCount    uint64
+	RefuseCapFull uint64
+	RefuseSetFull uint64
+}
+
+// InTLBMSHREnabled reports whether this TLB may repurpose ways as MSHR
+// slots. sbin_claude_softwalker
+func (c *Comp) InTLBMSHREnabled() bool {
+	return c.inTLBMSHRMax > 0
+}
+
+// InTLBMSHRStats returns the In-TLB MSHR counters. sbin_claude_softwalker
+func (c *Comp) InTLBMSHRStats() InTLBMSHRStats {
+	return InTLBMSHRStats{
+		AllocCount:    c.inTLBAllocCount,
+		RefuseCapFull: c.inTLBRefuseCapFull,
+		RefuseSetFull: c.inTLBRefuseSetFull,
+	}
 }
 
 // topChannel is one independent top-side request class. Each channel owns its

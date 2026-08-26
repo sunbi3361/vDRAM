@@ -261,7 +261,9 @@ func (m *middleware) handlePageWalkCacheResponse(
 			)
 
 			trans.level = rsp.Level - 1
-			trans.cycleLeft = uint64(trans.level+1) * uint64(m.latency)
+			// Pre-edit code (commented per project convention):
+			// trans.cycleLeft = uint64(trans.level+1) * uint64(m.latency)
+			trans.cycleLeft = m.walkCycles(trans.level + 1) // sbin_claude_softwalker
 			trans.fillLevel = trans.level
 			trans.state = pageWalkCacheDone
 
@@ -273,13 +275,36 @@ func (m *middleware) handlePageWalkCacheResponse(
 			m.Comp,
 			"pwc-miss-level"+strconv.Itoa(trans.level),
 		)
-		trans.cycleLeft = uint64(trans.level+1) * uint64(m.latency)
+		// Pre-edit code (commented per project convention):
+		// trans.cycleLeft = uint64(trans.level+1) * uint64(m.latency)
+		trans.cycleLeft = m.walkCycles(trans.level + 1) // sbin_claude_softwalker
 		trans.fillLevel = trans.level
 		trans.state = pageWalkCacheDone
 		return true
 	}
 
 	return false
+}
+
+// walkCycles prices a walk over the given number of uncached page-table
+// levels. The baseline charges the modeled memory reference per level; the
+// software walk adds the round-trip L2TLB<->core communication, the PW
+// Warp's setup, and the per-level instruction work on top (SoftWalker,
+// MICRO'25 Figure 9: slightly longer individual walks, massively more of
+// them). The memory-reference cost itself is shared with the baseline, so
+// the added terms are the only difference between the two configurations.
+// sbin_claude_softwalker
+func (m *middleware) walkCycles(levels int) uint64 {
+	cycles := uint64(levels) * uint64(m.latency)
+
+	if m.swEnabled {
+		extra := uint64(2*m.swConfig.CommCycles + m.swConfig.SetupCycles +
+			levels*m.swConfig.PerLevelCycles)
+		m.swExtraCyclesTotal += extra
+		cycles += extra
+	}
+
+	return cycles
 }
 
 func (m *middleware) finalizePageWalk(
@@ -355,6 +380,11 @@ func (m *middleware) sendUVMFault(walkingIndex int) bool {
 	if err := m.uvmPort.Send(req); err != nil {
 		return false
 	}
+
+	// sbin_claude_softwalker: the PW warp is done with this walk - the fault
+	// now waits in the driver, not in a SoftPWB slot. Released before the
+	// copy below so the parked transaction carries no slot.
+	m.swReleaseCore(trans)
 
 	m.replayQueue = append(m.replayQueue, *trans)
 	trans.state = transactionFinished
@@ -508,6 +538,8 @@ func (m *middleware) doPageWalkHit(
 		return false
 	}
 	m.walkingTranslations[walkingIndex].state = transactionFinished // sbin_codex
+	// sbin_claude_softwalker: the answered walk frees its PW-warp slot.
+	m.swReleaseCore(&m.walkingTranslations[walkingIndex])
 
 	tracing.TraceReqComplete(walking.req, m.Comp)
 
@@ -561,18 +593,74 @@ func (m *middleware) parseFromTop() bool {
 		return true
 	}
 
-	if len(m.walkingTranslations) >= m.maxRequestsInFlight {
+	// Pre-edit code (commented per project convention):
+	// if len(m.walkingTranslations) >= m.maxRequestsInFlight {
+	// 	return false
+	// }
+	//
+	// sbin_claude_softwalker: in software-walk mode admission is gated on
+	// PW-warp slots instead of the hardware walker count. The request
+	// distributor assigns the walk to a core round-robin; refusal here is
+	// the queueing delay the paper attributes to walker contention.
+	swCore := -1
+	if m.swEnabled {
+		var ok bool
+		swCore, ok = m.swAssignCore()
+		if !ok {
+			m.swAdmissionBlockedTicks++
+			return false
+		}
+	} else if len(m.walkingTranslations) >= m.maxRequestsInFlight {
 		return false
 	}
 
 	m.topPort.RetrieveIncoming()
 	tracing.TraceReqReceive(req, m.Comp)
-	m.startWalking(req)
+	m.startWalking(req, swCore)
 
 	return true
 }
 
-func (m *middleware) startWalking(req *vm.TranslationReq) {
+// swAssignCore picks the next core with a free PW-warp slot, round-robin
+// (the paper's Request Distributor, Figure 11 - the distribution policy is
+// shown not to matter, Figure 26). It commits the slot; the caller must hand
+// the walk to that core. sbin_claude_softwalker
+func (m *middleware) swAssignCore() (core int, ok bool) {
+	numCores := m.swConfig.NumCores
+
+	for k := 0; k < numCores; k++ {
+		core = (m.swNextCore + k) % numCores
+		if m.swCoreInFlight[core] < m.swConfig.SlotsPerCore {
+			m.swCoreInFlight[core]++
+			m.swNextCore = (core + 1) % numCores
+			m.swWalkCount++
+
+			return core, true
+		}
+	}
+
+	return 0, false
+}
+
+// swReleaseCore returns the PW-warp slot a finishing transaction holds, if
+// any. Safe on transactions that never held one - including transactions
+// built outside startWalking, whose zero-value swCore of 0 must not be
+// mistaken for a held slot when the mode is off. sbin_claude_softwalker
+func (m *middleware) swReleaseCore(trans *transaction) {
+	if !m.swEnabled || trans.swCore < 0 {
+		return
+	}
+
+	m.swCoreInFlight[trans.swCore]--
+	trans.swCore = -1
+}
+
+// Pre-edit signature (commented per project convention):
+// func (m *middleware) startWalking(req *vm.TranslationReq) {
+//
+// sbin_claude_softwalker: the walk carries the PW-warp slot it occupies;
+// -1 outside software-walk mode.
+func (m *middleware) startWalking(req *vm.TranslationReq, swCore int) {
 	// sbin_codex: initialize a root-level lookup; cache misses set latency.
 	trans := transaction{
 		req:       req,
@@ -580,6 +668,7 @@ func (m *middleware) startWalking(req *vm.TranslationReq) {
 		fillLevel: -1,
 		msgID:     "invalid",
 		state:     newTransaction,
+		swCore:    swCore, // sbin_claude_softwalker
 	}
 
 	m.walkingTranslations = append(m.walkingTranslations, trans)

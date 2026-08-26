@@ -48,6 +48,11 @@ type transaction struct {
 	// translation for as long as it sits at the head of the port. // sbin_codex
 	refaultedBy string
 
+	// swCore is the index of the core whose PW-warp slot this walk occupies
+	// in software-walk mode (SoftWalker, MICRO'25); -1 when no slot is held.
+	// sbin_claude_softwalker
+	swCore int
+
 	// Pre-edit field (commented per AGENTS.md convention). A parked fault used
 	// to keep occupying a page-walk slot:
 	// waitingOnUVM bool
@@ -124,7 +129,71 @@ type Comp struct {
 	hptWalks           uint64
 	hptMemoryAccesses  uint64
 
+	// sbin_claude_softwalker: SoftWalker (MICRO'25) software walk mode. Page
+	// walks execute as PW-warp threads on the GPU cores: a round-robin
+	// request distributor assigns each walk to a core with a free SoftPWB
+	// slot, so concurrency scales to NumCores x SlotsPerCore instead of
+	// maxRequestsInFlight. Each walk pays communication and instruction
+	// latency on top of the unchanged radix+PWC traversal.
+	swEnabled      bool
+	swConfig       SoftwareWalkConfig
+	swCoreInFlight []int
+	swNextCore     int
+
+	swWalkCount             uint64
+	swExtraCyclesTotal      uint64
+	swAdmissionBlockedTicks uint64
+
 	walkingTranslations []transaction
+}
+
+// SoftwareWalkConfig parameterizes the SoftWalker software walk mode.
+// sbin_claude_softwalker
+type SoftwareWalkConfig struct {
+	// NumCores is how many cores host a PW Warp (the SM count).
+	NumCores int
+	// SlotsPerCore is the SoftPWB depth: how many walks one core's PW Warp
+	// tracks concurrently (32 threads in the paper).
+	SlotsPerCore int
+	// CommCycles is the one-way L2TLB<->core communication latency, charged
+	// twice per walk (request delivery and TLB fill).
+	CommCycles int
+	// SetupCycles models the PW Warp's per-walk setup: SoftPWB load, field
+	// decode, controller trigger.
+	SetupCycles int
+	// PerLevelCycles models the non-memory instruction work per traversed
+	// page-table level: offset computation, PTE check, FPWC issue.
+	PerLevelCycles int
+}
+
+// SoftwareWalkStats reports the software-walk activity of one GMMU.
+// sbin_claude_softwalker
+type SoftwareWalkStats struct {
+	// WalkCount is the number of walks admitted to PW-warp slots.
+	WalkCount uint64
+	// ExtraCyclesTotal is the sum of comm+setup+per-level cycles charged on
+	// top of the baseline radix walk cost.
+	ExtraCyclesTotal uint64
+	// AdmissionBlockedTicks counts the ticks a translation waited at the
+	// head of the top port because every PW-warp slot was busy - the
+	// queueing-delay analog.
+	AdmissionBlockedTicks uint64
+}
+
+// SoftwareWalkEnabled reports whether this GMMU walks in software.
+// sbin_claude_softwalker
+func (c *Comp) SoftwareWalkEnabled() bool {
+	return c.swEnabled
+}
+
+// SoftwareWalkStats returns the software-walk counters. They stay zero when
+// the mode is off. sbin_claude_softwalker
+func (c *Comp) SoftwareWalkStats() SoftwareWalkStats {
+	return SoftwareWalkStats{
+		WalkCount:             c.swWalkCount,
+		ExtraCyclesTotal:      c.swExtraCyclesTotal,
+		AdmissionBlockedTicks: c.swAdmissionBlockedTicks,
+	}
 }
 
 func (c *Comp) Tick() bool {

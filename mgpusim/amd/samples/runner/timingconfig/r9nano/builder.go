@@ -54,6 +54,9 @@ type Builder struct {
 	translationTopology            TranslationTopology // sbin_claude_utopia: walker chain below the L2 TLB.
 	speculationTopology            SpeculationTopology // sbin_claude_avatar: interposer above the L2 TLB.
 	hptSettings                    HPTSettings         // sbin_claude_hpt: hashed-page-table walk mode.
+	softWalkerSettings             SoftWalkerSettings  // sbin_claude_softwalker: software page-walk mode.
+	gmmuMaxInflight                int                 // sbin_claude_softwalker: baseline PTW sweep (0 = default).
+	l2TLBNumMSHR                   int                 // sbin_claude_softwalker: L2 TLB MSHR sweep (0 = default).
 
 	gpu                  *sim.Domain
 	cp                   *cp.CommandProcessor
@@ -301,6 +304,55 @@ type HPTSettings struct {
 // GMMU. // sbin_claude_hpt
 func (b Builder) WithHPTSettings(settings HPTSettings) Builder {
 	b.hptSettings = settings
+	return b
+}
+
+// SoftWalkerSettings selects the SoftWalker (MICRO'25) software page-walk
+// mode. Like HPT it needs no extra component and no rewiring: the GMMU's
+// admission becomes the paper's Request Distributor over per-CU PW-warp
+// slots, each walk pays communication and instruction latency on top of the
+// unchanged radix+PWC traversal, and the shared L2 TLB gains the In-TLB
+// MSHR so the added walk concurrency is actually reachable.
+// sbin_claude_softwalker
+type SoftWalkerSettings struct {
+	// Enabled turns the software walk on. When false everything stays the
+	// baseline.
+	Enabled bool
+	// SlotsPerCU is the SoftPWB depth per compute unit (32 in the paper).
+	SlotsPerCU int
+	// CommCycles is the one-way L2TLB<->CU communication latency, charged
+	// twice per walk.
+	CommCycles int
+	// SetupCycles is the PW Warp's per-walk setup cost.
+	SetupCycles int
+	// PerLevelCycles is the non-memory instruction cost per traversed
+	// page-table level.
+	PerLevelCycles int
+	// InTLBMSHRMax caps how many L2 TLB ways may serve as In-TLB MSHR
+	// slots. 0 disables In-TLB MSHR (the paper's "SW w/o In-TLB MSHR"
+	// ablation).
+	InTLBMSHRMax int
+}
+
+// WithSoftWalkerSettings selects the software page-walk mode for this GPU.
+// sbin_claude_softwalker
+func (b Builder) WithSoftWalkerSettings(settings SoftWalkerSettings) Builder {
+	b.softWalkerSettings = settings
+	return b
+}
+
+// WithGMMUMaxInflight overrides how many page walks the baseline GMMU keeps
+// in flight (the hardware PTW count analog). 0 keeps the GMMU default.
+// sbin_claude_softwalker
+func (b Builder) WithGMMUMaxInflight(n int) Builder {
+	b.gmmuMaxInflight = n
+	return b
+}
+
+// WithL2TLBNumMSHR overrides the shared L2 TLB's dedicated MSHR entry
+// count. 0 keeps the default. sbin_claude_softwalker
+func (b Builder) WithL2TLBNumMSHR(n int) Builder {
+	b.l2TLBNumMSHR = n
 	return b
 }
 
@@ -835,6 +887,25 @@ func (b *Builder) buildGMMU() {
 			WithHPTAccessesPerWalk(b.hptSettings.AccessesPerWalk)
 	}
 
+	// sbin_claude_softwalker: SoftWalker walks in software on the CUs, so
+	// the concurrency cap becomes CUs x SoftPWB slots instead of the
+	// hardware walker count.
+	if b.softWalkerSettings.Enabled {
+		gmmuBuilder = gmmuBuilder.WithSoftwareWalk(gmmu.SoftwareWalkConfig{
+			NumCores:       b.numCUPerShaderArray * b.numShaderArray,
+			SlotsPerCore:   b.softWalkerSettings.SlotsPerCU,
+			CommCycles:     b.softWalkerSettings.CommCycles,
+			SetupCycles:    b.softWalkerSettings.SetupCycles,
+			PerLevelCycles: b.softWalkerSettings.PerLevelCycles,
+		})
+	}
+
+	// sbin_claude_softwalker: baseline hardware-PTW sweep knob (paper
+	// Figure 5 replication). 0 keeps the GMMU builder default.
+	if b.gmmuMaxInflight > 0 {
+		gmmuBuilder = gmmuBuilder.WithMaxNumReqInFlight(b.gmmuMaxInflight)
+	}
+
 	if b.uvmServiceProvider != "" { // sbin_codex
 		// Pre-edit code (commented per AGENTS.md convention). The GMMU used to
 		// send faults straight to the driver:
@@ -885,12 +956,20 @@ func (b *Builder) buildL2TLB() {
 	// numSets := int(numEntries/numWays)
 	numSets := numEntries / numWays // sbin_codex: restore the baseline expression shape; both operands are int.
 
+	// sbin_claude_softwalker: baseline MSHR sweep knob; 64 stays the default.
+	numMSHREntry := 64
+	if b.l2TLBNumMSHR > 0 {
+		numMSHREntry = b.l2TLBNumMSHR
+	}
+
 	builder := tlb.MakeBuilder().
 		WithEngine(b.simulation.GetEngine()).
 		WithFreq(b.freq).
 		WithNumWays(numWays).
 		WithNumSets(numSets).
-		WithNumMSHREntry(64).
+		// Pre-edit code (commented per project convention):
+		// WithNumMSHREntry(64).
+		WithNumMSHREntry(numMSHREntry). // sbin_claude_softwalker
 		// Pre-edit code (commented per project convention):
 		// WithNumReqPerCycle(1024).
 		//
@@ -918,6 +997,13 @@ func (b *Builder) buildL2TLB() {
 		WithTranslationProviderMapper(&mem.SinglePortMapper{
 			Port: b.translationTopology.l2TLBTranslationProvider(b),
 		})
+
+	// sbin_claude_softwalker: In-TLB MSHR - without it the dedicated MSHR
+	// caps outstanding walks and the software walkers' concurrency is
+	// unreachable (paper Figure 12).
+	if b.softWalkerSettings.Enabled && b.softWalkerSettings.InTLBMSHRMax > 0 {
+		builder = builder.WithInTLBMSHR(b.softWalkerSettings.InTLBMSHRMax)
+	}
 
 	l2TLB := builder.Build(fmt.Sprintf("%s.L2TLB", b.name))
 

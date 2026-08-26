@@ -70,6 +70,10 @@ var _ = Describe("GPU builder selector", func() {
 		// documents the selector rather than discriminating it. That the HPT
 		// settings actually reach the GMMU is proven in hpt_gmmu_test.go.
 		Entry("hpt returns r9nano.Builder", "hpt", r9nano.Builder{}),
+		// sbin_claude_softwalker: like HPT, SoftWalker swaps only a GMMU walk
+		// mode plus an L2 TLB capability; that the settings reach the
+		// components is proven in softwalker_topology_test.go.
+		Entry("softwalker returns r9nano.Builder", "softwalker", r9nano.Builder{}),
 		Entry("unknown selector falls back to r9nano.Builder", "not-a-gpu", r9nano.Builder{}),
 	)
 })

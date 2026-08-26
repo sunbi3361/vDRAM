@@ -26,6 +26,11 @@ configs = [
     # runner default (1 memory access per walk = ideal HPT). Access-count
     # sweep entries go into hpt_accesses_per_walk below.
     'hpt',
+    # sbin_claude_softwalker: SoftWalker software page-table walk
+    # (-gpu=softwalker). 'softwalker' uses the runner defaults (32 slots/CU,
+    # comm 10, setup 20, 8 cycles/level, In-TLB MSHR max 512). Ablation and
+    # sweep entries go into softwalker_in_tlb_mshr_max below.
+    'softwalker',
     ]
 
 # sbin_claude_utopia: RestSeg ratio per utopia sweep config, mirroring the
@@ -64,6 +69,25 @@ hpt_accesses_per_walk = {
     # 'hpt-acc-5': 5,
 }
 configs += list(hpt_accesses_per_walk)  # sbin_claude_hpt
+
+# sbin_claude_softwalker: In-TLB MSHR capacity per softwalker sweep config.
+# 0 is the paper's "SW w/o In-TLB MSHR" ablation (Figure 16); intermediate
+# values reproduce the Figure 24 capacity sweep. The plain 'softwalker'
+# config keeps the runner default (512 = every L2 TLB way).
+softwalker_in_tlb_mshr_max = {
+    # 'softwalker-noitm':   0,
+    # 'softwalker-itm-128': 128,
+    # 'softwalker-itm-256': 256,
+}
+configs += list(softwalker_in_tlb_mshr_max)  # sbin_claude_softwalker
+
+# sbin_claude_softwalker: SoftPWB slots per CU (PW Warp threads). The plain
+# config keeps the runner default of 32.
+softwalker_slots_per_cu = {
+    # 'softwalker-slots-8':  8,
+    # 'softwalker-slots-16': 16,
+}
+configs += list(softwalker_slots_per_cu)  # sbin_claude_softwalker
 
 # sbin_codex: oversubscription ratio per config (uvm-manager.md 20).
 #
@@ -226,6 +250,18 @@ for config in configs:
             submit_file.write("-gpu=hpt ")
             submit_file.write("-hpt-accesses-per-walk="
                               + str(hpt_accesses_per_walk[config]) + " ")
+        # sbin_claude_softwalker: softwalker configs. The plain config relies
+        # on the runner defaults; sweep configs pin one knob explicitly.
+        elif config == 'softwalker':
+            submit_file.write("-gpu=softwalker ")
+        elif config in softwalker_in_tlb_mshr_max:
+            submit_file.write("-gpu=softwalker ")
+            submit_file.write("-sw-in-tlb-mshr-max="
+                              + str(softwalker_in_tlb_mshr_max[config]) + " ")
+        elif config in softwalker_slots_per_cu:
+            submit_file.write("-gpu=softwalker ")
+            submit_file.write("-sw-slots-per-cu="
+                              + str(softwalker_slots_per_cu[config]) + " ")
         else:
             raise ValueError("unknown config " + config)
         submit_file.write("\\\n\t")

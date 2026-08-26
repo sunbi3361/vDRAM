@@ -41,6 +41,15 @@ configs = [
     # hpt_accesses_per_walk in 3_gen_runners.py.
     # 'hpt-acc-2',
     # 'hpt-acc-5',
+    'softwalker',  # sbin_claude_softwalker
+    # sbin_claude_softwalker: sweep configs, matching
+    # softwalker_in_tlb_mshr_max / softwalker_slots_per_cu in
+    # 3_gen_runners.py.
+    # 'softwalker-noitm',
+    # 'softwalker-itm-128',
+    # 'softwalker-itm-256',
+    # 'softwalker-slots-8',
+    # 'softwalker-slots-16',
     ]
 
 benchmarks=[
@@ -121,6 +130,16 @@ AVATAR_WHATS = (
 # runner's reportHPT (report.go). Present only in -gpu=hpt runs.
 HPT_WHATS = (
     "hpt_walk_count", "hpt_memory_access_count",
+)
+# sbin_claude_softwalker: software-walk counters emitted per GMMU and In-TLB
+# MSHR counters emitted per L2 TLB by the runner's reportSoftWalker
+# (report.go). Present only in -gpu=softwalker runs.
+SOFTWALKER_GMMU_WHATS = (
+    "sw_walk_count", "sw_extra_cycles_total", "sw_admission_blocked_ticks",
+)
+SOFTWALKER_L2TLB_WHATS = (
+    "in_tlb_mshr_alloc_count", "in_tlb_mshr_refuse_cap_count",
+    "in_tlb_mshr_refuse_set_count",
 )
 
 TIMESTAMP_RE = re.compile(r"^\d{6}_\d{4}$")
@@ -215,6 +234,14 @@ def extract_metrics(sqlite_path):
         elif what in HPT_WHATS and loc.endswith(".GMMU"):
             out.setdefault(what, 0.0)
             out[what] += float(value)
+        # sbin_claude_softwalker: sum software-walk counters over every GMMU
+        # and In-TLB MSHR counters over every L2 TLB.
+        elif what in SOFTWALKER_GMMU_WHATS and loc.endswith(".GMMU"):
+            out.setdefault(what, 0.0)
+            out[what] += float(value)
+        elif what in SOFTWALKER_L2TLB_WHATS and loc.endswith(".L2TLB"):
+            out.setdefault(what, 0.0)
+            out[what] += float(value)
     return out
 
 
@@ -256,6 +283,9 @@ def main():
         *AVATAR_WHATS,
         # sbin_claude_hpt: hashed-page-table walk summary columns.
         *HPT_WHATS,
+        # sbin_claude_softwalker: software-walk and In-TLB MSHR columns.
+        *SOFTWALKER_GMMU_WHATS,
+        *SOFTWALKER_L2TLB_WHATS,
         "error",
     ]
 

@@ -34,6 +34,10 @@ type Builder struct {
 	// because a hashed table has no intermediate levels to cache.
 	hptEnabled         bool
 	hptAccessesPerWalk int
+
+	// sbin_claude_softwalker: SoftWalker (MICRO'25) software walk mode.
+	swEnabled bool
+	swConfig  SoftwareWalkConfig
 }
 
 // MakeBuilder creates a new builder
@@ -133,6 +137,18 @@ func (b Builder) WithHPTAccessesPerWalk(n int) Builder {
 	return b
 }
 
+// WithSoftwareWalk selects the SoftWalker (MICRO'25) software walk mode:
+// page walks execute as PW-warp threads on the GPU cores, so walk
+// concurrency scales to cfg.NumCores x cfg.SlotsPerCore instead of
+// maxRequestsInFlight, and each walk pays communication plus instruction
+// latency on top of the unchanged radix+PWC traversal. Mutually exclusive
+// with WithHashedPageTable. sbin_claude_softwalker
+func (b Builder) WithSoftwareWalk(cfg SoftwareWalkConfig) Builder {
+	b.swEnabled = true
+	b.swConfig = cfg
+	return b
+}
+
 // func (b Builder) WithAccessCounterThreshold(thresh uint64) Builder { // sbin_codex
 // 	b.accessCounterThresh = thresh
 // 	return b
@@ -148,6 +164,8 @@ func (b Builder) Build(name string) *Comp {
 	if b.hptEnabled && b.hptAccessesPerWalk < 1 {
 		panic("GMMU HPT accesses per walk must be at least 1")
 	}
+
+	b.validateSoftwareWalk() // sbin_claude_softwalker
 
 	gmmu := new(Comp)
 	gmmu.TickingComponent = *sim.NewTickingComponent(
@@ -175,16 +193,42 @@ func (b Builder) Build(name string) *Comp {
 	return gmmu
 }
 
+// validateSoftwareWalk rejects software-walk configurations that cannot
+// model anything sensible. sbin_claude_softwalker
+func (b Builder) validateSoftwareWalk() {
+	if !b.swEnabled {
+		return
+	}
+
+	if b.hptEnabled {
+		panic("GMMU cannot combine the software walk mode with HPT")
+	}
+
+	if b.swConfig.NumCores < 1 || b.swConfig.SlotsPerCore < 1 {
+		panic("GMMU software walk needs at least one core and one slot")
+	}
+
+	if b.swConfig.CommCycles < 0 || b.swConfig.SetupCycles < 0 ||
+		b.swConfig.PerLevelCycles < 0 {
+		panic("GMMU software walk latencies must not be negative")
+	}
+}
+
 func (b Builder) configureInternalStates(c *Comp) {
 	c.maxRequestsInFlight = b.maxNumReqInFlight
 	c.latency = b.pageWalkingLatency
 	c.deviceID = b.deviceID
 	c.memAddrOffset = b.memAddrOffset
-	c.memoryPerChiplet = b.memoryPerChiplet       // sbin_codex
-	c.log2PageSize = b.log2PageSize               // sbin_codex
-	c.state = gmmuStateEnable                     // sbin_codex
-	c.hptEnabled = b.hptEnabled                   // sbin_claude_hpt
-	c.hptAccessesPerWalk = b.hptAccessesPerWalk   // sbin_claude_hpt
+	c.memoryPerChiplet = b.memoryPerChiplet     // sbin_codex
+	c.log2PageSize = b.log2PageSize             // sbin_codex
+	c.state = gmmuStateEnable                   // sbin_codex
+	c.hptEnabled = b.hptEnabled                 // sbin_claude_hpt
+	c.hptAccessesPerWalk = b.hptAccessesPerWalk // sbin_claude_hpt
+	c.swEnabled = b.swEnabled                   // sbin_claude_softwalker
+	c.swConfig = b.swConfig                     // sbin_claude_softwalker
+	if b.swEnabled {                            // sbin_claude_softwalker
+		c.swCoreInFlight = make([]int, b.swConfig.NumCores)
+	}
 	c.canceledReqs = make(map[string]struct{})    // sbin_claude_avatar
 	c.addressToPortMapper = b.addressToPortMapper // sbin_gmmu
 	c.UVMServiceProvider = b.uvmServiceProvider   // sbin_codex
