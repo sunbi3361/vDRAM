@@ -9,14 +9,31 @@ import (
 // metadata line geometry: TAR entries are ~4B and SF counters ~1B, so one
 // 64B memory line covers 16 TAR entries or 64 SF counters.
 const (
-	metaLineBytes      = 64
-	tarEntriesPerLine  = 16
-	sfCountersPerLine  = 64
-	metaCacheAssoc     = 8
-	defaultCacheBytes  = 2048 // 2KB TAR and SF caches (utopia.md 4.6)
-	defaultHitLatency  = 2
-	defaultMissLatency = 100 // one modeled memory access, like the GMMU walk
-	defaultMaxInFlight = 16
+	metaLineBytes = 64
+	// Pre-edit code (commented per project convention):
+	// tarEntriesPerLine  = 16
+	// defaultCacheBytes  = 2048 // 2KB TAR and SF caches (utopia.md 4.6)
+	//
+	// sbin_claude_utopia: one TAR entry is one way's {valid, PID, VPN tag}
+	// (~4B: 23-bit tag for a 512MB/16-way RestSeg plus valid/PID bits), so a
+	// 64B line holds lineBytes/(assoc*4B) sets — exactly one set at the
+	// default 16-way associativity. The old constant packed 16 sets per line
+	// (2 bits per way), overstating the TAR cache reach ~16x. The per-set
+	// packing is derived from the segment associativity at first use
+	// (Comp.segmentConfigs), since the driver registers the RestSeg after
+	// the GPU is built.
+	tarEntryBytes     = 4
+	sfCountersPerLine = 64
+	metaCacheAssoc    = 8
+	// sbin_claude_utopia: the default TAR cache matches the baseline GMMU
+	// page-walk-cache storage budget (128 entries x 4 cached levels x 8B =
+	// 4KB) so TAR-vs-PWC comparisons are iso-capacity; the SF cache keeps
+	// the paper's 2KB (utopia.md 4.6).
+	defaultTARCacheBytes = 4096
+	defaultSFCacheBytes  = 2048
+	defaultHitLatency    = 2
+	defaultMissLatency   = 100 // one modeled memory access, like the GMMU walk
+	defaultMaxInFlight   = 16
 )
 
 // A Builder can build UTU (RestSeg walker) components.
@@ -36,9 +53,14 @@ type Builder struct {
 // MakeBuilder creates a Builder with the default UTU parameters.
 func MakeBuilder() Builder {
 	return Builder{
-		freq:           1 * sim.GHz,
-		tarCacheBytes:  defaultCacheBytes,
-		sfCacheBytes:   defaultCacheBytes,
+		freq: 1 * sim.GHz,
+		// Pre-edit code (commented per project convention):
+		// tarCacheBytes:  defaultCacheBytes,
+		// sfCacheBytes:   defaultCacheBytes,
+		//
+		// sbin_claude_utopia: TAR default sized to the baseline GMMU PWC.
+		tarCacheBytes:  defaultTARCacheBytes,
+		sfCacheBytes:   defaultSFCacheBytes,
 		hitLatency:     defaultHitLatency,
 		missLatency:    defaultMissLatency,
 		maxReqInFlight: defaultMaxInFlight,
@@ -128,8 +150,16 @@ func (b Builder) Build(name string) *Comp {
 
 	c.sfCache = newMetaCache(
 		b.sfCacheBytes, metaLineBytes, metaCacheAssoc, sfCountersPerLine)
+	// Pre-edit code (commented per project convention):
+	// c.tarCache = newMetaCache(
+	// 	b.tarCacheBytes, metaLineBytes, metaCacheAssoc, tarEntriesPerLine)
+	//
+	// sbin_claude_utopia: the TAR sets-per-line packing depends on the
+	// RestSeg associativity, which the driver registers only after the GPU
+	// is built. Start at the 1-set-per-line floor; segmentConfigs() derives
+	// the exact packing before the first cache probe.
 	c.tarCache = newMetaCache(
-		b.tarCacheBytes, metaLineBytes, metaCacheAssoc, tarEntriesPerLine)
+		b.tarCacheBytes, metaLineBytes, metaCacheAssoc, 1)
 
 	c.topPort = sim.NewPort(c, 4096, 4096, name+".Top")
 	c.AddPort("Top", c.topPort)

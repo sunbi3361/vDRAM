@@ -41,7 +41,7 @@ mgpusim/amd/driver/utopia_restseg.go              ← 드라이버 측 RestSeg �
 | `-utopia-restseg-ratio` | GPU 메모리 중 RestSeg 비율 (FlexSeg = 나머지) |
 | `-utopia-restseg-size` | 바이트 직접 지정 (ratio보다 우선) |
 | `-utopia-restseg-assoc` | way 수; `NumSets = (Size/PageSize)/Assoc` 자동 산출 |
-| `-utopia-tar-cache-bytes` / `-utopia-sf-cache-bytes` | TAR/SF 캐시 크기 (기본 2KB) |
+| `-utopia-tar-cache-bytes` / `-utopia-sf-cache-bytes` | TAR/SF 캐시 크기 (기본: TAR 4KB = baseline GMMU PWC(128 entry × 4 cached levels × 8B)와 동일 용량, SF 2KB) |
 | `-utopia-tar-sf-latency` / `-utopia-tar-sf-miss-latency` | 캐시 hit/miss 지연 |
 | `-utopia-alloc-mode` | `fault`(Mode A) / `ptw-track`(Mode B) |
 
@@ -70,6 +70,11 @@ UTU ──(NotInRestSeg && L2 miss)──→ GMMU.Top (FSW, GMMU 무수정)
 
 **TAR/SF 캐시**: pagewalkcache 패턴(유한 capacity/assoc/latency/port).
 miss 시 v1은 설정 가능한 메모리 지연 부과(기존 GMMU `pageWalkingLatency`와 같은 모델링 수준).
+라인 패킹(2026-08-26 수정): TAR entry는 way당 ~4B({valid, PID, tag})로 모델링 —
+64B 라인이 `64/(assoc×4B)` set을 담음(기본 16-way면 라인당 1 set; assoc은
+드라이버가 세그먼트 등록 후 `segmentConfigs()`에서 지연 유도). SF는 set당 1B
+카운터(라인당 64 set) 유지. 초기 구현의 "TAR 라인당 16 set"은 way당 2bit이라
+도달 범위를 ~16배 과대평가했던 것 — `rsw_test.go`가 패킹·기본 크기를 고정.
 "실제 메모리 계층 경유 경합"(4.6)은 v2 — 현재 FSW 자체가 지연 모델이므로 v1 비대칭 회피.
 
 ## 5. 드라이버 측 RestSeg 매니저

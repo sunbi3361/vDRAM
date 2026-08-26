@@ -80,8 +80,16 @@ var utopiaRestSegSizeFlag = flag.Uint64("utopia-restseg-size", 0,
 	"RestSeg size in bytes per GPU. Overrides -utopia-restseg-ratio when set.")
 var utopiaRestSegAssocFlag = flag.Int("utopia-restseg-assoc", 16,
 	"Number of ways per RestSeg set.")
-var utopiaTARCacheBytesFlag = flag.Uint64("utopia-tar-cache-bytes", 2048,
-	"Capacity of the GMMU-side TAR metadata cache in bytes.")
+// Pre-edit code (commented per project convention):
+// var utopiaTARCacheBytesFlag = flag.Uint64("utopia-tar-cache-bytes", 2048,
+// 	"Capacity of the GMMU-side TAR metadata cache in bytes.")
+//
+// sbin_claude_utopia: default matches the baseline GMMU page-walk cache
+// storage (128 entries x 4 cached levels x 8B = 4KB) for iso-capacity
+// TAR-vs-PWC comparison.
+var utopiaTARCacheBytesFlag = flag.Uint64("utopia-tar-cache-bytes", 4096,
+	"Capacity of the GMMU-side TAR metadata cache in bytes "+
+		"(default equals the baseline GMMU page-walk cache: 4KB).")
 var utopiaSFCacheBytesFlag = flag.Uint64("utopia-sf-cache-bytes", 2048,
 	"Capacity of the GMMU-side Set Filter metadata cache in bytes.")
 var utopiaTARSFHitLatencyFlag = flag.Int("utopia-tarsf-hit-latency", 2,

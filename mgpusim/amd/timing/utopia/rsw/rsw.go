@@ -224,6 +224,21 @@ func (c *Comp) segmentConfigs() []restseg.Config {
 	if !c.fetched {
 		c.configs = c.registry.SegmentConfigs(int(c.deviceID))
 		c.fetched = true
+
+		// sbin_claude_utopia: derive the TAR line packing from the segment
+		// associativity now that it is known. One set's TAR entries occupy
+		// assoc*tarEntryBytes bytes, so one 64B line covers
+		// lineBytes/(assoc*tarEntryBytes) sets (floored at one set per line
+		// for very wide sets). startWalk consults this method before the
+		// first TAR cache probe, so the packing is set before any lookup.
+		if len(c.configs) > 0 {
+			setsPerLine := metaLineBytes /
+				(c.configs[0].Associativity * tarEntryBytes)
+			if setsPerLine < 1 {
+				setsPerLine = 1
+			}
+			c.tarCache.entriesPerLine = setsPerLine
+		}
 	}
 
 	return c.configs
