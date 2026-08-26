@@ -275,21 +275,44 @@ func (b *ReorderBuffer) duplicateReq(req mem.AccessReq) mem.AccessReq {
 }
 
 func (b *ReorderBuffer) duplicateReadReq(req *mem.ReadReq) *mem.ReadReq {
+	// Pre-edit code (commented per project convention):
+	// return mem.ReadReqBuilder{}.
+	// 	WithAddress(req.Address).
+	// 	WithByteSize(req.AccessByteSize).
+	// 	WithPID(req.PID).
+	// 	WithDst(b.BottomUnit).
+	// 	Build()
+	//
+	// sbin_claude_latpc: the duplicate rebuilds the request field-by-field,
+	// so the LATPC translation hint must be carried over explicitly or the
+	// AT downstream never sees it.
 	return mem.ReadReqBuilder{}.
 		WithAddress(req.Address).
 		WithByteSize(req.AccessByteSize).
 		WithPID(req.PID).
 		WithDst(b.BottomUnit).
+		WithTranslationHint(req.TranslationHint). // sbin_claude_latpc
 		Build()
 }
 
 func (b *ReorderBuffer) duplicateWriteReq(req *mem.WriteReq) *mem.WriteReq {
+	// Pre-edit code (commented per project convention):
+	// return mem.WriteReqBuilder{}.
+	// 	WithAddress(req.Address).
+	// 	WithPID(req.PID).
+	// 	WithData(req.Data).
+	// 	WithDirtyMask(req.DirtyMask).
+	// 	WithDst(b.BottomUnit).
+	// 	Build()
+	//
+	// sbin_claude_latpc: same hint carry-over as duplicateReadReq.
 	return mem.WriteReqBuilder{}.
 		WithAddress(req.Address).
 		WithPID(req.PID).
 		WithData(req.Data).
 		WithDirtyMask(req.DirtyMask).
 		WithDst(b.BottomUnit).
+		WithTranslationHint(req.TranslationHint). // sbin_claude_latpc
 		Build()
 }
 

@@ -142,6 +142,7 @@ func (m *middleware) translate() bool {
 		WithVAddr(vPageID).
 		WithDeviceID(m.deviceID).
 		WithIsWrite(isWrite).
+		WithGroupHint(translationHintOf(req)). // sbin_claude_latpc
 		Build()
 
 	err := m.translationPort.Send(transReq)
@@ -167,6 +168,20 @@ func (m *middleware) translate() bool {
 	return true
 }
 
+// translationHintOf extracts the LATPC group triple from an access request.
+// Requests from non-LATPC producers carry none, so the result is nil and
+// the built TranslationReq keeps zero group fields. // sbin_claude_latpc
+func translationHintOf(req mem.AccessReq) *vm.TranslationGroupHint {
+	switch r := req.(type) {
+	case *mem.ReadReq:
+		return r.TranslationHint
+	case *mem.WriteReq:
+		return r.TranslationHint
+	default:
+		return nil
+	}
+}
+
 // retranslate re-issues the translation of a request that must not use its
 // previous mapping. // sbin_codex
 func (m *middleware) retranslate(req mem.AccessReq) bool {
@@ -178,6 +193,7 @@ func (m *middleware) retranslate(req mem.AccessReq) bool {
 		WithVAddr(m.addrToPageID(req.GetAddress())).
 		WithDeviceID(m.deviceID).
 		WithIsWrite(isWrite).
+		WithGroupHint(translationHintOf(req)). // sbin_claude_latpc
 		Build()
 
 	if err := m.translationPort.Send(transReq); err != nil {

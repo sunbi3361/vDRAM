@@ -515,6 +515,9 @@ func (m *tlbMiddleware) fetchBottom(req *vm.TranslationReq) bool {
 		WithVAddr(req.VAddr).
 		WithDeviceID(req.DeviceID).
 		WithIsWrite(req.IsWrite). // sbin_codex: propagate write intent to the GMMU.
+		// sbin_claude_latpc: propagate the LATPC group triple so the L2 TLB
+		// and the GMMU can batch same-group walks.
+		WithGroup(req.GroupID, req.GroupStride, req.GroupIndex).
 		Build()
 
 	err := m.bottomPort.Send(fetchBottom)
