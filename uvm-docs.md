@@ -260,12 +260,9 @@ remote write 1,256건 stall 후 전부 replay, range TLB 무효화 33건,
 
 ## 8. 알려진 한계
 
-1. **Oversubscription이 `-parallel` 대규모에서 진행되지 않는다.**
-   용량을 managed 할당 총량 아래로 제한한 경우 serial 실행은 matrixtranspose 128 / 256에서
-   정확히 통과하지만, `-parallel`은 128만 통과하고 256 이상에서 시뮬레이션이
-   더 진행되지 않는다(stall). **데이터 오류가 아니라 미완료**다. 용량 소진 시
-   admission을 거부하는 경로의 liveness 문제로 보이며 남은 작업이다.
-   → `scripts/benchmarks/uvm-oversub-150/` 실행 시 이 제약을 먼저 확인할 것.
+1. **(해결됨) Oversubscription stall.** 원인과 수정은 §9를 본다. 현재
+   `-parallel`/serial 모두 matrixtranspose 256 / 512 / 1024 / 2048에서
+   `-uvm-oversubscription-ratio=1.5`로 통과한다. 남은 코너 케이스는 아래 7번이다.
 2. **단일 GPU만 지원** (플래그 검증으로 거부).
 3. **퇴출 copy-back은 보수적** — 더티 페이지 추적 미구현이라 모든 퇴출이 D2H
    트래픽을 발생시킨다 (스펙 §18.3에서 허용).
@@ -276,3 +273,244 @@ remote write 1,256건 stall 후 전부 replay, range TLB 무효화 33건,
 6. **TBN 조상 확장은 §11.4 의사코드를 따른다** — 아래에서 위로 훑되 첫 실패에서
    중단한다. 따라서 §11.6 예시(256KB 75%)에 도달하려면 그 아래 128KB 노드가
    먼저 임계값을 넘어야 한다.
+7. **극단 churn 코너 케이스는 §10 이후 관측되지 않는다.**
+   `-uvm-oversubscription-ratio=4` + `-uvm-access-counter-threshold=1` 구성은
+   §9 시점까지 간헐적 데이터 불일치가 남아 있었다(parallel 3회 중 1회, serial
+   재현적). §10에서 access-counter migration을 fault-service 슬롯에 태워
+   직렬화한 뒤로는 parallel 3/3, serial 모두 통과한다. 동시 admission이
+   사라져 **도달 불가능해진 것**일 수 있으므로 근본 원인이 제거되었다고
+   단정하지는 않는다.
+
+---
+
+## 9. Oversubscription stall — 원인과 수정
+
+`-uvm-oversubscription-ratio`로 용량을 managed 할당 총량 아래로 내리면
+시뮬레이션이 멈추던 문제다. livelock이 아니라 **완전한 deadlock**이었다:
+엔진 이벤트가 고갈되고 CPU 사용률이 0이 되며 커널은 끝나지 않는다.
+
+### 9.1 재현
+
+```bash
+./matrixtranspose -timing -parallel -gpu=r9nano -arch=gcn3 -report-all \
+    -disable-rtm -uvm -verify \
+    -uvm-oversubscription-ratio=4 -uvm-access-counter-threshold=1 -width=512
+```
+
+`-parallel` 전용 문제는 아니다. 동시 in-flight remote write가 많을수록 경합
+창이 넓어져 확률이 1에 가까워질 뿐이며, 워킹셋이 커지면 serial에서도 같은
+순환에 빠질 수 있다.
+
+### 9.2 순환 (계측으로 확인)
+
+```text
+region R 퇴출 ──필요──> CP 캐시 range WB+INV
+        └──필요──> 모든 AddressTranslator의 R 구간 drain
+                └──대기──> AT가 bottom으로 내보낸 remote WriteReq 1건
+                        └──보관──> accesscounter.stalledWrites[R]
+                                └──필요──> R에 대한 driver의 응답(replay)
+                                        └──없음──> R이 RegionEvicting이라
+                                                   notification이 그냥 버려짐
+```
+
+계측 로그가 이 고리를 그대로 보여줬다.
+
+```text
+[drvdbg] SUPPRESS-BUSY region=0x100000 phase=5(RegionEvicting)
+[cpdbg]  FLUSH-START  region=0x100000     <- FLUSH-ISSUE 는 끝내 오지 않음
+[atdbg]  DRAIN-BLOCKED region=0x100000 by=*mem.WriteReq addr=0x109500
+```
+
+한 번 막히면 CP의 `ToUVMDriver`가 head-of-line 상태가 되어 뒤따르는 모든 UVM
+제어 메시지(다른 퇴출의 TLB 무효화, replay, drain)가 함께 멎는다.
+
+### 9.3 수정
+
+| # | 위치 | 내용 |
+|---|---|---|
+| 1 | `akita/mem/vm/addresstranslator` | region drain이 **remote로 라우팅된 요청을 세지 않는다.** drain의 목적은 "이 구간의 store가 캐시에 도달했는가"인데 remote access는 캐시에 들어가지 않는다. 이것이 순환을 끊는다 |
+| 2 | `driver/uvm_eviction.go` | `finalizeEviction`이 해당 region의 access counter를 **재무장(reset)** 한다. 퇴출은 notification을 소비하면서 replay는 하지 않는 유일한 트랜잭션이므로, 소비한 만큼 되돌려 준다 |
+| 3 | `timing/accesscounter/counter.go` | reset 시 그 region에 보류 write가 남아 있으면 notification을 **즉시 다시 올린다.** 이전에는 조용히 버려졌다 |
+| 4 | `driver/uvm_regions.go` | 모든 notification에 답한다. region이 없으면 refused, 이미 GPU-local이면 replay. 다른 트랜잭션이 replay를 책임질 때만 삼킨다 |
+| 5 | `akita/mem/vm/gmmu` | replay는 범위를 지정할 뿐 요청을 지정하지 않으므로, `resumeTranslation`이 매핑을 **다시 확인**하고 아직 park 상태면 재-fault시킨다. 같은 replay 메시지가 그 트랜잭션을 다시 집지 않도록 `refaultedBy`로 표시한다(표시가 없으면 단일 replay 하나가 무한 루프를 돈다) |
+
+### 9.4 함께 드러난 기존 데이터 버그 두 건
+
+stall을 없애자 그 뒤에 가려져 있던 결함이 드러났다. 둘 다 §9.3 이전부터
+존재했고(용량 고갈 구성에서 `-parallel` 없이도 재현) 함께 고쳤다.
+
+1. **in-flight admission을 "거부"로 답하던 문제** (`driver/uvm_migration.go`).
+   `newMigration`은 이미 마이그레이션 중인 페이지를 집지 않는다. 따라서 용량을
+   기다리는 동안 다른 admission이 같은 페이지를 가져가면 빈 마이그레이션이 되고,
+   `deferAdmission`이 **region 전체를 refused로 답했다.** 그러면 access counter가
+   보류 중이던 write들을 host 메모리로 흘리는데 그 host 메모리는 진행 중인 H2D가
+   이미 읽어간 뒤다 → GPU 사본이 authoritative가 되면서 그 write들이 통째로
+   사라진다(`get 0`). 이제 덮고 있는 admission이 있으면 **거부 대신 그
+   마이그레이션에 합류**한다.
+2. **UVM 마이그레이션 DMA 응답을 tick 순서에 의존해 클레임하던 문제**
+   (`driver/uvm_driver.go`, `driver/memorycopy.go`). 드라이버가 사용자 copy
+   미들웨어보다 먼저 응답을 가로채는 방식이었는데, 미들웨어가 포트를 다시 peek할
+   때 head가 그 사이 도착한 마이그레이션 응답일 수 있다. 그러면 사용자 경로가
+   그것을 소비하고 `findCommandByReq`가 `panic: cannot find command`로 죽는다.
+   이제 `Driver.ClaimUVMDMAReturn`으로 **소유권이 소비자를 결정**한다.
+
+### 9.5 검증
+
+`-timing -parallel -gpu=r9nano -arch=gcn3 -report-all -disable-rtm -uvm -verify`
+
+| 구성 | 결과 |
+|---|---|
+| `-width=512` (oversubscription 없음) | Passed |
+| `-uvm-oversubscription-ratio=1.5` 256 / 512 / 1024 / **2048** | Passed |
+| `-uvm-oversubscription-ratio=2` / `2.5` / `4` / `8` (512) | Passed |
+| `-uvm-oversubscription-ratio=4` (256) | Passed |
+| `-uvm-disable-eviction -uvm-oversubscription-ratio=1.5` | Passed (이전에는 데이터 불일치) |
+| `-uvm-access-counter=false -uvm-oversubscription-ratio=4` | Passed |
+| `-uvm-disable-prefetch` / `-uvm-ideal` / `-uvm=false` | Passed |
+
+수정 전 같은 조건: ratio 4 + threshold 1은 **정지**, ratio 2.5 / 4 / 8은
+`panic: cannot find command`, `-uvm-disable-eviction`은 데이터 불일치,
+ratio 1.5 @ 1024는 통과(2048은 미측정).
+
+단위 테스트와 `golangci-lint run ./amd/...`에 신규 지적 없음(기존 실패인
+`idealmemcontroller` 컴파일, `dispatching` stdout/stderr, lint 11건은 그대로).
+
+---
+
+## 10. Access-counter migration에 fixed fault latency 부과
+
+### 10.1 이전 동작
+
+20us fixed software latency(§10.1)는 `scheduleFaultHandlingLocked` 한 곳에서만
+부과되고, 그 호출처는 demand fault 큐(`startNextFaultServiceLocked`)뿐이었다.
+access-counter 경로는 `onAccessCounterNotify → migrateRegionLocked →
+startCPUToGPUMigration`으로 곧장 DMA에 도달해 **software latency가 0**이었다.
+
+스펙 문자 그대로는 위반이 아니다. §10.1의 과금 규칙은 "unique **fault-service**
+transaction 당 1회"이고 §16의 access-counter 흐름에는 software latency 단계가
+없다. 다만 결과적으로:
+
+- 드라이버가 하는 일(capacity 검사 → 퇴출 → DMA → PTE → replay)은 같은데
+  페이지가 REMOTE 매핑이었는지에 따라 20us와 0us로 갈렸다.
+- §15의 "remote write → immediate migration"이 access-counter 경로를 타므로
+  write-triggered migration도 0us였다. 같은 write가 cold/INVALID 페이지에서는
+  demand fault를 타 20us였다.
+- access-counter migration은 `faultServiceCue`를 우회하므로 §8.4의 "동시에
+  하나의 fault service만 활성" 직렬화도 받지 않았다.
+
+실측(matrixtranspose 2048, ratio 1.5): CPU→GPU migration 8,084건 중 7,747건
+(96%)이 무과금이었다.
+
+### 10.2 변경
+
+access-counter notification을 **demand fault와 같은 service 큐**에 태운다.
+
+```text
+AccessCounterNotifyReq
+    |
+    v
+admitAccessCounterServiceLocked   (region이 이미 트랜잭션 보유 시 §16대로 swallow)
+    |
+    v
+faultServiceCue  (FIFO, 활성 1개 — §8.4)
+    |
+    v
++20us fixed software latency      (§10.1)
+    |
+    v
+serviceFaultLocked                (demand fault와 동일 — TBN 포함)
+```
+
+**access-counter migration도 page fault다.** 따라서 서비스 경로 자체를 하나로
+합쳤다 — 큐, 20us, §8.4 직렬화, `serviceFaultLocked`, TBN까지 동일하다.
+`FaultTransaction.Trigger`는 통계 귀속(demand / access counter)만 구분한다.
+
+TBN 적용에는 demand mask가 필요한데 counter는 4KB 단위를 모른다(§14의 카운터가
+64KB 단위). 그래서 access-counter 서비스의 demand mask는 **notification이 온
+64KB region 전체**로 둔다(`regionDemandMask`). 비워 두면 counter가 명시적으로
+요청한 region이 prefetch로 집계되어 prefetch 정확도 지표가 무의미해진다.
+
+pending 상태의 access-counter 트랜잭션에 실제 page fault가 coalesce되면
+demand fault로 **승격**한다(`promoteToDemandFaultLocked`). 실제 fault는 §11.7이
+요구하는 4KB 단위 demand mask를 표현할 수 있으므로, 승격 시 counter가 심어 둔
+64KB seed를 버리고 실제 fault 페이지부터 다시 쌓는다. §10.1의 "region당 1회
+과금"은 그대로 유지된다(버킷만 이동).
+
+신규 카운터 `uvm_num_access_counter_services` = 20us를 부과받은 AC 서비스 수.
+`uvm_fault_service_latency_total`은 두 종류의 합계다.
+
+### 10.3 영향 (실측)
+
+matrixtranspose, `-uvm-oversubscription-ratio=1.5`, `-parallel`:
+
+| | width=512 전 | width=512 후 | width=1024 전 | width=1024 후 |
+|---|---|---|---|---|
+| `Driver.kernel_time` | 0.145 ms | 0.889 ms (**6.1x**) | 3.580 ms | 3.497 ms (**0.98x**) |
+| `fault_service_latency_total` | 0.26 ms | 1.00 ms | 2.28 ms | 3.88 ms |
+| AC services (20us 과금) | 0 | 50 | 0 | 194 |
+| CPU→GPU migrations | 41 | 33 | 416 | 129 |
+| evictions | 34 | 13 | 502 | 44 |
+| migrated bytes | 5.63 MB | 2.95 MB | 70.8 MB | 11.3 MB |
+| remote accesses | — | — | 19,700 | 64,896 |
+
+두 가지를 유의한다.
+
+1. **커널이 짧을수록 타격이 크다.** 512는 커널 0.145ms에 직렬화된 1.0ms가
+   얹혀 6.1x가 되지만, 1024는 커널 3.5ms에 3.88ms가 겹쳐 들어가 사실상
+   동일하다. 절대 지연이 아니라 커널 길이 대비 비율이 지배한다.
+2. **정책이 migration에서 remote access로 이동한다.** admission 1건이
+   20us를 직렬로 소모하므로 migration이 비싸지고(1024에서 416 → 129),
+   thrashing이 크게 줄며(eviction 502 → 44) 그만큼 remote access가 늘어난다
+   (19,700 → 64,896). 20us를 실제로 모델링하면 나오는 당연한 귀결이지만
+   질적으로 다른 동작이므로 이전 측정치와 직접 비교하면 안 된다.
+
+### 10.4 검증
+
+`-timing -parallel -gpu=r9nano -arch=gcn3 -report-all -disable-rtm -uvm -verify`
+전부 Passed: oversubscription 없음 / ratio 1.5 (256·512·1024) / ratio 2·2.5·4·8
+(512) / ratio 4 (256) / ratio 4 + threshold 1 (512, parallel 3/3 및 serial) /
+`-uvm-disable-eviction` / `-uvm-access-counter=false` / `-uvm-disable-prefetch` /
+`-uvm-ideal` / `-uvm=false`.
+
+드라이버 유닛 테스트 35/35 통과. lint 신규 지적 없음.
+
+### 10.5 TBN을 access-counter migration에도 적용
+
+§10.2 초기 구현은 access-counter 서비스를 64KB 고정으로 두고 TBN을 태우지
+않았다(§11이 fault 기준으로 서술되어 있고 §16 흐름에 TBN 단계가 없다는 이유).
+그러나 access-counter로 인한 migration도 page fault이므로 TBN을 **무조건**
+적용하도록 통합했다. 위 §10.2의 서술이 최종 형태다.
+
+실측 (`-uvm-oversubscription-ratio=1.5`, `-parallel`):
+
+| | 512 미적용 | 512 적용 | 1024 미적용 | 1024 적용 |
+|---|---|---|---|---|
+| TBN fault events | 0 | 49 | 0 | 167 |
+| 64KB 선택 | 0 | 19 | 0 | 50 |
+| 2MB 확장 | 0 | 10 | 0 | 87 |
+| `tbn_demand_bytes` | 0 | 3.08 MB | 0 | 10.8 MB |
+| `tbn_actual_prefetch_dma_bytes` | 0 | 7.00 MB | 0 | 3.47 MB |
+| CPU→GPU migrations | 33 | 42 | 129 | **77** |
+| evictions | 13 | 121 | 44 | 45 |
+| migrated bytes | 2.95 MB | 16.9 MB | 11.27 MB | 11.33 MB |
+| `fault_service_latency_total` | 1.00 ms | 0.98 ms | 3.88 ms | **3.34 ms** |
+| `Driver.kernel_time` | 0.889 ms | 1.091 ms (1.23x) | 3.497 ms | 3.463 ms (0.99x) |
+
+1024에서는 **같은 양의 데이터가 더 적고 큰 전송으로** 옮겨진다(migration
+129 → 77, migrated bytes 11.27 → 11.33 MB). 서비스 횟수가 줄어 software
+latency도 3.88 → 3.34 ms로 감소한다. 512는 워킹셋이 작아 2MB 확장이 과잉
+prefetch가 되어 migrated bytes가 5.8배로 늘고 kernel time이 1.23배가 된다.
+
+`-uvm-disable-prefetch`는 access-counter 서비스에도 그대로 적용된다(확인:
+TBN events 50건 전부 64KB, prefetch DMA 0 B).
+
+### 10.6 검증 (최종)
+
+`-timing -parallel -gpu=r9nano -arch=gcn3 -report-all -disable-rtm -uvm -verify`
+전부 Passed: oversubscription 없음 / ratio 1.5 (256·512·1024) / ratio 2·4·8
+(512) / ratio 4 (256) / ratio 4 + threshold 1 (512) / `-uvm-disable-eviction` /
+`-uvm-access-counter=false` / `-uvm-disable-prefetch` / `-uvm-ideal` /
+`-uvm=false`.
+
+드라이버 유닛 테스트 35/35, `ginkgo -r --skip-package=mccl` 신규 실패 없음
+(기존 `dispatching` stdout 이슈만), lint 신규 지적 없음(기존 11건).

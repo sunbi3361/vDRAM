@@ -23,6 +23,7 @@ configs = [
     'ideal-l1tlb',
     'virtual-caching',
     'uvm',
+    'uvm-oversub-150',
     'uvm-ideal',
     ]
 

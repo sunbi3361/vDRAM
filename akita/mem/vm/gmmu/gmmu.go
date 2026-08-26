@@ -42,6 +42,12 @@ type transaction struct {
 	msgID     string
 	state     transactionState
 
+	// refaultedBy is the ID of the replay request that released this
+	// transaction only for it to fault again. That replay must not pick it up
+	// a second time, or it would keep releasing and re-parking the same
+	// translation for as long as it sits at the head of the port. // sbin_codex
+	refaultedBy string
+
 	// Pre-edit field (commented per AGENTS.md convention). A parked fault used
 	// to keep occupying a page-walk slot:
 	// waitingOnUVM bool

@@ -57,8 +57,11 @@ type UVMStats struct {
 	GPUResidentBytesPeak uint64
 
 	// Remote access and access counter.
-	RemoteAccesses          uint64
-	AccessCounterNotify     uint64
+	RemoteAccesses      uint64
+	AccessCounterNotify uint64
+	// AccessCounterServices counts the notifications that opened a service
+	// transaction, i.e. the ones charged the fixed software latency. // sbin_codex
+	AccessCounterServices   uint64
 	AccessCounterResets     uint64
 	AccessCounterSuppressed uint64
 

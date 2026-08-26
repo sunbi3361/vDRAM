@@ -159,6 +159,13 @@ type FaultTransaction struct {
 	Key         RegionKey
 	VABlockBase uint64
 
+	// Trigger says what asked for the service. Both kinds occupy the single
+	// service slot and are charged the fixed software latency (spec 8.4,
+	// 10.1); they differ in what they select. A demand fault runs TBN, an
+	// access-counter service migrates its own 64KB region (spec 16).
+	// sbin_codex
+	Trigger MigrationTrigger
+
 	CreatedAt sim.VTimeInSec
 	ReadyAt   sim.VTimeInSec
 	State     FaultState

@@ -312,6 +312,12 @@ func (m *defaultMemoryCopyMiddleware) processGeneralRsp(
 	madeProgress := false
 	originalReq := rsp.OriginalReq
 
+	// sbin_codex: a MemCopy the UVM manager issued for a migration answers to
+	// the UVM manager, never to a user command.
+	if m.driver.ClaimUVMDMAReturn(originalReq) {
+		return true
+	}
+
 	switch originalReq := originalReq.(type) {
 	case *protocol.FlushReq:
 		madeProgress = m.processFlushReturn(originalReq)

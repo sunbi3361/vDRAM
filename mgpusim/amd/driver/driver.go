@@ -43,10 +43,17 @@ type Driver struct {
 	gpuPort sim.Port
 	uvmPort sim.Port // sbin_codex: UVM fault port from GPU GMMUs (nil when disabled).
 
-	driverStopped      chan bool
-	enqueueSignal      chan bool
-	engineMutex        sync.Mutex
-	engineRunning      bool
+	driverStopped chan bool
+	enqueueSignal chan bool
+	engineMutex   sync.Mutex
+	engineRunning bool
+	// wakePending records an enqueue wake that arrived while the engine was
+	// running (or exiting). runEngine re-checks it before clearing
+	// engineRunning, so a wake that lands in ParallelEngine.Run()'s exit
+	// window is never lost: its tick event is already in the queue, and the
+	// engine runs once more to consume it. Protected by engineRunningMutex.
+	// sbin_codex
+	wakePending        bool
 	engineRunningMutex sync.Mutex
 	simulationID       string
 
@@ -111,14 +118,26 @@ func (d *Driver) runAsync() {
 			d.TickLater()
 			d.Engine.Continue()
 
+			// Pre-edit code (commented per AGENTS.md convention). Trusting
+			// engineRunning alone lost the wake when Run() was deciding to
+			// exit: its emptiness check sits outside the pause lock, so the
+			// tick scheduled above could land in a queue the engine had
+			// already decided was empty, and nobody restarted it. // sbin_codex
+			// d.engineRunningMutex.Lock()
+			// if d.engineRunning {
+			// 	d.engineRunningMutex.Unlock()
+			// 	continue
+			// }
+			//
+			// d.engineRunning = true
+			// go d.runEngine()
+			// d.engineRunningMutex.Unlock()
 			d.engineRunningMutex.Lock()
-			if d.engineRunning {
-				d.engineRunningMutex.Unlock()
-				continue
+			d.wakePending = true
+			if !d.engineRunning {
+				d.engineRunning = true
+				go d.runEngine()
 			}
-
-			d.engineRunning = true
-			go d.runEngine()
 			d.engineRunningMutex.Unlock()
 		}
 	}
@@ -135,14 +154,45 @@ func (d *Driver) runEngine() {
 
 	d.engineMutex.Lock()
 	defer d.engineMutex.Unlock()
-	err := d.Engine.Run()
-	if err != nil {
-		panic(err)
-	}
 
-	d.engineRunningMutex.Lock()
-	d.engineRunning = false
-	d.engineRunningMutex.Unlock()
+	// Pre-edit code (commented per AGENTS.md convention):
+	// err := d.Engine.Run()
+	// if err != nil {
+	// 	panic(err)
+	// }
+	//
+	// d.engineRunningMutex.Lock()
+	// d.engineRunning = false
+	// d.engineRunningMutex.Unlock()
+
+	// sbin_codex: keep running until no wake arrived during Run(). A wake sets
+	// wakePending only after its tick event is scheduled, so when the re-check
+	// sees it, the event is already in the queue and one more Run() consumes
+	// it. Without this, a wake landing in Run()'s exit window left the event
+	// stranded and the simulation silently hung (observed on nw, whose
+	// per-kernel synchronous launches stop and restart the engine ~128 times
+	// per run).
+	for {
+		d.engineRunningMutex.Lock()
+		d.wakePending = false
+		d.engineRunningMutex.Unlock()
+
+		err := d.Engine.Run()
+		if err != nil {
+			panic(err)
+		}
+
+		d.engineRunningMutex.Lock()
+		if d.wakePending {
+			d.engineRunningMutex.Unlock()
+			continue
+		}
+
+		d.engineRunning = false
+		d.engineRunningMutex.Unlock()
+
+		return
+	}
 }
 
 // DeviceProperties defines the properties of a device

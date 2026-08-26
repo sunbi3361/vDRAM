@@ -152,6 +152,11 @@ func (r *reporter) accessCounterStats() accesscounter.Stats {
 		total.Notifications += snapshot.Notifications
 		total.StalledWrites += snapshot.StalledWrites
 		total.ReleasedWrites += snapshot.ReleasedWrites
+		// Pre-edit code (commented per AGENTS.md convention): RefusedWrites was
+		// left out of the sum, so uvm_num_remote_writes_performed reported zero
+		// however many writes the driver had actually refused to migrate.
+		// sbin_codex
+		total.RefusedWrites += snapshot.RefusedWrites
 	}
 
 	return total
@@ -520,6 +525,8 @@ func (r *reporter) reportUVM() {
 		{"uvm_num_remote_accesses", float64(counters.RemoteAccesses), ""},
 		{"uvm_num_remote_writes_detected", float64(counters.StalledWrites), ""},
 		{"uvm_num_write_replays", float64(counters.ReleasedWrites), ""},
+		{"uvm_num_access_counter_services",
+			float64(stats.AccessCounterServices), ""}, // sbin_codex
 		{"uvm_num_access_counter_notifications",
 			float64(stats.AccessCounterNotify), ""},
 		{"uvm_num_access_counter_suppressed",
@@ -560,6 +567,20 @@ func boolToFloat(b bool) float64 {
 		return 1
 	}
 	return 0
+}
+
+// terminateInflightKernels closes out kernel-launch tasks that are still
+// running when the simulation is cut off (-max-inst). The busy-time tracer
+// only accumulates completed tasks, so without this a truncated run reports
+// kernel_time = 0. // sbin_codex
+func (r *reporter) terminateInflightKernels(now sim.VTimeInSec) {
+	if r.kernelTimeTracer != nil {
+		r.kernelTimeTracer.tracer.TerminateAllTasks(now)
+	}
+
+	for _, t := range r.perGPUKernelTimeTracers {
+		t.tracer.TerminateAllTasks(now)
+	}
 }
 
 func (r *reporter) reportKernelTime() {

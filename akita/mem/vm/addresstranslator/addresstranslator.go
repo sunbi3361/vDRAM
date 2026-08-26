@@ -475,12 +475,21 @@ func (m *middleware) handleDrainRange(req *vm.UVMDrainRangeReq) bool {
 // region's page-table entries, so it will fault and wait in the GMMU replay
 // queue until this eviction completes. Waiting for it here would deadlock the
 // eviction against its own invalidation. // sbin_codex
+//
+// Requests routed to remote host memory do not count either, for the same
+// reason read the other way round. The drain exists to establish that every
+// store to the region has reached the caches before they are written back; a
+// remote access never enters a cache, so it has nothing to contribute to that
+// question. Counting one is worse than useless: the UVM access counter holds a
+// remote write until the driver says what to do with it, and the driver's
+// answer for a region under eviction only arrives once the eviction has
+// finished — which is what this drain is gating. // sbin_codex
 func (m *middleware) hasOutstandingInRange(
 	pid vm.PID,
 	startVA, size uint64,
 ) bool {
 	for _, trans := range m.transactions {
-		if !trans.translationDone {
+		if !trans.translationDone || isRemoteRoute(trans.translationRsp) {
 			continue
 		}
 
@@ -492,12 +501,35 @@ func (m *middleware) hasOutstandingInRange(
 	}
 
 	for _, entry := range m.inflightReqToBottom {
+		if remoteDemandOf(entry.reqToBottom) != nil {
+			continue
+		}
+
 		if inVARange(entry.reqFromTop, pid, startVA, size) {
 			return true
 		}
 	}
 
 	return false
+}
+
+// isRemoteRoute reports whether a completed translation sends its requests to
+// host memory rather than into the GPU cache hierarchy. // sbin_codex
+func isRemoteRoute(rsp *vm.TranslationRsp) bool {
+	return rsp != nil && rsp.Page.RemoteAccessible
+}
+
+// remoteDemandOf returns the remote-access annotation a translated request
+// carries, or nil when it was routed to local memory. // sbin_codex
+func remoteDemandOf(req mem.AccessReq) *mem.RemoteDemandInfo {
+	switch req := req.(type) {
+	case *mem.ReadReq:
+		return req.RemoteDemandInfo
+	case *mem.WriteReq:
+		return req.RemoteDemandInfo
+	default:
+		return nil
+	}
 }
 
 func inVARange(

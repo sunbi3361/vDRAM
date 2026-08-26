@@ -61,6 +61,25 @@ func (m *UVMManager) queueAccessCounterResets(migration *Migration) {
 	}
 }
 
+// queueRegionCounterResetLocked re-arms the counter of one 64KB region. It
+// requires stateMu to be held by the caller. // sbin_codex
+func (m *UVMManager) queueRegionCounterResetLocked(key RegionKey) {
+	if !m.config.AccessCounterEnabled {
+		return
+	}
+
+	resetKey := AccessCounterResetKey{PID: key.PID, RegionBase: key.Base}
+	if m.pendingAccessCounterResetKeys[resetKey] {
+		return
+	}
+
+	m.pendingAccessCounterResetKeys[resetKey] = true
+	m.pendingAccessCounterResets = append(
+		m.pendingAccessCounterResets,
+		pendingAccessCounterReset{Key: resetKey, DeviceID: key.DeviceID},
+	)
+}
+
 func (m *UVMManager) sendPendingAccessCounterReset() bool {
 	m.stateMu.Lock()
 	defer m.stateMu.Unlock()

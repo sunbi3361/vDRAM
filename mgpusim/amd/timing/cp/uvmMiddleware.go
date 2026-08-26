@@ -10,22 +10,11 @@ package cp
 // for the legacy unified-memory migration flow.
 
 import (
-	"fmt"
-	"os"
-
 	"github.com/sarchlab/akita/v4/mem/cache"
 	"github.com/sarchlab/akita/v4/mem/vm"
 	"github.com/sarchlab/akita/v4/sim"
 	"github.com/sarchlab/mgpusim/v4/amd/protocol"
 )
-
-var uvmDbg = os.Getenv("UVM_DEBUG") != ""
-
-func dbgc(format string, args ...interface{}) {
-	if uvmDbg {
-		fmt.Fprintf(os.Stderr, "[cpdbg] "+format+"\n", args...)
-	}
-}
 
 type uvmMiddleware struct {
 	*CommandProcessor
@@ -214,7 +203,6 @@ func (m *uvmMiddleware) startCacheRangeFlush(
 
 	m.currCacheRangeFlush = req
 	m.ToUVMDriver.RetrieveIncoming()
-	dbgc("FLUSH-START region=%#x drainAcks=%d", req.StartVAddr, m.numUVMDrainAck)
 
 	return true
 }
@@ -344,7 +332,6 @@ func (m *uvmMiddleware) issueCacheRangeFlush() bool {
 	}
 
 	m.cacheFlushIssued = true
-	dbgc("FLUSH-ISSUE region=%#x", req.StartVAddr)
 
 	return true
 }

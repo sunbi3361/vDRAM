@@ -11,6 +11,7 @@ mkdir benchmarks/ideal-l1tlb
 mkdir benchmarks/virtual-caching
 mkdir benchmarks/uvm
 mkdir benchmarks/uvm-ideal
+mkdir benchmarks/uvm-oversub-150
 
 mkdir benchmarks/logs
 

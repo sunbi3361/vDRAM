@@ -20,6 +20,7 @@ import (
 // uvmDeviceID is the only GPU UVM supports today. Device 0 is the CPU.
 const uvmDeviceID uint64 = 1
 
+
 // startCPUToGPUMigration reserves GPU frames for the selected pages, publishes
 // the migrating mapping, and starts the transfer.
 func (m *UVMManager) startCPUToGPUMigration(
@@ -56,29 +57,68 @@ func (m *UVMManager) startCPUToGPUMigration(
 	m.preEvict(exclude)
 }
 
-// deferAdmission handles an admission that could not reserve a GPU frame.
+// deferAdmission handles an admission that reserved no GPU frame at all.
 //
-// The region is reported as refused, which releases whatever the GPU stalled
-// on it: a write held only to force a migration is then performed over PCIe
-// rather than waiting for a mapping that is not coming. Keeping it stalled
-// instead would be closer to spec 15, but nothing would ever release it,
-// because the capacity that would satisfy it is exactly what is missing.
+// There are two reasons for that, and they call for opposite answers. If
+// nothing else is bringing the region in, the region is reported as refused,
+// which releases whatever the GPU stalled on it: a write held only to force a
+// migration is then performed over PCIe rather than waiting for a mapping that
+// is not coming. Keeping it stalled instead would be closer to spec 15, but
+// nothing would ever release it, because the capacity that would satisfy it is
+// exactly what is missing.
+//
+// The other reason is that an admission for these very pages started while this
+// one was waiting on an eviction for capacity — newMigration takes no page that
+// is already migrating, so a fully covered set leaves it with nothing to do.
+// That migration is authoritative and this transaction joins it. Refusing the
+// region instead would be a lost update: the access counter would push the
+// writes it holds into host memory behind the transfer that has already read
+// it, and the GPU copy that becomes authoritative would never contain them.
 // sbin_codex
 func (m *UVMManager) deferAdmission(
 	txn *FaultTransaction,
 	pages []PageKey,
 	deviceID uint64,
 ) {
+	joined := false
+
 	for _, key := range m.regionsOf(pages, deviceID) {
-		m.sendRefusedReplayLocked(key)
+		migID := m.migrationCoveringRegion(key)
+		if migID == "" {
+			m.sendRefusedReplayLocked(key)
+			continue
+		}
+
+		if txn != nil && key == txn.Key && m.joinMigrationLocked(txn, migID) {
+			joined = true
+		}
 	}
 
-	if txn == nil {
+	if txn == nil || joined {
 		return
 	}
 
 	txn.State = FaultComplete
 	m.retireFaultLocked(txn)
+}
+
+// joinMigrationLocked attaches a fault transaction to an admission that already
+// covers its region, so the migration replays the fault when it lands.
+// sbin_codex
+func (m *UVMManager) joinMigrationLocked(
+	txn *FaultTransaction,
+	migID string,
+) bool {
+	mig := m.migrations[migID]
+	if mig == nil {
+		return false
+	}
+
+	txn.MigrationID = migID
+	txn.State = FaultMigrating
+	mig.FaultIDs = append(mig.FaultIDs, txn.ID)
+
+	return true
 }
 
 // regionsOf returns the distinct regions the pages belong to.

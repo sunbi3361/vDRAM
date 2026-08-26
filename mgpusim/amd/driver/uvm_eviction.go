@@ -171,13 +171,10 @@ func (m *UVMManager) beginEviction(region *RegionState, done func()) {
 	// means no compute unit can obtain a GPU-local translation for the victim
 	// any more, so the subsequent writeback observes a settled region and the
 	// D2H copy cannot race a store that was issued afterwards. // sbin_codex
-	dbgd("EVICT-BEGIN region=%#x frames=%d", region.Key.Base, m.regionGPUFrames(region))
 	m.evictionParkPTEs(region)
 
 	m.requestTLBInvalidateLocked(region.Key, func() {
-		dbgd("EVICT-TLBINV-DONE region=%#x", region.Key.Base)
 		m.requestCacheRangeFlushLocked(region.Key, func() {
-			dbgd("EVICT-FLUSH-DONE region=%#x", region.Key.Base)
 			m.evictionStartD2H(region, done)
 		})
 	})
@@ -256,11 +253,20 @@ func (m *UVMManager) completeEvictionMigrationLocked(mig *Migration) {
 // enabled, INVALID otherwise (spec 19).
 func (m *UVMManager) finalizeEviction(region *RegionState) {
 	evicted := m.releaseEvictedPages(region)
-	dbgd("EVICT-FINAL region=%#x evicted=%d", region.Key.Base, evicted)
 
 	if m.activeEvictions > 0 {
 		m.activeEvictions--
 	}
+
+	// Re-arm the region's access counter. An eviction consumes the counter's
+	// notification for this region — it makes the region ineligible for
+	// admission while it runs — but, unlike a fault or an admission, it never
+	// replays the region afterwards. Without this the counter stays latched
+	// with the region's remote writes still held and nothing left that could
+	// ask for them to be released. Re-arming makes the counter raise the
+	// region again, and that notification takes the ordinary admission path.
+	// sbin_codex
+	m.queueRegionCounterResetLocked(region.Key)
 
 	if evicted == 0 {
 		region.Phase = RegionIdle

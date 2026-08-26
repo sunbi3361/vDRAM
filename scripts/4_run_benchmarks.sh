@@ -3,25 +3,14 @@
 # Requires 2_copy_benchmarks.sh, 2_1_copy_binary.sh and 3_gen_runners.py to
 # have run first.
 
-# configs=(baseline unified ideal-l1tlb ideal-l2tlb unified-infinite-l1tlb unified-infinite-l2tlb infinite-l1tlb infinite-l2tlb)
-# configs=(baseline unified ideal-l1tlb ideal-l2tlb unified-infinite-l1tlb unified-infinite-l2tlb)
-# configs=(baseline ideal-l1tlb)
-# configs=(unified unified-infinite-l1tlb)
-configs=(virtual-caching)
-# configs=(baseline virtual-caching)
-configs=(baseline ideal-l1tlb virtual-caching uvm uvm-ideal)
-# configs=(uvm uvm-ideal)
-# configs=(uvm-ideal)
-# configs=(baseline)
+
+configs=(baseline ideal-l1tlb virtual-caching)
+configs=(uvm uvm-ideal)
+configs=(uvm-oversub-150)
 
 benchmarks=(
-    # 'atax'
     'bfs'
-    # 'bicg'
-    # 'fastwalshtransform'
     'fft'
-    # 'fir'
-    # 'floydwarshall'
     'kmeans'
     'matrixmultiplication'
     'matrixtranspose'
@@ -35,9 +24,21 @@ benchmarks=(
     'vectoradd'
 )
 
-# benchmarks=(
-#     'kmeans'
-# )
+benchmarks=(
+    # 'bfs'
+    # 'fft'
+    # 'kmeans'
+    # 'matrixmultiplication'
+    # 'matrixtranspose'
+    'nbody'
+    # 'nw'
+    # 'pagerank'
+    # 'relu'
+    # 'simpleconvolution'
+    # 'spmv'
+    # 'stencil2d'
+    'vectoradd'
+)
 
 for config in ${configs[@]};
 do

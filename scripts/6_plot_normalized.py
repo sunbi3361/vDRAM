@@ -37,6 +37,7 @@ configs = [
     'virtual-caching',
     'uvm',
     'uvm-ideal',
+    'uvm-oversub-150',
     ]
 
 benchmarks=[

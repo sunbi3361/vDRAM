@@ -197,6 +197,13 @@ func (r *Runner) Run() {
 		onMaxInstReached = func() {
 			maxInstOnce.Do(func() {
 				r.flushReport()
+				// sbin_codex: Simulation.Terminate() is never reached on the
+				// -max-inst exit path, and only the recorder's Close() writes
+				// the exec_info rows (start time, command, end time). Close it
+				// here so a truncated run still records them.
+				if err := r.simulation.GetDataRecorder().Close(); err != nil {
+					log.Printf("failed to close data recorder: %v", err)
+				}
 				atexit.Exit(0)
 			})
 		}
@@ -227,10 +234,12 @@ func (r *Runner) Run() {
 	}
 	wg.Wait()
 
-	if r.reporter != nil {
-		r.reporter.report()
-		r.reporter.dataRecorder.Flush()
-	}
+	// Pre-edit code (commented per AGENTS.md convention):
+	// if r.reporter != nil {
+	// 	r.reporter.report()
+	// 	r.reporter.dataRecorder.Flush()
+	// }
+	r.flushReport() // sbin_codex: single reporting path; marks reported so a late atexit flush cannot duplicate rows.
 
 	r.Driver().Terminate()
 	r.simulation.Terminate()
@@ -243,6 +252,10 @@ func (r *Runner) flushReport() {
 	if r.reporter == nil || r.reported {
 		return
 	}
+	// sbin_codex: close out kernels still in flight so a run truncated by
+	// -max-inst reports the partial kernel time instead of 0. On a normal
+	// completion no kernel task is in flight and this is a no-op.
+	r.reporter.terminateInflightKernels(r.Engine().CurrentTime())
 	r.reporter.report()
 	r.reporter.dataRecorder.Flush()
 	r.reported = true

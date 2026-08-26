@@ -8,19 +8,8 @@ package driver
 // transaction is authoritative and no duplicate DMA is issued.
 
 import (
-	"fmt"
-	"os"
-
 	"github.com/sarchlab/akita/v4/mem/vm"
 )
-
-var uvmDbg = os.Getenv("UVM_DEBUG") != ""
-
-func dbgd(format string, args ...interface{}) {
-	if uvmDbg {
-		fmt.Fprintf(os.Stderr, "[drvdbg] "+format+"\n", args...)
-	}
-}
 
 // RemoteAccessible reports whether a CPU-resident managed page may be reached
 // over PCIe instead of faulting.
@@ -49,52 +38,95 @@ func (m *UVMManager) onAccessCounterNotify(
 
 	m.stats.AccessCounterNotify++
 
-	m.migrateRegionLocked(
+	m.admitAccessCounterServiceLocked(
 		RegionKey{PID: pid, Base: regionBase, DeviceID: deviceID})
 }
 
-// migrateRegionLocked admits one 64KB region to the GPU.
-func (m *UVMManager) migrateRegionLocked(key RegionKey) {
+// admitAccessCounterServiceLocked queues one access-counter migration.
+//
+// An access-counter migration is a page fault: it goes through the same service
+// queue, waits for the single service slot, is charged the fixed software
+// latency, and runs TBN (spec 8.4, 10.1, 11). The only thing that separates it
+// from a demand fault is what raised it, which the transaction's Trigger keeps
+// so the two stay distinguishable in the statistics.
+//
+// Every notification is answered. The counter emits one per region and per
+// residency episode and holds the region's remote writes until that answer
+// arrives, so a notification that is dropped rather than answered strands the
+// writes and the compute units waiting on them. A notification may only be
+// swallowed when some other outstanding transaction has already taken
+// responsibility for answering the region. // sbin_codex
+func (m *UVMManager) admitAccessCounterServiceLocked(key RegionKey) {
 	region := m.regions[key]
 	if region == nil {
-		dbgd("SUPPRESS-NOREGION region=%#x", key.Base)
-		return
-	}
-
-	// Spec 16: a region already in a fault, migration, or prefetch transaction
-	// swallows the notification.
-	if region.busy() || region.MigrationID != "" || region.FaultID != "" {
-		m.stats.AccessCounterSuppressed++
-		dbgd("SUPPRESS-BUSY region=%#x phase=%d mig=%q fault=%q",
-			key.Base, region.Phase, region.MigrationID, region.FaultID)
+		// Not a managed region; nothing here will ever migrate it.
+		m.sendRefusedReplayLocked(key)
 
 		return
 	}
 
-	pages := make([]PageKey, 0, len(region.Pages))
+	if !m.regionAdmissible(region, key) {
+		return
+	}
+
+	cfg := m.config
+	txn := &FaultTransaction{
+		ID:           m.newID("acsvc"),
+		Key:          key,
+		Trigger:      TriggerAccessCounter,
+		VABlockBase:  cfg.alignDown(key.Base, cfg.VABlockSize),
+		CreatedAt:    m.d.TickScheduler.CurrentTime(),
+		State:        FaultPending,
+		demandVAddrs: m.regionDemandMask(region),
+	}
+	m.faults[key] = txn
+	m.faultsByID[txn.ID] = txn
+	m.faultServiceCue = append(m.faultServiceCue, txn.ID)
+	m.stats.AccessCounterServices++
+
+	m.startNextFaultServiceLocked()
+}
+
+// regionDemandMask is the demand mask of an access-counter service: the whole
+// 64KB region the counter raised.
+//
+// Spec 11.7 keeps a demand-fault mask 4KB granular, but a counter has no finer
+// granularity to offer — spec 14 counts per 64KB region, and that region is
+// exactly what the notification asks for. Leaving the mask empty instead would
+// book the requested region as prefetch and make the prefetch statistics read
+// as if TBN had speculated on it. // sbin_codex
+func (m *UVMManager) regionDemandMask(region *RegionState) map[uint64]bool {
+	mask := make(map[uint64]bool, len(region.Pages))
 
 	for _, pk := range region.Pages {
-		if managedPage := m.pages[pk]; managedPage != nil &&
-			managedPage.State == CPUResident {
-			if _, inFlight := m.migrationsByPage[pk]; !inFlight {
-				pages = append(pages, pk)
-			}
-		}
+		mask[pk.VAddr] = true
 	}
 
-	if len(pages) == 0 {
+	return mask
+}
+
+// regionAdmissible reports whether the notification should open a new service.
+//
+// Spec 16: a region already in a fault, migration, or prefetch transaction
+// swallows the notification, because that transaction is authoritative. What
+// makes swallowing safe is that each of those transactions ends by answering
+// the region — a fault and an admission with a replay, an eviction by
+// re-arming the region's counter in finalizeEviction. // sbin_codex
+func (m *UVMManager) regionAdmissible(
+	region *RegionState,
+	key RegionKey,
+) bool {
+	if _, found := m.faults[key]; found {
 		m.stats.AccessCounterSuppressed++
-		dbgd("SUPPRESS-NOPAGES region=%#x phase=%d", key.Base, region.Phase)
 
-		return
+		return false
 	}
 
-	exclude := make(map[PageKey]bool, len(pages))
-	for _, pk := range pages {
-		exclude[pk] = true
+	if region.busy() || region.MigrationID != "" || region.FaultID != "" {
+		m.stats.AccessCounterSuppressed++
+
+		return false
 	}
 
-	m.withCapacity(uint64(len(pages)), exclude, func() {
-		m.startCPUToGPUMigration(nil, pages, TriggerAccessCounter)
-	})
+	return true
 }

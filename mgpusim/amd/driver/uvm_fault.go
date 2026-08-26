@@ -157,6 +157,7 @@ func (m *UVMManager) onPageFault(
 	if txn, found := m.faults[key]; found {
 		txn.RawFaults++
 		txn.IsWrite = txn.IsWrite || isWrite
+		m.promoteToDemandFaultLocked(txn)
 		txn.demandVAddrs[pageBase] = true
 		m.stats.CoalescedFaults++
 
@@ -166,6 +167,7 @@ func (m *UVMManager) onPageFault(
 	txn := &FaultTransaction{
 		ID:           m.newID("fault"),
 		Key:          key,
+		Trigger:      TriggerFault,
 		VABlockBase:  cfg.alignDown(vAddr, cfg.VABlockSize),
 		CreatedAt:    m.d.TickScheduler.CurrentTime(),
 		State:        FaultPending,
@@ -179,6 +181,32 @@ func (m *UVMManager) onPageFault(
 	m.stats.UniqueFaultServices++
 
 	m.startNextFaultServiceLocked()
+}
+
+// promoteToDemandFaultLocked re-labels a queued access-counter service as a
+// demand-fault service.
+//
+// A real fault outranks the counter's hint for the same region: it has a
+// waiting request behind it. Both kinds run the same service, so this only
+// moves the accounting, and spec 10.1 still charges the region once. It also
+// drops the counter's demand seed: that seed stands in for a demand mask the
+// counter cannot express, and a real fault can, at the 4KB granularity spec
+// 11.7 asks for. Once the service has started there is nothing left to
+// promote — the work is already under way and the fault simply rides it.
+// sbin_codex
+func (m *UVMManager) promoteToDemandFaultLocked(txn *FaultTransaction) {
+	if txn.Trigger != TriggerAccessCounter || txn.State != FaultPending {
+		return
+	}
+
+	txn.Trigger = TriggerFault
+	txn.demandVAddrs = map[uint64]bool{}
+
+	if m.stats.AccessCounterServices > 0 {
+		m.stats.AccessCounterServices--
+	}
+
+	m.stats.UniqueFaultServices++
 }
 
 // parkFaultLocked suspends a transaction that cannot be serviced yet and
@@ -246,6 +274,13 @@ func (m *UVMManager) startNextFaultServiceLocked() {
 // scheduleFaultHandlingLocked charges the fixed software fault-handling
 // latency exactly once per unique transaction, as one scheduled event rather
 // than a cycle-by-cycle wait (spec 10.3).
+//
+// An access-counter service is charged the same way. The driver does the same
+// work for it — capacity check, eviction, DMA, page-table update, replay — and
+// spec 10 attaches the latency to that work rather than to the fault that may
+// or may not have started it. Leaving it uncharged made the cost of admitting
+// a region depend on whether the page happened to be REMOTE-mapped at the
+// time. // sbin_codex
 func (m *UVMManager) scheduleFaultHandlingLocked(txn *FaultTransaction) {
 	now := m.d.TickScheduler.CurrentTime()
 	readyAt := now
@@ -336,7 +371,7 @@ func (m *UVMManager) serviceFaultLocked(txn *FaultTransaction) {
 	}
 
 	m.withCapacity(uint64(len(sel.pageKeys)), exclude, func() {
-		m.startCPUToGPUMigration(txn, sel.pageKeys, TriggerFault)
+		m.startCPUToGPUMigration(txn, sel.pageKeys, txn.Trigger)
 	})
 }
 

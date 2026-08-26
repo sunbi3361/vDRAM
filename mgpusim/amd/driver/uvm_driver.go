@@ -135,7 +135,23 @@ func (d *Driver) processUVMDMAReturn() bool {
 		return false
 	}
 
-	switch original := rsp.OriginalReq.(type) {
+	return d.ClaimUVMDMAReturn(rsp.OriginalReq)
+}
+
+// ClaimUVMDMAReturn consumes the head of the GPU port when it answers a
+// MemCopy the UVM manager issued for a migration, and reports whether it did.
+//
+// Running before the copy middleware is not enough on its own to keep those
+// responses away from it: the middleware peeks the port again, and by then the
+// head may be a migration response that was not there a moment earlier. So the
+// middleware asks here too, and ownership — not tick order — decides who
+// consumes the response. // sbin_codex
+func (d *Driver) ClaimUVMDMAReturn(original sim.Msg) bool {
+	if d.uvm == nil {
+		return false
+	}
+
+	switch original := original.(type) {
 	case *protocol.MemCopyH2DReq:
 		if !d.uvm.ownsDMARequest(original.ID) {
 			return false

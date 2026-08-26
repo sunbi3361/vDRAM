@@ -204,6 +204,8 @@ for config in configs:
             submit_file.write("-node=2048 ")
         if benchmark == 'kmeans':
             submit_file.write("-points=131072 -clusters=4 -features=32 -max-iter=3 ")
+        if benchmark == 'matrixmultiplication':
+            submit_file.write("-x=4096 -y=4096 -z=4096 ")
         if benchmark == 'matrixtranspose':
             submit_file.write("-width=2048 ")
         if benchmark == 'nbody':

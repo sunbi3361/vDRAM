@@ -14,21 +14,10 @@
 package accesscounter
 
 import (
-	"fmt"
-	"os"
-
 	"github.com/sarchlab/akita/v4/mem/mem"
 	"github.com/sarchlab/akita/v4/mem/vm"
 	"github.com/sarchlab/akita/v4/sim"
 )
-
-var uvmDbg = os.Getenv("UVM_DEBUG") != ""
-
-func dbg(format string, args ...interface{}) {
-	if uvmDbg {
-		fmt.Fprintf(os.Stderr, "[acdbg] "+format+"\n", args...)
-	}
-}
 
 type transaction struct {
 	originalRequest sim.Msg
@@ -150,12 +139,6 @@ func (c *Comp) handleWrite(request *mem.WriteReq) bool {
 	c.Top.RetrieveIncoming()
 	c.stalledWrites[key] = append(c.stalledWrites[key], request)
 	c.stats.StalledWrites++
-	latched := false
-	if cs, ok := c.counters[key]; ok {
-		latched = cs.notificationLatched
-	}
-	dbg("STALL region=%#x id=%s depth=%d latchedBefore=%v",
-		key.RegionBase, request.ID, len(c.stalledWrites[key]), latched)
 	c.notifyRegion(key, request.RemoteDemandInfo.DeviceID)
 
 	return true

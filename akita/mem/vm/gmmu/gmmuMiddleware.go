@@ -308,7 +308,10 @@ func (m *middleware) replayOneRequest(rsp *vm.PageFaultRsp) bool {
 		trans := m.replayQueue[i]
 		m.replayQueue = append(m.replayQueue[:i], m.replayQueue[i+1:]...)
 		m.uvmPort.RetrieveIncoming()
-		m.resumeTranslation(trans)
+
+		// A per-request response answers this exact request, so it is
+		// completed without re-checking the mapping. // sbin_codex
+		m.resumeTranslation(trans, true, "")
 
 		return true
 	}
@@ -326,7 +329,7 @@ func (m *middleware) replayRange(req *vm.UVMFaultReplayReq) bool {
 
 	for i := range m.replayQueue {
 		trans := m.replayQueue[i]
-		if trans.req.PID != req.PID {
+		if trans.req.PID != req.PID || trans.refaultedBy == req.ID {
 			continue
 		}
 
@@ -339,7 +342,7 @@ func (m *middleware) replayRange(req *vm.UVMFaultReplayReq) bool {
 		}
 
 		m.replayQueue = append(m.replayQueue[:i], m.replayQueue[i+1:]...)
-		m.resumeTranslation(trans)
+		m.resumeTranslation(trans, req.Refused, req.ID)
 
 		return true
 	}
@@ -350,8 +353,20 @@ func (m *middleware) replayRange(req *vm.UVMFaultReplayReq) bool {
 }
 
 // resumeTranslation re-reads the page table and completes a released
-// translation. The mapping is guaranteed usable by the driver's ordering.
-func (m *middleware) resumeTranslation(trans transaction) {
+// translation.
+//
+// The mapping is re-checked rather than trusted. A replay names a range, not a
+// request, so it can reach a translation whose page has since been parked
+// again — an eviction that started right behind the admission is enough. Such
+// a translation faults once more instead of being answered with a mapping that
+// is on its way out. A refused replay is the exception: the driver has said the
+// region will not become GPU-local, so the request must complete against host
+// memory instead of faulting in a loop that nothing would break. // sbin_codex
+func (m *middleware) resumeTranslation(
+	trans transaction,
+	completeUnchecked bool,
+	replayID string,
+) {
 	page, found := m.pageTable.Find(trans.req.PID, trans.req.VAddr)
 	if !found {
 		panic("page not found after UVM fault")
@@ -361,7 +376,16 @@ func (m *middleware) resumeTranslation(trans transaction) {
 	trans.state = pageWalkComplete
 
 	m.walkingTranslations = append(m.walkingTranslations, trans)
-	m.doPageWalkHit(len(m.walkingTranslations) - 1)
+	index := len(m.walkingTranslations) - 1
+
+	// Pre-edit code (commented per AGENTS.md convention):
+	// m.doPageWalkHit(len(m.walkingTranslations) - 1)
+	if !completeUnchecked && page.Managed && m.needsUVMFault(page, trans.req) {
+		m.walkingTranslations[index].refaultedBy = replayID
+		m.sendUVMFault(index)
+	} else {
+		m.doPageWalkHit(index)
+	}
 
 	tmp := m.walkingTranslations[:0]
 	for _, t := range m.walkingTranslations {

@@ -42,7 +42,6 @@ func (c *Comp) notifyRegion(key RegionKey, deviceID uint64) {
 	}
 
 	counter.notificationLatched = true
-	dbg("NOTIFY region=%#x", key.RegionBase)
 
 	notification := vm.NewAccessCounterNotifyReq(
 		c.Ctrl.AsRemote(), c.ctrlDestination)
@@ -72,12 +71,18 @@ func (c *Comp) retryNotification() bool {
 }
 
 // resetRegion clears the counter of one region and re-arms its notification.
+//
+// A region that still holds stalled writes is raised again on the spot. Those
+// writes are released by a replay and nothing but a notification asks the
+// driver for one, so a reset that merely dropped the pending notification
+// would leave them — and the compute units waiting on them — with nobody left
+// to answer. The driver resets a region after evicting it for exactly this
+// reason: the eviction consumed a notification it could not answer, and the
+// fresh one takes the ordinary admission path. // sbin_codex
 func (c *Comp) resetRegion(key RegionKey) {
-	if _, ok := c.counters[key]; ok {
-		dbg("RESET region=%#x stalled=%d", key.RegionBase, len(c.stalledWrites[key]))
-	}
 	delete(c.counters, key)
 
+	held := len(c.stalledWrites[key]) > 0
 	retained := c.pendingNotifications[:0]
 
 	for _, notification := range c.pendingNotifications {
@@ -90,13 +95,35 @@ func (c *Comp) resetRegion(key RegionKey) {
 	}
 
 	c.pendingNotifications = retained
+
+	if held {
+		c.notifyRegion(key, c.deviceID)
+	}
 }
 
 // ResetAll clears every counter. The driver calls it at a kernel boundary so
 // remote accesses never accumulate across kernels (spec 14.2).
+//
+// Regions that still hold stalled writes keep their notification, for the same
+// reason resetRegion re-raises them. // sbin_codex
 func (c *Comp) ResetAll() {
 	c.counters = make(map[RegionKey]*counterState)
-	c.pendingNotifications = nil
+
+	// Pre-edit code (commented per AGENTS.md convention):
+	// c.pendingNotifications = nil
+	retained := c.pendingNotifications[:0]
+
+	for _, notification := range c.pendingNotifications {
+		key := RegionKey{
+			PID: notification.PID, RegionBase: notification.RegionBase,
+		}
+		if len(c.stalledWrites[key]) > 0 {
+			c.counters[key] = &counterState{notificationLatched: true}
+			retained = append(retained, notification)
+		}
+	}
+
+	c.pendingNotifications = retained
 }
 
 // releaseRange replays the writes stalled inside a region that the driver has
@@ -107,15 +134,17 @@ func (c *Comp) releaseRange(req *vm.UVMFaultReplayReq) {
 	for base := req.StartVA; base < end; base += regionByteSize {
 		key := RegionKey{PID: req.PID, RegionBase: base}
 
+		// The writes leave first: resetRegion re-raises a region that still
+		// holds any, and this command is the answer to the notification that
+		// was raised for these. // sbin_codex
+		writes := c.stalledWrites[key]
+		delete(c.stalledWrites, key)
+
 		c.resetRegion(key)
 
-		writes := c.stalledWrites[key]
 		if len(writes) == 0 {
 			continue
 		}
-
-		delete(c.stalledWrites, key)
-		dbg("RELEASE region=%#x refused=%v n=%d", key.RegionBase, req.Refused, len(writes))
 
 		for _, write := range writes {
 			if req.Refused {
