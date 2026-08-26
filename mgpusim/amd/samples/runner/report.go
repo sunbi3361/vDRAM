@@ -532,6 +532,20 @@ func (r *reporter) reportAvatar() {
 				float64(stats.RealResponseFirst)},
 			{"avatar_swallowed_rsp_count", float64(stats.SwallowedRsps)},
 			{"avatar_page_table_veto_count", float64(stats.PageTableVetoes)},
+			// sbin_claude_avatar v2: real-path validation and walk
+			// cancellation (avatar-plan.md 5.3).
+			{"avatar_validation_read_count", float64(stats.ValidationReads)},
+			{"avatar_validation_wait_cycle_sum",
+				float64(stats.ValidationWaitCycles)},
+			{"avatar_spec_out_of_range_count",
+				float64(stats.SpecOutOfRange)},
+			{"avatar_walk_cancel_sent_count",
+				float64(stats.WalkCancelsSent)},
+			{"avatar_forward_suppressed_count",
+				float64(stats.ForwardsSuppressed)},
+			{"avatar_orphan_rsp_count", float64(stats.OrphanRsps)},
+			{"avatar_stale_validation_rsp_count",
+				float64(stats.StaleValidationRsps)},
 		}
 
 		if r.driver != nil && r.driver.AvatarRegistry() != nil {

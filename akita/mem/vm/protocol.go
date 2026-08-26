@@ -111,6 +111,101 @@ func (b TranslationReqBuilder) Build() *TranslationReq {
 	return r
 }
 
+// A TranslationCancelReq asks a translation provider to abandon an earlier
+// TranslationReq that its requester no longer needs (Avatar Early TLB Fill,
+// refs/avatar.md 5.9). It is delivered out of band - on a dedicated Cancel
+// port - so it can overtake the queued request it names. Cancellation is
+// best effort: a request that already completed, or a page walk that already
+// started, is simply left alone and its late response is dropped by the
+// requester. // sbin_claude_avatar
+type TranslationCancelReq struct {
+	sim.MsgMeta
+
+	// CancelID is the ID of the TranslationReq to abandon.
+	CancelID string
+	VAddr    uint64
+	PID      PID
+}
+
+// Meta returns the meta data associated with the message.
+// sbin_claude_avatar
+func (r *TranslationCancelReq) Meta() *sim.MsgMeta {
+	return &r.MsgMeta
+}
+
+// Clone returns cloned TranslationCancelReq with different ID
+// sbin_claude_avatar
+func (r *TranslationCancelReq) Clone() sim.Msg {
+	cloneMsg := *r
+	cloneMsg.ID = sim.GetIDGenerator().Generate()
+
+	return &cloneMsg
+}
+
+// TranslationCancelReqBuilder can build translation cancel requests.
+// sbin_claude_avatar
+type TranslationCancelReqBuilder struct {
+	src, dst sim.RemotePort
+	cancelID string
+	vAddr    uint64
+	pid      PID
+}
+
+// WithSrc sets the source of the request to build. // sbin_claude_avatar
+func (b TranslationCancelReqBuilder) WithSrc(
+	src sim.RemotePort,
+) TranslationCancelReqBuilder {
+	b.src = src
+	return b
+}
+
+// WithDst sets the destination of the request to build. // sbin_claude_avatar
+func (b TranslationCancelReqBuilder) WithDst(
+	dst sim.RemotePort,
+) TranslationCancelReqBuilder {
+	b.dst = dst
+	return b
+}
+
+// WithCancelID names the TranslationReq to abandon. // sbin_claude_avatar
+func (b TranslationCancelReqBuilder) WithCancelID(
+	cancelID string,
+) TranslationCancelReqBuilder {
+	b.cancelID = cancelID
+	return b
+}
+
+// WithVAddr sets the page-aligned virtual address of the canceled request.
+// sbin_claude_avatar
+func (b TranslationCancelReqBuilder) WithVAddr(
+	vAddr uint64,
+) TranslationCancelReqBuilder {
+	b.vAddr = vAddr
+	return b
+}
+
+// WithPID sets the PID of the canceled request. // sbin_claude_avatar
+func (b TranslationCancelReqBuilder) WithPID(
+	pid PID,
+) TranslationCancelReqBuilder {
+	b.pid = pid
+	return b
+}
+
+// Build creates a new TranslationCancelReq. // sbin_claude_avatar
+func (b TranslationCancelReqBuilder) Build() *TranslationCancelReq {
+	r := &TranslationCancelReq{}
+	r.ID = sim.GetIDGenerator().Generate()
+	r.Src = b.src
+	r.Dst = b.dst
+	r.CancelID = b.cancelID
+	r.VAddr = b.vAddr
+	r.PID = b.pid
+	r.TrafficClass = reflect.TypeOf(TranslationReq{}).String()
+
+	return r
+}
+
 // A TranslationRsp is the respond for a TranslationReq. It carries the physical
 // address.
 type TranslationRsp struct {

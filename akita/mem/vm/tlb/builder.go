@@ -179,6 +179,7 @@ func (b Builder) Build(name string) *Comp {
 	// tlb.state = b.state // sbin_codex: pre-edit assignment.
 	tlb.state = b.state
 	tlb.pageAdmissionPredicate = b.pageAdmissionPredicate // sbin_codex
+	tlb.pendingCancels = make(map[string]struct{})        // sbin_claude_avatar
 
 	b.createPorts(name, tlb)
 	b.createTranslationProviderMapper(tlb)
@@ -242,4 +243,11 @@ func (b Builder) createPorts(name string, c *Comp) {
 	c.controlPort = sim.NewPort(c, 1, 1,
 		name+".ControlPort")
 	c.AddPort("Control", c.controlPort)
+
+	// sbin_claude_avatar: out-of-band cancel ingress (Avatar EAF). Inert
+	// unless a speculation unit is wired to it.
+	c.cancelPort = sim.NewPort(c,
+		b.numReqPerCycle, b.numReqPerCycle,
+		name+".CancelPort")
+	c.AddPort("Cancel", c.cancelPort)
 }

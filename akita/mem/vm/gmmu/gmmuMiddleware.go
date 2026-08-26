@@ -27,10 +27,55 @@ func (m *middleware) Tick() bool {
 	madeProgress = m.parseFromPageWalkCache() || madeProgress
 	madeProgress = m.processUVMFaultRsp() || madeProgress
 	if m.state == gmmuStateEnable { // sbin_codex: drain retires work without admitting more.
+		// sbin_claude_avatar: cancels land before admission so a cancel
+		// processed this cycle can drop a request retrieved this cycle.
+		madeProgress = m.processCancelPort() || madeProgress
 		madeProgress = m.parseFromTop() || madeProgress
 	}
 
 	return madeProgress
+}
+
+// processCancelPort drains out-of-band walk cancels (Avatar EAF). A cancel
+// whose request already occupies a walker slot is ignored - the walk
+// finishes and its response is dropped upstream. Otherwise the request is
+// still queued in the top port and its ID is remembered so parseFromTop
+// drops it at retrieve time. // sbin_claude_avatar
+func (m *middleware) processCancelPort() bool {
+	madeProgress := false
+
+	for {
+		item := m.cancelPort.PeekIncoming()
+		if item == nil {
+			return madeProgress
+		}
+
+		cancel, ok := item.(*vm.TranslationCancelReq)
+		if !ok {
+			log.Panicf("GMMU cancel port cannot handle message of type %T",
+				item)
+		}
+
+		m.cancelPort.RetrieveIncoming()
+
+		if !m.isWalking(cancel.CancelID) {
+			m.canceledReqs[cancel.CancelID] = struct{}{}
+		}
+
+		madeProgress = true
+	}
+}
+
+// isWalking reports whether the named request already holds a walker slot.
+// sbin_claude_avatar
+func (m *middleware) isWalking(reqID string) bool {
+	for i := range m.walkingTranslations {
+		if m.walkingTranslations[i].req.ID == reqID {
+			return true
+		}
+	}
+
+	return false
 }
 
 // sbin_codex: advance independent cache lookups and latency countdowns.
@@ -422,24 +467,60 @@ func (m *middleware) doPageWalkHit(
 	return true
 }
 
+// Pre-edit code (commented per project convention). Admission used to be
+// gated on walker slots before looking at the message:
+// func (m *middleware) parseFromTop() bool {
+// 	if len(m.walkingTranslations) >= m.maxRequestsInFlight {
+// 		return false
+// 	}
+//
+// 	req := m.topPort.RetrieveIncoming()
+// 	if req == nil {
+// 		return false
+// 	}
+//
+// 	tracing.TraceReqReceive(req, m.Comp)
+//
+// 	switch req := req.(type) {
+// 	case *vm.TranslationReq:
+// 		m.startWalking(req)
+// 	default:
+// 		log.Panicf("GMMU cannot handle request of type %s", reflect.TypeOf(req))
+// 	}
+//
+// 	return true
+// }
+//
+// sbin_claude_avatar: a canceled request is dropped at the queue head even
+// when every walker slot is busy - it needs no slot, and leaving it would
+// clog the queue behind it. The drop happens before TraceReqReceive, so
+// canceled walks never enter the gmmu_translation_count/inflight metrics.
 func (m *middleware) parseFromTop() bool {
+	item := m.topPort.PeekIncoming()
+	if item == nil {
+		return false
+	}
+
+	req, ok := item.(*vm.TranslationReq)
+	if !ok {
+		log.Panicf("GMMU cannot handle request of type %s",
+			reflect.TypeOf(item))
+	}
+
+	if _, canceled := m.canceledReqs[req.ID]; canceled {
+		delete(m.canceledReqs, req.ID)
+		m.topPort.RetrieveIncoming()
+
+		return true
+	}
+
 	if len(m.walkingTranslations) >= m.maxRequestsInFlight {
 		return false
 	}
 
-	req := m.topPort.RetrieveIncoming()
-	if req == nil {
-		return false
-	}
-
+	m.topPort.RetrieveIncoming()
 	tracing.TraceReqReceive(req, m.Comp)
-
-	switch req := req.(type) {
-	case *vm.TranslationReq:
-		m.startWalking(req)
-	default:
-		log.Panicf("GMMU cannot handle request of type %s", reflect.TypeOf(req))
-	}
+	m.startWalking(req)
 
 	return true
 }

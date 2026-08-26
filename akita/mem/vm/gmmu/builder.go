@@ -145,6 +145,7 @@ func (b Builder) configureInternalStates(c *Comp) {
 	c.memoryPerChiplet = b.memoryPerChiplet       // sbin_codex
 	c.log2PageSize = b.log2PageSize               // sbin_codex
 	c.state = gmmuStateEnable                     // sbin_codex
+	c.canceledReqs = make(map[string]struct{})    // sbin_claude_avatar
 	c.addressToPortMapper = b.addressToPortMapper // sbin_gmmu
 	c.UVMServiceProvider = b.uvmServiceProvider   // sbin_codex
 	// c.accessCounterThreshold = b.accessCounterThresh // sbin_codex
@@ -200,6 +201,12 @@ func (b Builder) createPorts(name string, c *Comp) {
 		4096, 4096,
 		name+".ControlPort")
 	c.AddPort("Control", c.controlPort)
+
+	// sbin_claude_avatar: out-of-band walk-cancel ingress (Avatar EAF).
+	c.cancelPort = sim.NewPort(c,
+		4096, 4096,
+		name+".CancelPort")
+	c.AddPort("Cancel", c.cancelPort)
 
 	if b.uvmServiceProvider != "" {
 		c.uvmPort = sim.NewPort(c, 4096, 4096, name+".UVMPort")

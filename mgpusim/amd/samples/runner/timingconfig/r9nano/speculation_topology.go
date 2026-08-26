@@ -81,12 +81,25 @@ func (t avatarSpeculationTopology) buildSpeculationUnit(b *Builder) {
 		WithValidationLatency(s.ValidationLatency).
 		WithModNumEntries(s.ModNumEntries).
 		WithConfidenceThreshold(s.ConfidenceThreshold).
+		// sbin_claude_avatar v2: the speculative sector fetches ride the
+		// same interleaved L2-bank mapper the L1 caches use, bounded to
+		// this GPU's DRAM range (avatar-plan.md 5.1).
+		WithMemoryAccess(
+			b.l1AddressMapper,
+			b.memAddrOffset,
+			b.memAddrOffset+b.dramSize).
 		Build(b.name + ".ASU")
 
 	b.simulation.RegisterComponent(b.asu)
 
 	// The L1 TLBs now miss into the ASU; the ASU forwards to the L2 TLB.
 	b.asu.SetL2TLBPort(b.l2TLBs[0].GetPortByName("Top").AsRemote())
+	// sbin_claude_avatar v2: EAF cancels flow ASU -> L2TLB.Cancel, and a
+	// fully-canceled MSHR entry forwards the cancel to GMMU.Cancel
+	// (avatar-plan.md 5.2).
+	b.asu.SetL2TLBCancelPort(b.l2TLBs[0].GetPortByName("Cancel").AsRemote())
+	b.l2TLBs[0].SetWalkCancelProvider(
+		b.gmmu.GetPortByName("Cancel").AsRemote())
 	b.l1TLBAddressMapper.Port = b.asu.TopPort().AsRemote()
 }
 
@@ -105,4 +118,13 @@ func (avatarSpeculationTopology) connectSpeculation(b *Builder) {
 
 	conn.PlugIn(b.asu.BottomPort())
 	conn.PlugIn(b.l2TLBs[0].GetPortByName("Top"))
+	// sbin_claude_avatar v2: the ASU bottom port also carries the EAF
+	// cancels into the L2 TLB's out-of-band Cancel ingress.
+	conn.PlugIn(b.l2TLBs[0].GetPortByName("Cancel"))
+
+	// sbin_claude_avatar v2: the speculative sector fetches enter the
+	// existing L1ToL2 data network (built earlier by connectL1ToL2), so
+	// they contend with real data traffic (avatar-plan.md 5.1).
+	l1ToL2 := b.simulation.GetComponentByName(b.name + ".L1ToL2").(*directconnection.Comp)
+	l1ToL2.PlugIn(b.asu.ValidationPort())
 }

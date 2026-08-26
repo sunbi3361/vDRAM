@@ -197,8 +197,10 @@ for config in configs:
         # runner defaults; sweep configs pin the compress ratio explicitly.
         elif config == 'avatar':
             submit_file.write("-gpu=avatar ")
+            submit_file.write("-avatar-frag=false ")
         elif config in avatar_compress_ratios:
             submit_file.write("-gpu=avatar ")
+            submit_file.write("-avatar-frag=false ")
             submit_file.write("-avatar-compress-ratio="
                               + str(avatar_compress_ratios[config]) + " ")
         else:

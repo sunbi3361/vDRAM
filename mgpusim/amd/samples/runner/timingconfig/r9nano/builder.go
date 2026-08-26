@@ -817,6 +817,10 @@ func (b *Builder) connectL2TLBToGMMU() {
 	b.simulation.RegisterComponent(conn)
 
 	conn.PlugIn(b.gmmu.GetPortByName("Top"))
+	// sbin_claude_avatar v2: the GMMU's out-of-band walk-cancel ingress
+	// shares this connection so the L2 TLB bottom port can reach it. Inert
+	// unless the Avatar speculation topology wires a cancel provider.
+	conn.PlugIn(b.gmmu.GetPortByName("Cancel"))
 	for _, l2TLB := range b.l2TLBs {
 		conn.PlugIn(l2TLB.GetPortByName("Bottom"))
 	}

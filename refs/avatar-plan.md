@@ -200,3 +200,82 @@ cd mgpusim/amd/samples/matrixtranspose && go build && \
     -verify -width=256
 golangci-lint run ./amd/... --timeout=10m
 ```
+
+---
+
+## 5. v2 Redesign (2026-08-26): real validation path + walk cancellation
+
+v1 diagnosis on the benchmark runs (`-avatar-frag=false`): avatar == baseline.
+Two causes. (a) Translation-bound benchmarks are GMMU walk-THROUGHPUT bound
+(kernel_time ~= gmmu_translation_count x 105ns / 16 in-flight walkers), and v1
+never removed a single walk (fidelity gap 1.6: EAF did not cancel the
+in-flight walk), so the bottleneck was untouched. (b) The flat
+`-avatar-validation-latency=200` countdown was longer than the simulator's
+~105-cycle flat GMMU walk, so the real path almost always won the race.
+
+### 5.1 CAVA validation routed through the real data path
+
+The ASU gains a third port, `Validation`, plugged into the `GPU.L1ToL2` data
+connection. A confident MOD prediction now issues a real `mem.ReadReq` (64B,
+the speculative sector fetch of refs 5.4-5.6) at the speculated physical
+address, targeted through the same `l1AddressMapper` the L1 caches use. The
+verdict is computed only when the `mem.DataReadyRsp` returns, plus
+`-avatar-validation-latency` extra cycles now meaning the decompress+compare
+overhead (new default 2, was 200). Validation latency and bandwidth therefore
+emerge from the simulated L2/DRAM hierarchy, including contention with real
+data traffic - and the fetched line warms the L2, approximating the paper's
+"speculative access IS the data access". A speculated PAddr outside the GPU
+DRAM range is dropped immediately (counted, no read issued) so the RDMA
+fallback route is never touched.
+
+### 5.2 EAF walk cancellation + MSHR release (refs 5.9)
+
+On CAVA pass + page-table cross-check, after the early response (EAF):
+- If the forward to the L2 TLB has not been sent yet, it is suppressed
+  entirely (no walk ever exists).
+- Otherwise the ASU sends a `vm.TranslationCancelReq` naming the forwarded
+  request to the L2 TLB's new out-of-band `Cancel` port (in-band cancels
+  could never overtake their target in the same FIFO buffer).
+
+L2 TLB (`akita/mem/vm/tlb`): removes the named request from the matching MSHR
+entry; when the entry empties it releases the MSHR and forwards a cancel
+naming `reqToBottom` to the GMMU's new `Cancel` port. A cancel whose request
+has not reached the MSHR yet is remembered by request ID and the request is
+dropped when it emerges from the lookup pipeline. Late walk responses hitting
+a released MSHR were already dropped by the pre-existing
+`!mshrEntryPresent` path.
+
+GMMU (`akita/mem/vm/gmmu`): drains the `Cancel` port every cycle into a
+canceled-ID set; `parseFromTop` drops a canceled TranslationReq at retrieve
+time - before `TraceReqReceive` - so canceled walks never occupy a walker
+slot and never count in `gmmu_translation_count`. A walk already admitted
+(in `walkingTranslations`) is not canceled; its response is dropped at the
+L2 TLB. This implements "cancel queued walks, let started walks finish".
+
+Completion semantics change: a transaction is done after EAF once its cancel
+is sent (or its forward suppressed); it no longer waits to swallow the real
+response. An orphan TranslationRsp (cancel lost the race) is dropped and
+counted instead of panicking. MOD is now also trained by the validated early
+page, since a canceled walk produces no training response.
+
+### 5.3 New counters
+
+ASU stats: ValidationReads, ValidationWaitCycleSum (avg fetch latency =
+sum/reads), SpecOutOfRange, WalkCancelsSent, ForwardsSuppressed,
+OrphanRsps, StaleValidationRsps. All reported per `GPU[i].ASU` by
+reportAvatar, and 5_collect_metrics.py gains the avatar_* columns (summed
+over ASU locations like the utopia_* columns).
+
+### 5.4 Files
+
+- akita/mem/vm/protocol.go: + TranslationCancelReq (+ builder).
+- akita/mem/vm/tlb/{tlb.go,builder.go,tlbMiddleware.go}: Cancel port,
+  pending-cancel bookkeeping, MSHR release, downstream cancel queue.
+- akita/mem/vm/gmmu/{gmmu.go,builder.go,gmmuMiddleware.go}: Cancel port,
+  canceled-ID set, drop-at-retrieve.
+- mgpusim asu: validation port + real-read speculation leg + cancel leg.
+- r9nano: speculation_topology wires Validation into L1ToL2, the ASU cancel
+  destination, the L2TLB->GMMU cancel provider; connectL2TLBToGMMU plugs the
+  GMMU Cancel port (harmless for baseline).
+- runner/flag.go: -avatar-validation-latency default 200 -> 2, new help text.
+- runner/report.go + scripts/5_collect_metrics.py: new counters/columns.

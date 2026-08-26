@@ -70,6 +70,15 @@ type Comp struct {
 	commandProcessor sim.Port // sbin_gmmu
 	LowModule        sim.Port
 
+	// sbin_claude_avatar: out-of-band cancel ingress (Avatar EAF,
+	// refs/avatar.md 5.9). A cancel names a TranslationReq that its
+	// requester abandoned; if that request is still queued in the top port
+	// it is dropped at retrieve time, before it can occupy a walker slot.
+	// A walk that already started is left to finish; its response is
+	// dropped upstream. Inert on non-Avatar platforms.
+	cancelPort   sim.Port
+	canceledReqs map[string]struct{}
+
 	// sbin_codex: UVM control port. The GMMU forwards managed-page faults to
 	// the GPU Command Processor, which relays them to the host UVM driver over
 	// PCIe. The same port carries the driver's range invalidation and fault

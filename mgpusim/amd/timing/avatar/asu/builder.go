@@ -2,15 +2,21 @@
 package asu
 
 import (
+	"github.com/sarchlab/akita/v4/mem/mem" // sbin_claude_avatar v2
 	"github.com/sarchlab/akita/v4/mem/vm"
 	"github.com/sarchlab/akita/v4/sim"
 	"github.com/sarchlab/mgpusim/v4/amd/timing/avatar/meta"
 )
 
 const (
-	// defaultValidationLatency models the speculative sector fetch through
-	// the data hierarchy plus the CAVA metadata check (avatar-plan.md 1.5).
-	defaultValidationLatency = 200
+	// Pre-edit v1 constant (commented per project convention). The whole
+	// speculative access used to be one flat countdown:
+	// defaultValidationLatency = 200
+	//
+	// sbin_claude_avatar v2: the sector fetch is now a real read through
+	// the data hierarchy (avatar-plan.md 5.1); this latency only covers the
+	// decompress-and-compare of the returned sector (refs 5.6).
+	defaultValidationLatency = 2
 	// defaultModNumEntries and defaultConfidenceThreshold follow the paper
 	// (refs/avatar.md 5.2, 5.3).
 	defaultModNumEntries       = 32
@@ -35,6 +41,26 @@ type Builder struct {
 	confidenceThreshold int
 	maxReqInFlight      int
 	numReqPerCycle      int
+
+	// sbin_claude_avatar v2: routing and bounds for the real sector
+	// fetches (avatar-plan.md 5.1).
+	memMapper mem.AddressToPortMapper
+	memLow    uint64
+	memHigh   uint64
+}
+
+// WithMemoryAccess wires the speculative sector fetches into the data
+// hierarchy: mapper routes a physical address to its L2 bank, and
+// [low, high) bounds the GPU DRAM range. // sbin_claude_avatar v2
+func (b Builder) WithMemoryAccess(
+	mapper mem.AddressToPortMapper,
+	low, high uint64,
+) Builder {
+	b.memMapper = mapper
+	b.memLow = low
+	b.memHigh = high
+
+	return b
 }
 
 // MakeBuilder creates a Builder with the default ASU parameters.
@@ -128,6 +154,10 @@ func (b Builder) Build(name string) *Comp {
 	if b.pageTable == nil {
 		panic("ASU requires the GPU page table")
 	}
+	// sbin_claude_avatar v2: the sector fetch needs a route to memory.
+	if b.memMapper == nil || b.memHigh <= b.memLow {
+		panic("ASU requires memory access wiring (WithMemoryAccess)")
+	}
 
 	c := new(Comp)
 	c.TickingComponent = *sim.NewTickingComponent(name, b.engine, b.freq, c)
@@ -142,11 +172,18 @@ func (b Builder) Build(name string) *Comp {
 	c.maxReqInFlight = b.maxReqInFlight
 	c.numReqPerCycle = b.numReqPerCycle
 	c.mods = make(map[sim.RemotePort]*modTable)
+	// sbin_claude_avatar v2
+	c.memMapper = b.memMapper
+	c.memLow = b.memLow
+	c.memHigh = b.memHigh
 
 	c.topPort = sim.NewPort(c, 4096, 4096, name+".Top")
 	c.AddPort("Top", c.topPort)
 	c.bottomPort = sim.NewPort(c, 4096, 4096, name+".Bottom")
 	c.AddPort("Bottom", c.bottomPort)
+	// sbin_claude_avatar v2: the sector-fetch port into the L1ToL2 network.
+	c.validationPort = sim.NewPort(c, 4096, 4096, name+".Validation")
+	c.AddPort("Validation", c.validationPort)
 
 	c.AddMiddleware(&middleware{Comp: c})
 

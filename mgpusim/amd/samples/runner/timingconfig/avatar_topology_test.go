@@ -8,12 +8,58 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/sarchlab/akita/v4/mem/vm"
+	"github.com/sarchlab/akita/v4/sim"
 	"github.com/sarchlab/akita/v4/sim/directconnection"
 	"github.com/sarchlab/akita/v4/simulation"
 	"github.com/sarchlab/mgpusim/v4/amd/driver"
 	"github.com/sarchlab/mgpusim/v4/amd/timing/avatar/asu"
 	avatarmeta "github.com/sarchlab/mgpusim/v4/amd/timing/avatar/meta"
 )
+
+// avatarBurstAgent stands in for the L1 TLB bottom ports and can keep many
+// translations in flight at once. Speculation only wins the race when the
+// GMMU walkers are saturated - exactly the regime the real benchmarks run
+// in - so the CAVA specs drive a burst of misses, not one at a time.
+// sbin_claude_avatar v2
+type avatarBurstAgent struct {
+	*sim.TickingComponent
+	port     sim.Port
+	pending  []sim.Msg
+	received map[string]int // req ID -> number of responses
+}
+
+func newAvatarBurstAgent(engine sim.Engine) *avatarBurstAgent {
+	agent := &avatarBurstAgent{received: map[string]int{}}
+	agent.TickingComponent = sim.NewTickingComponent(
+		"CPU.AvatarBurstAgent", engine, sim.GHz, agent)
+	agent.port = sim.NewPort(agent, 64, 64, "CPU.AvatarBurstAgent.Port")
+	agent.AddPort("Port", agent.port)
+
+	return agent
+}
+
+func (a *avatarBurstAgent) Tick() bool {
+	madeProgress := false
+
+	for {
+		rsp := a.port.RetrieveIncoming()
+		if rsp == nil {
+			break
+		}
+		a.received[rsp.(*vm.TranslationRsp).RespondTo]++
+		madeProgress = true
+	}
+
+	for len(a.pending) > 0 {
+		if err := a.port.Send(a.pending[0]); err != nil {
+			break
+		}
+		a.pending = a.pending[1:]
+		madeProgress = true
+	}
+
+	return madeProgress
+}
 
 // buildAvatarPlatform builds a single-GPU avatar platform and returns the
 // pieces the specs need.
@@ -132,30 +178,77 @@ var _ = Describe("Avatar speculation topology", func() {
 		Expect(offsetC).NotTo(Equal(offsetAB))
 	})
 
-	It("answers a confident miss early through CAVA and swallows the real "+
-		"response (avatar validation tests 1 and 5)", func() {
-		base := uint64(gpuDriver.AllocateMemory(ctx, 16*4096))
+	// Pre-edit v1 spec (behavior superseded, commented per project
+	// convention): with the flat 5-cycle validation countdown a single
+	// sequential miss reliably completed early and the late walk response
+	// was always swallowed. In v2 the sector fetch is a real DRAM read, so
+	// on an idle platform the conventional path wins; speculation pays off
+	// exactly when the GMMU walkers are saturated - and a validated
+	// speculation now cancels its walk instead of swallowing it.
+	It("answers confident misses early through CAVA under walker "+
+		"saturation and retires the redundant walks "+
+		"(avatar validation tests 1 and 5)", func() {
+		burst := newAvatarBurstAgent(testSimulation.GetEngine())
+		testSimulation.RegisterComponent(burst)
+		l1ToL2 := testSimulation.GetComponentByName(
+			"GPU[1].L1TLBToL2TLB").(*directconnection.Comp)
+		l1ToL2.PlugIn(burst.port)
+
+		const numPages = 64
+		base := uint64(gpuDriver.AllocateMemory(ctx, numPages*4096))
+
+		// sendBurst pushes misses through the burst agent - the MOD is
+		// per-requester, so training and burst must share one source port.
+		sendBurst := func(vAddrs []uint64) []string {
+			reqIDs := []string{}
+			for _, vAddr := range vAddrs {
+				req := vm.TranslationReqBuilder{}.
+					WithSrc(burst.port.AsRemote()).
+					WithDst(speculationUnit.TopPort().AsRemote()).
+					WithVAddr(vAddr).
+					WithPID(ctx.PID()).
+					WithDeviceID(1).
+					Build()
+				burst.pending = append(burst.pending, req)
+				reqIDs = append(reqIDs, req.ID)
+			}
+			burst.TickLater()
+			Expect(testSimulation.GetEngine().Run()).To(Succeed())
+
+			return reqIDs
+		}
 
 		// Two real translations train the region's MOD entry to the
 		// speculation threshold; neither may speculate yet.
-		translate(base)
-		translate(base + 4096)
+		sendBurst([]uint64{base})
+		sendBurst([]uint64{base + 4096})
 		Expect(speculationUnit.Stats().Speculations).To(Equal(uint64(0)))
 
-		// The third miss speculates, CAVA validates against the embedded
-		// metadata, and the request completes before the real translation.
-		page := translate(base + 2*4096)
-		Expect(page.Valid).To(BeTrue())
-		Expect(page.PAddr - page.VAddr).To(
-			Equal(translate(base).PAddr - base))
+		// A burst of misses saturates the 16 GMMU walkers: the walk queue
+		// grows while the speculative sector fetches ride the idle data
+		// hierarchy, so CAVA validates and answers early.
+		burstAddrs := []uint64{}
+		for i := 2; i < numPages; i++ {
+			burstAddrs = append(burstAddrs, base+uint64(i)*4096)
+		}
+		reqIDs := sendBurst(burstAddrs)
+
+		// Every miss was answered exactly once (refs 5.12: no duplicate
+		// completion), even though two paths raced for each of them.
+		for _, id := range reqIDs {
+			Expect(burst.received[id]).To(Equal(1))
+		}
 
 		stats := speculationUnit.Stats()
 		Expect(stats.Speculations).To(BeNumerically(">=", uint64(1)))
+		Expect(stats.ValidationReads).To(BeNumerically(">=", uint64(1)))
 		Expect(stats.CAVAPass).To(BeNumerically(">=", uint64(1)))
 		Expect(stats.EarlyCompletions).To(BeNumerically(">=", uint64(1)))
-		// The late page-walk response was swallowed, never completing the
-		// request twice.
-		Expect(stats.SwallowedRsps).To(Equal(stats.EarlyCompletions))
+		// Each validated speculation retired its conventional walk: the
+		// forward was suppressed outright, canceled at the L2 TLB/GMMU, or
+		// - when the cancel lost the race - its response was swallowed.
+		Expect(stats.ForwardsSuppressed+stats.WalkCancelsSent+
+			stats.SwallowedRsps).To(Equal(stats.EarlyCompletions))
 	})
 })
 
@@ -165,44 +258,58 @@ var _ = Describe("Avatar with incompressible memory", func() {
 		testSimulation, gpuDriver, speculationUnit, ctx :=
 			buildAvatarPlatform(1e-12) // effectively nothing compressible
 
-		agent := newCPURemoteTestAgent(testSimulation.GetEngine())
-		testSimulation.RegisterComponent(agent)
+		burst := newAvatarBurstAgent(testSimulation.GetEngine())
+		testSimulation.RegisterComponent(burst)
 		l1ToL2 := testSimulation.GetComponentByName(
 			"GPU[1].L1TLBToL2TLB").(*directconnection.Comp)
-		l1ToL2.PlugIn(agent.port)
+		l1ToL2.PlugIn(burst.port)
 
-		translate := func(vAddr uint64) vm.Page {
-			req := vm.TranslationReqBuilder{}.
-				WithSrc(agent.port.AsRemote()).
-				WithDst(speculationUnit.TopPort().AsRemote()).
-				WithVAddr(vAddr).
-				WithPID(ctx.PID()).
-				WithDeviceID(1).
-				Build()
-			agent.received = nil
-			agent.pending = req
-			agent.TickLater()
+		// sendBurst pushes misses through the burst agent - the MOD is
+		// per-requester, so training and burst must share one source port.
+		sendBurst := func(vAddrs []uint64) []string {
+			reqIDs := []string{}
+			for _, vAddr := range vAddrs {
+				req := vm.TranslationReqBuilder{}.
+					WithSrc(burst.port.AsRemote()).
+					WithDst(speculationUnit.TopPort().AsRemote()).
+					WithVAddr(vAddr).
+					WithPID(ctx.PID()).
+					WithDeviceID(1).
+					Build()
+				burst.pending = append(burst.pending, req)
+				reqIDs = append(reqIDs, req.ID)
+			}
+			burst.TickLater()
 			Expect(testSimulation.GetEngine().Run()).To(Succeed())
 
-			rsp := agent.received.(*vm.TranslationRsp)
-			Expect(rsp.RespondTo).To(Equal(req.ID))
-
-			return rsp.Page
+			return reqIDs
 		}
 
-		base := uint64(gpuDriver.AllocateMemory(ctx, 16*4096))
-		translate(base)
-		translate(base + 4096)
-		page := translate(base + 2*4096)
+		const numPages = 64
+		base := uint64(gpuDriver.AllocateMemory(ctx, numPages*4096))
+		sendBurst([]uint64{base})
+		sendBurst([]uint64{base + 4096})
 
-		// The speculation launched, but with no embedded page information
-		// the sector stays unguaranteed: the conventional translation
-		// completes the request and nothing is swallowed.
-		Expect(page.Valid).To(BeTrue())
+		// sbin_claude_avatar v2: same walker-saturating burst as the CAVA
+		// spec, so the verdict is reached before the real translation.
+		burstAddrs := []uint64{}
+		for i := 2; i < numPages; i++ {
+			burstAddrs = append(burstAddrs, base+uint64(i)*4096)
+		}
+		reqIDs := sendBurst(burstAddrs)
+
+		// The speculations launched, but with no embedded page information
+		// the sectors stay unguaranteed: the conventional translation
+		// completes every request exactly once and no walk is retired.
+		for _, id := range reqIDs {
+			Expect(burst.received[id]).To(Equal(1))
+		}
 		stats := speculationUnit.Stats()
 		Expect(stats.Speculations).To(BeNumerically(">=", uint64(1)))
 		Expect(stats.CAVAIncompressible).To(BeNumerically(">=", uint64(1)))
 		Expect(stats.EarlyCompletions).To(Equal(uint64(0)))
 		Expect(stats.SwallowedRsps).To(Equal(uint64(0)))
+		Expect(stats.WalkCancelsSent).To(Equal(uint64(0)))
+		Expect(stats.ForwardsSuppressed).To(Equal(uint64(0)))
 	})
 })

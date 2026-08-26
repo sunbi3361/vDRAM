@@ -97,6 +97,21 @@ UTOPIA_WHATS = (
     "utopia_flexseg_walk_count", "utopia_passthrough_count",
     "utopia_restseg_occupied_frames",
 )
+# sbin_claude_avatar: speculation/CAVA/EAF counters emitted per ASU by the
+# runner's reportAvatar (report.go). Summed over GPUs like the UTU counters.
+AVATAR_WHATS = (
+    "avatar_l1_miss_forwarded_count", "avatar_speculation_count",
+    "avatar_cava_pass_count", "avatar_cava_mismatch_count",
+    "avatar_cava_incompressible_count", "avatar_cava_no_metadata_count",
+    "avatar_early_completion_count", "avatar_real_response_first_count",
+    "avatar_swallowed_rsp_count", "avatar_page_table_veto_count",
+    "avatar_validation_read_count", "avatar_validation_wait_cycle_sum",
+    "avatar_spec_out_of_range_count", "avatar_walk_cancel_sent_count",
+    "avatar_forward_suppressed_count", "avatar_orphan_rsp_count",
+    "avatar_stale_validation_rsp_count",
+    "avatar_frame_install_count", "avatar_frame_invalidate_count",
+    "avatar_region_bound_count", "avatar_region_free_count",
+)
 
 TIMESTAMP_RE = re.compile(r"^\d{6}_\d{4}$")
 
@@ -182,6 +197,10 @@ def extract_metrics(sqlite_path):
         elif what in UTOPIA_WHATS and loc.endswith(".UTU"):
             out.setdefault(what, 0.0)
             out[what] += float(value)
+        # sbin_claude_avatar: sum speculation counters over every ASU.
+        elif what in AVATAR_WHATS and loc.endswith(".ASU"):
+            out.setdefault(what, 0.0)
+            out[what] += float(value)
     return out
 
 
@@ -219,6 +238,8 @@ def main():
         "l2_tlb_mpki", "l2_tlb_miss",
         # sbin_claude_utopia: RestSeg-walk summary columns.
         *UTOPIA_WHATS,
+        # sbin_claude_avatar: speculation/CAVA/EAF summary columns.
+        *AVATAR_WHATS,
         "error",
     ]
 

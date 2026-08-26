@@ -6,8 +6,9 @@
 
 configs=(baseline ideal-l1tlb virtual-caching)
 configs=(uvm uvm-ideal)
-configs=(uvm-oversub-150)
-# configs=(utopia) # sbin_claude_utopia: active selection (last assignment wins)
+# configs=(uvm-oversub-150)
+# configs=(virtual-caching)
+configs=(utopia) # sbin_claude_utopia: active selection (last assignment wins)
 # configs=(avatar) # sbin_claude_avatar: speculative translation config
 
 benchmarks=(
@@ -27,19 +28,7 @@ benchmarks=(
 )
 
 benchmarks=(
-    # 'bfs'
-    'fft'
-    'kmeans'
-    'matrixmultiplication'
-    'matrixtranspose'
-    # 'nbody'
-    'nw'
-    'pagerank'
-    'relu'
-    # 'simpleconvolution'
-    # 'spmv'
-    'stencil2d'
-    # 'vectoradd'
+    'nbody'
 )
 
 for config in ${configs[@]};

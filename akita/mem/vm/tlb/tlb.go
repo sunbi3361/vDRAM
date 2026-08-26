@@ -24,8 +24,17 @@ type Comp struct {
 	topPort     sim.Port
 	bottomPort  sim.Port
 	controlPort sim.Port
+	// cancelPort receives out-of-band TranslationCancelReqs (Avatar EAF,
+	// refs/avatar.md 5.9). Out of band, because an in-band cancel could
+	// never overtake the queued request it names. Unconnected and inert on
+	// non-Avatar platforms. // sbin_claude_avatar
+	cancelPort sim.Port
 
 	addressMapper mem.AddressToPortMapper
+	// walkCancelDst is the downstream Cancel port (the GMMU's) that receives
+	// a cancel when a released MSHR entry leaves its page walk orphaned.
+	// Empty when no downstream cancellation is wired. // sbin_claude_avatar
+	walkCancelDst sim.RemotePort
 
 	numSets                int
 	numWays                int
@@ -42,6 +51,21 @@ type Comp struct {
 	responseBuffer      sim.Buffer
 
 	inflightFlushReq *FlushReq
+
+	// pendingCancels remembers canceled request IDs whose request has not
+	// reached the MSHR yet; the request is dropped when it emerges from the
+	// lookup pipeline. // sbin_claude_avatar
+	pendingCancels map[string]struct{}
+	// pendingBottomCancels are cancels bound for the downstream walker,
+	// waiting for the bottom port. // sbin_claude_avatar
+	pendingBottomCancels []*vm.TranslationCancelReq
+}
+
+// SetWalkCancelProvider sets the downstream Cancel port that is told to
+// abandon a page walk once its MSHR entry is released (Avatar EAF).
+// sbin_claude_avatar
+func (c *Comp) SetWalkCancelProvider(dst sim.RemotePort) {
+	c.walkCancelDst = dst
 }
 
 // reset sets all the entries in the TLB to be invalid

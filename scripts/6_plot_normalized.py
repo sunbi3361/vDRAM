@@ -34,10 +34,10 @@ import pandas as pd  # noqa: PANDAS_OK  # sbin_gmmu_omo: retained dependency
 configs = [
     'baseline',
     'ideal-l1tlb',
+    # 'uvm',
+    # 'uvm-ideal',
+    # 'uvm-oversub-150',
     'virtual-caching',
-    'uvm',
-    'uvm-ideal',
-    'uvm-oversub-150',
     'utopia',  # sbin_claude_utopia
     'avatar',  # sbin_claude_avatar
     ]
@@ -184,7 +184,7 @@ def main():
                edgecolor="white", linewidth=0.5)
 
     ax.axhline(1.0, color="black", lw=1.2, ls="--", label="baseline")
-    ax.set_yscale("log")  # sbin_codex: use logarithmic y-axis
+    # ax.set_yscale("log")  # sbin_codex: use logarithmic y-axis
     ax.set_xticks(x)
     ax.set_xticklabels(benches, rotation=45, ha="right", fontsize=9)
     ax.set_ylabel("normalized execution time\n(config kernel_time / baseline)", fontsize=10)

@@ -94,6 +94,10 @@ func (m *tlbMiddleware) extractFromPipeline() bool {
 
 func (m *tlbMiddleware) handleEnable() bool {
 	madeProgress := false
+	// sbin_claude_avatar: cancels are drained first so a released MSHR entry
+	// can be reused within the same cycle's lookups.
+	madeProgress = m.processCancels() || madeProgress
+	madeProgress = m.sendPendingBottomCancels() || madeProgress
 	for i := 0; i < m.numReqPerCycle; i++ {
 		madeProgress = m.respondMSHREntry() || madeProgress
 	}
@@ -109,6 +113,10 @@ func (m *tlbMiddleware) handleEnable() bool {
 
 func (m *tlbMiddleware) handleDrain() bool {
 	madeProgress := false
+	// sbin_claude_avatar: keep draining cancels so canceled requests cannot
+	// hold the MSHR open forever.
+	madeProgress = m.processCancels() || madeProgress
+	madeProgress = m.sendPendingBottomCancels() || madeProgress
 	for i := 0; i < m.numReqPerCycle; i++ {
 		madeProgress = m.respondMSHREntry() || madeProgress
 	}
@@ -170,7 +178,110 @@ func (m *tlbMiddleware) respondMSHREntry() bool {
 	return true
 }
 
+// processCancels drains the out-of-band cancel port (Avatar EAF,
+// refs/avatar.md 5.9). Cancellation is best effort: a request that already
+// answered is silently left alone. // sbin_claude_avatar
+func (m *tlbMiddleware) processCancels() bool {
+	madeProgress := false
+
+	for i := 0; i < m.numReqPerCycle; i++ {
+		item := m.cancelPort.PeekIncoming()
+		if item == nil {
+			break
+		}
+
+		cancel, ok := item.(*vm.TranslationCancelReq)
+		if !ok {
+			panic("TLB cancel port can only receive TranslationCancelReq")
+		}
+
+		m.cancelPort.RetrieveIncoming()
+		m.handleTranslationCancel(cancel)
+		madeProgress = true
+	}
+
+	return madeProgress
+}
+
+// handleTranslationCancel removes the named request from its MSHR entry. An
+// entry left without waiters is released - the late walk response is then
+// dropped by the pre-existing parseBottom orphan path - and the downstream
+// walker is told to abandon the walk. A request that has not reached the
+// MSHR yet is remembered and dropped when it emerges from the lookup
+// pipeline. // sbin_claude_avatar
+func (m *tlbMiddleware) handleTranslationCancel(
+	cancel *vm.TranslationCancelReq,
+) {
+	entry := m.mshr.GetEntry(cancel.PID, cancel.VAddr)
+	if entry != nil {
+		for i, waiting := range entry.Requests {
+			if waiting.ID != cancel.CancelID {
+				continue
+			}
+
+			entry.Requests = append(
+				entry.Requests[:i], entry.Requests[i+1:]...)
+
+			if len(entry.Requests) == 0 {
+				m.queueBottomCancel(entry)
+				m.mshr.Remove(cancel.PID, cancel.VAddr)
+			}
+
+			return
+		}
+	}
+
+	// The request is still in the lookup pipeline (it cannot arrive after
+	// the cancel: both travel the same connection in order), or it already
+	// completed; in the latter case this entry stays unused.
+	m.pendingCancels[cancel.CancelID] = struct{}{}
+}
+
+// queueBottomCancel arranges for the downstream walker to abandon the walk
+// that belonged to a fully-canceled MSHR entry. // sbin_claude_avatar
+func (m *tlbMiddleware) queueBottomCancel(entry *mshrEntry) {
+	if m.walkCancelDst == "" || entry.reqToBottom == nil {
+		return
+	}
+
+	cancel := vm.TranslationCancelReqBuilder{}.
+		WithSrc(m.bottomPort.AsRemote()).
+		WithDst(m.walkCancelDst).
+		WithCancelID(entry.reqToBottom.ID).
+		WithVAddr(entry.vAddr).
+		WithPID(entry.pid).
+		Build()
+
+	m.pendingBottomCancels = append(m.pendingBottomCancels, cancel)
+}
+
+// sendPendingBottomCancels forwards queued downstream cancels when the
+// bottom port allows. // sbin_claude_avatar
+func (m *tlbMiddleware) sendPendingBottomCancels() bool {
+	madeProgress := false
+
+	for len(m.pendingBottomCancels) > 0 {
+		cancel := m.pendingBottomCancels[0]
+		if err := m.bottomPort.Send(cancel); err != nil {
+			break
+		}
+
+		m.pendingBottomCancels = m.pendingBottomCancels[1:]
+		madeProgress = true
+	}
+
+	return madeProgress
+}
+
 func (m *tlbMiddleware) lookup(req *vm.TranslationReq) bool {
+	// sbin_claude_avatar: a canceled request is dropped as it emerges from
+	// the pipeline - no MSHR entry, no walk, no response. The requester
+	// abandoned it (Avatar EAF answered it early).
+	if _, canceled := m.pendingCancels[req.ID]; canceled {
+		delete(m.pendingCancels, req.ID)
+		return true
+	}
+
 	mshrEntry := m.mshr.GetEntry(req.PID, req.VAddr)
 	if mshrEntry != nil {
 		return m.processTLBMSHRHit(mshrEntry, req)
@@ -440,6 +551,10 @@ func (m *tlbMiddleware) processTLBFlush() bool {
 	}
 
 	m.mshr.Reset()
+	// sbin_claude_avatar: a flush abandons every in-flight lookup, so the
+	// cancel bookkeeping that refers to them is stale too.
+	m.pendingCancels = make(map[string]struct{})
+	m.pendingBottomCancels = nil
 
 	m.inflightFlushReq = nil
 	m.state = tlbStatePause

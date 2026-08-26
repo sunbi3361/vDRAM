@@ -40,8 +40,16 @@ var gpuTypeFlag = flag.String("gpu", "r9nano",
 var avatarCompressRatioFlag = flag.Float64("avatar-compress-ratio", 0.8,
 	"Fraction of frames whose sectors compress well enough to embed page "+
 		"information (CAVA rapid validation). Only meaningful with -gpu=avatar.")
-var avatarValidationLatencyFlag = flag.Int("avatar-validation-latency", 200,
-	"Modeled speculative-fetch + CAVA validation latency in cycles.")
+// Pre-edit v1 flag (commented per project convention). The whole
+// speculative access used to be one flat countdown:
+// var avatarValidationLatencyFlag = flag.Int("avatar-validation-latency", 200,
+// 	"Modeled speculative-fetch + CAVA validation latency in cycles.")
+//
+// sbin_claude_avatar v2: the sector fetch is now a real read through the
+// L2/DRAM hierarchy; only the decompress-and-compare stays a fixed latency.
+var avatarValidationLatencyFlag = flag.Int("avatar-validation-latency", 2,
+	"Extra CAVA validation cycles (decompress + compare) after the "+
+		"speculative sector fetch returns from the data hierarchy.")
 var avatarModEntriesFlag = flag.Int("avatar-mod-entries", 32,
 	"Entries per per-CU MOD (Mapping Offset Detection) table.")
 var avatarConfidenceThresholdFlag = flag.Int("avatar-confidence-threshold", 2,
