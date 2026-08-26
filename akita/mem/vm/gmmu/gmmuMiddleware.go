@@ -110,6 +110,8 @@ func (m *middleware) walkPageTable() bool {
 			madeProgress = m.fillPageWalkCache(i) || madeProgress
 		case pageWalkComplete:
 			madeProgress = m.finalizePageWalk(i) || madeProgress
+		case batchDraining: // sbin_claude_latpc
+			madeProgress = m.drainBatchMember(i) || madeProgress
 		}
 		if trans.state != transactionFinished {
 			tmp = append(tmp, *trans)
@@ -340,6 +342,12 @@ func (m *middleware) sendUVMFault(walkingIndex int) bool {
 	if m.uvmPort == nil || m.UVMServiceProvider == "" {
 		panic("GMMU encountered a managed-page fault without a UVM service provider")
 	}
+	// sbin_claude_latpc: a faulting lead would park in the replay queue and
+	// silently drop its coalesced members. -gpu=latpc rejects -uvm, so this
+	// documents the constraint rather than handling it.
+	if len(m.walkingTranslations[walkingIndex].members) > 0 {
+		panic("LATP batching does not support managed (UVM) pages")
+	}
 	if !m.uvmPort.CanSend() {
 		return false
 	}
@@ -507,11 +515,108 @@ func (m *middleware) doPageWalkHit(
 	if err := m.topPort.Send(rsp); err != nil {
 		return false
 	}
-	m.walkingTranslations[walkingIndex].state = transactionFinished // sbin_codex
+	// Pre-edit code (commented per project convention):
+	// m.walkingTranslations[walkingIndex].state = transactionFinished // sbin_codex
+	//
+	// sbin_claude_latpc: a lead that coalesced members keeps its walker slot
+	// and drains them serially, one L4 row-buffer hit apiece.
+	if len(m.walkingTranslations[walkingIndex].members) > 0 {
+		m.walkingTranslations[walkingIndex].state = batchDraining
+		m.walkingTranslations[walkingIndex].drainCycleLeft =
+			uint64(m.latpL4RowHitLatency)
+	} else {
+		m.walkingTranslations[walkingIndex].state = transactionFinished
+	}
 
 	tracing.TraceReqComplete(walking.req, m.Comp)
 
 	return true
+}
+
+// drainBatchMember answers one coalesced member of a completed batched walk.
+// Each member costs latpL4RowHitLatency cycles - its L4 PTE load hits the
+// DRAM row the lead's walk opened - and is answered straight from the
+// functional page table, exactly like the lead in finalizePageWalk.
+// sbin_claude_latpc
+func (m *middleware) drainBatchMember(walkingIndex int) bool {
+	trans := &m.walkingTranslations[walkingIndex]
+
+	if trans.drainCycleLeft > 0 {
+		trans.drainCycleLeft--
+		return true
+	}
+
+	if !m.topPort.CanSend() {
+		return false
+	}
+
+	memberReq := trans.members[0]
+	page, found := m.pageTable.Find(memberReq.PID, memberReq.VAddr)
+	if !found {
+		panic("page not found")
+	}
+	// The drain path bypasses the UVM demand-fault gating, so it must never
+	// see a managed page; -gpu=latpc rejects -uvm at flag validation.
+	if page.Managed {
+		panic("LATP batching does not support managed (UVM) pages")
+	}
+
+	rsp := vm.TranslationRspBuilder{}.
+		WithSrc(m.topPort.AsRemote()).
+		WithDst(memberReq.Src).
+		WithRspTo(memberReq.ID).
+		WithPage(page).
+		Build()
+
+	if err := m.topPort.Send(rsp); err != nil {
+		return false
+	}
+
+	tracing.TraceReqComplete(memberReq, m.Comp)
+	m.latpBatchedMembers++
+
+	trans.members = trans.members[1:]
+	if len(trans.members) == 0 {
+		trans.state = transactionFinished
+	} else {
+		trans.drainCycleLeft = uint64(m.latpL4RowHitLatency)
+	}
+
+	return true
+}
+
+// tryJoinBatch attaches a same-group translation request to an in-flight
+// walk. The member takes no walker slot and no page-walk-cache lookup; it is
+// answered when the lead's batch drains. Only requests carrying a prefetch
+// triple (non-zero stride) join - a demand starts its own walk, as in the
+// paper's PW Buffer. // sbin_claude_latpc
+func (m *middleware) tryJoinBatch(req *vm.TranslationReq) bool {
+	if req.GroupID == "" || req.GroupStride == 0 {
+		return false
+	}
+
+	for i := range m.walkingTranslations {
+		lead := &m.walkingTranslations[i]
+		if lead.state == transactionFinished {
+			continue
+		}
+		if lead.req.GroupID != req.GroupID {
+			continue
+		}
+
+		lead.members = append(lead.members, req)
+		if len(lead.members) == 1 {
+			m.latpBatches++
+		}
+
+		tracing.TraceReqReceive(req, m.Comp)
+		tracing.AddTaskStep(
+			tracing.MsgIDAtReceiver(req, m.Comp), m.Comp, "latp-join")
+
+		return true
+	}
+
+	return false
 }
 
 // Pre-edit code (commented per project convention). Admission used to be
@@ -558,6 +663,14 @@ func (m *middleware) parseFromTop() bool {
 		delete(m.canceledReqs, req.ID)
 		m.topPort.RetrieveIncoming()
 
+		return true
+	}
+
+	// sbin_claude_latpc: a same-group request joins an in-flight walk before
+	// the walker-slot check - members need no slot, which is the point of
+	// batching (the paper's "reserved until the traversal completes").
+	if m.latpEnabled && m.tryJoinBatch(req) {
+		m.topPort.RetrieveIncoming()
 		return true
 	}
 
