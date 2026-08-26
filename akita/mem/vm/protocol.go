@@ -323,6 +323,15 @@ func NewPageMigrationReqToDriver(
 	src, dst sim.RemotePort,
 ) *PageMigrationReqToDriver {
 	cmd := new(PageMigrationReqToDriver)
+	// Pre-edit code (commented per project convention):
+	// cmd.Src = src
+	//
+	// sbin_claude: every other message constructor stamps a unique
+	// ID here. Without one the message travels with ID "", and the
+	// switching-network endpoint keys its flit-reassembly table by
+	// message ID (noc/networking/switching/endpoint), so every such
+	// message in flight collides on the same key and the link wedges.
+	cmd.ID = sim.GetIDGenerator().Generate() // sbin_claude
 	cmd.Src = src
 	cmd.Dst = dst
 	cmd.TrafficClass = reflect.TypeOf(PageMigrationReqToDriver{}).String()
@@ -363,6 +372,15 @@ func NewPageMigrationRspFromDriver(
 	originalReq sim.Msg,
 ) *PageMigrationRspFromDriver {
 	cmd := new(PageMigrationRspFromDriver)
+	// Pre-edit code (commented per project convention):
+	// cmd.Src = src
+	//
+	// sbin_claude: every other message constructor stamps a unique
+	// ID here. Without one the message travels with ID "", and the
+	// switching-network endpoint keys its flit-reassembly table by
+	// message ID (noc/networking/switching/endpoint), so every such
+	// message in flight collides on the same key and the link wedges.
+	cmd.ID = sim.GetIDGenerator().Generate() // sbin_claude
 	cmd.Src = src
 	cmd.Dst = dst
 	cmd.OriginalReq = originalReq
@@ -403,6 +421,15 @@ func (r *PageFaultReq) Clone() sim.Msg {
 // NewPageFaultReq creates a new PageFaultReq.
 func NewPageFaultReq(src, dst sim.RemotePort) *PageFaultReq {
 	cmd := new(PageFaultReq)
+	// Pre-edit code (commented per project convention):
+	// cmd.Src = src
+	//
+	// sbin_claude: every other message constructor stamps a unique
+	// ID here. Without one the message travels with ID "", and the
+	// switching-network endpoint keys its flit-reassembly table by
+	// message ID (noc/networking/switching/endpoint), so every such
+	// message in flight collides on the same key and the link wedges.
+	cmd.ID = sim.GetIDGenerator().Generate() // sbin_claude
 	cmd.Src = src
 	cmd.Dst = dst
 	cmd.TrafficClass = reflect.TypeOf(PageFaultReq{}).String()
@@ -439,6 +466,15 @@ func (r *PageFaultRsp) GetRspTo() string {
 // NewPageFaultRsp creates a new PageFaultRsp.
 func NewPageFaultRsp(src, dst sim.RemotePort, respondTo string) *PageFaultRsp {
 	cmd := new(PageFaultRsp)
+	// Pre-edit code (commented per project convention):
+	// cmd.Src = src
+	//
+	// sbin_claude: every other message constructor stamps a unique
+	// ID here. Without one the message travels with ID "", and the
+	// switching-network endpoint keys its flit-reassembly table by
+	// message ID (noc/networking/switching/endpoint), so every such
+	// message in flight collides on the same key and the link wedges.
+	cmd.ID = sim.GetIDGenerator().Generate() // sbin_claude
 	cmd.Src = src
 	cmd.Dst = dst
 	cmd.RespondTo = respondTo
@@ -472,6 +508,15 @@ func (r *AccessCounterNotifyReq) Clone() sim.Msg {
 // NewAccessCounterNotifyReq creates a new AccessCounterNotifyReq.
 func NewAccessCounterNotifyReq(src, dst sim.RemotePort) *AccessCounterNotifyReq {
 	cmd := new(AccessCounterNotifyReq)
+	// Pre-edit code (commented per project convention):
+	// cmd.Src = src
+	//
+	// sbin_claude: every other message constructor stamps a unique
+	// ID here. Without one the message travels with ID "", and the
+	// switching-network endpoint keys its flit-reassembly table by
+	// message ID (noc/networking/switching/endpoint), so every such
+	// message in flight collides on the same key and the link wedges.
+	cmd.ID = sim.GetIDGenerator().Generate() // sbin_claude
 	cmd.Src = src
 	cmd.Dst = dst
 	cmd.TrafficClass = reflect.TypeOf(AccessCounterNotifyReq{}).String()
@@ -507,6 +552,15 @@ func (r *AccessCounterResetReq) Clone() sim.Msg {
 // NewAccessCounterResetReq creates a new AccessCounterResetReq.
 func NewAccessCounterResetReq(src, dst sim.RemotePort) *AccessCounterResetReq {
 	cmd := new(AccessCounterResetReq)
+	// Pre-edit code (commented per project convention):
+	// cmd.Src = src
+	//
+	// sbin_claude: every other message constructor stamps a unique
+	// ID here. Without one the message travels with ID "", and the
+	// switching-network endpoint keys its flit-reassembly table by
+	// message ID (noc/networking/switching/endpoint), so every such
+	// message in flight collides on the same key and the link wedges.
+	cmd.ID = sim.GetIDGenerator().Generate() // sbin_claude
 	cmd.Src = src
 	cmd.Dst = dst
 	cmd.TrafficClass = reflect.TypeOf(AccessCounterResetReq{}).String()

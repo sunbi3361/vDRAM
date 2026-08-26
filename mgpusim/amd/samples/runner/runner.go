@@ -74,7 +74,9 @@ type Runner struct {
 	GPUIDs     []int
 	benchmarks []benchmarks.Benchmark
 
-	reported bool // sbin_codex
+	// Pre-edit code (commented per project convention):
+	// reported bool // sbin_codex
+	reportOnce sync.Once // sbin_claude: flushReport runs exactly once.
 }
 
 // Init initializes the platform simulate
@@ -237,30 +239,50 @@ func (r *Runner) AddBenchmarkWithoutSettingGPUsToUse(b benchmarks.Benchmark) {
 	r.benchmarks = append(r.benchmarks, b)
 }
 
-// sbin_codex: maxInstOnce ensures the -max-inst stop (flush + exit) runs
-// exactly once, even though every CU's stopper tracer can cross the limit
-// in the same parallel engine round.
-var maxInstOnce sync.Once
+// Pre-edit code (commented per project convention). maxInstOnce moved to
+// insttracer.go, where it now guards only the channel close:
+//
+// // sbin_codex: maxInstOnce ensures the -max-inst stop (flush + exit) runs
+// // exactly once, even though every CU's stopper tracer can cross the limit
+// // in the same parallel engine round.
+// var maxInstOnce sync.Once
+
+// watchMaxInst reports and exits once -max-inst retired instructions have
+// completed.
+//
+// The report may only be taken while no event handler is running. The tracer
+// that detects the limit runs inside one, on a CU's goroutine, with every
+// other component still handling events in the same round - reporting from
+// there raced the CU tracers' own maps. Engine.Pause blocks until the current
+// round has finished (ParallelEngine.runRound ends with a WaitGroup.Wait), so
+// once it returns the simulation is quiescent and the tracer state is stable.
+// The engine is never continued: this path exits the process. // sbin_claude
+func (r *Runner) watchMaxInst() {
+	<-MaxInstReached()
+
+	r.Engine().Pause()
+
+	r.flushReport()
+
+	// sbin_codex: Simulation.Terminate() is never reached on the
+	// -max-inst exit path, and only the recorder's Close() writes
+	// the exec_info rows (start time, command, end time). Close it
+	// here so a truncated run still records them.
+	if err := r.simulation.GetDataRecorder().Close(); err != nil {
+		log.Printf("failed to close data recorder: %v", err)
+	}
+
+	atexit.Exit(0)
+}
 
 // Run runs the benchmark
 func (r *Runner) Run() {
 	// sbin_codex: max_inst
 	progressInterval = *progressIntervalFlag
 	if *maxInstCount > 0 {
-		onMaxInstReached = func() {
-			maxInstOnce.Do(func() {
-				r.flushReport()
-				// sbin_codex: Simulation.Terminate() is never reached on the
-				// -max-inst exit path, and only the recorder's Close() writes
-				// the exec_info rows (start time, command, end time). Close it
-				// here so a truncated run still records them.
-				if err := r.simulation.GetDataRecorder().Close(); err != nil {
-					log.Printf("failed to close data recorder: %v", err)
-				}
-				atexit.Exit(0)
-			})
-		}
+		go r.watchMaxInst() // sbin_claude: report off the engine's goroutines.
 	}
+
 	atexit.Register(func() {
 		r.flushReport()
 	})
@@ -301,17 +323,32 @@ func (r *Runner) Run() {
 // sbin_codex: flushReport writes the collected metrics once. It is safe
 // to call from the normal completion path and from the -max-inst atexit handler
 // (which flushes partial metrics before the process exits).
+//
+// Pre-edit code (commented per project convention). The `reported` bool was
+// read and written from the completion path, the atexit handler and the
+// -max-inst path, which are three different goroutines:
+//
+//	if r.reporter == nil || r.reported {
+//		return
+//	}
+//	...
+//	r.reported = true
+//
+// sbin_claude: a sync.Once gives the same "exactly once" guarantee without
+// the data race, and without a second flag to keep consistent.
 func (r *Runner) flushReport() {
-	if r.reporter == nil || r.reported {
+	if r.reporter == nil {
 		return
 	}
-	// sbin_codex: close out kernels still in flight so a run truncated by
-	// -max-inst reports the partial kernel time instead of 0. On a normal
-	// completion no kernel task is in flight and this is a no-op.
-	r.reporter.terminateInflightKernels(r.Engine().CurrentTime())
-	r.reporter.report()
-	r.reporter.dataRecorder.Flush()
-	r.reported = true
+
+	r.reportOnce.Do(func() { // sbin_claude
+		// sbin_codex: close out kernels still in flight so a run truncated by
+		// -max-inst reports the partial kernel time instead of 0. On a normal
+		// completion no kernel task is in flight and this is a no-op.
+		r.reporter.terminateInflightKernels(r.Engine().CurrentTime())
+		r.reporter.report()
+		r.reporter.dataRecorder.Flush()
+	})
 }
 
 // Driver returns the GPU driver used by the current runner.

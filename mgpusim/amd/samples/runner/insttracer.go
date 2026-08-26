@@ -2,15 +2,33 @@ package runner
 
 import (
 	"fmt"
+	"sync"
 	"sync/atomic"
 
 	"github.com/sarchlab/akita/v4/tracing"
-	"github.com/tebeka/atexit"
 )
 
-var sharedInstCount uint64                       // sbin_codex
-var progressInterval uint64                      // sbin_codex
-var onMaxInstReached = func() { atexit.Exit(0) } // sbin_codex
+var sharedInstCount uint64  // sbin_codex
+var progressInterval uint64 // sbin_codex
+
+// Pre-edit code (commented per project convention):
+// var onMaxInstReached = func() { atexit.Exit(0) } // sbin_codex
+//
+// sbin_claude: EndTask runs inside a CU's tracing hook, i.e. on one of the
+// ParallelEngine's event goroutines while every other component is still
+// handling events. Reporting from there walked the CU tracers' maps while
+// their owners were writing them, which Go answers with either
+// "concurrent map iteration and map write" or a corrupted heap (SIGSEGV in
+// the GC's stack scan). The tracer now only raises a signal; the reporting
+// happens on a separate goroutine that first pauses the engine.
+var maxInstOnce sync.Once                // sbin_claude
+var maxInstReached = make(chan struct{}) // sbin_claude
+
+// MaxInstReached returns the channel that is closed once -max-inst retired
+// instructions have completed. // sbin_claude
+func MaxInstReached() <-chan struct{} {
+	return maxInstReached
+}
 
 // instTracer can trace the number of instruction completed.
 type instTracer struct {
@@ -84,7 +102,14 @@ func (t *instTracer) EndTask(task tracing.Task) {
 	if progressInterval > 0 && n%progressInterval == 0 {
 		fmt.Printf("[inst-progress] %d instructions retired\n", n)
 	}
+	// Pre-edit code (commented per project convention):
+	// if t.maxCount > 0 && n >= t.maxCount {
+	// 	onMaxInstReached()
+	// }
+	//
+	// sbin_claude: signal only. Closing the channel is the whole handler, so
+	// nothing that touches tracer state runs on the engine's goroutines.
 	if t.maxCount > 0 && n >= t.maxCount {
-		onMaxInstReached()
+		maxInstOnce.Do(func() { close(maxInstReached) })
 	}
 }
