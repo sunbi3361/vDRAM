@@ -41,6 +41,7 @@ mgpusim/amd/driver/utopia_restseg.go              ← 드라이버 측 RestSeg �
 | `-utopia-restseg-ratio` | GPU 메모리 중 RestSeg 비율 (FlexSeg = 나머지) |
 | `-utopia-restseg-size` | 바이트 직접 지정 (ratio보다 우선) |
 | `-utopia-restseg-assoc` | way 수; `NumSets = (Size/PageSize)/Assoc` 자동 산출 |
+| `-utopia-restseg-block` | set 하나를 공유하는 연속 페이지 수 B (기본 16 = 블록당 set 하나, 2026-08-26 사용자 결정; 1 = 논문의 per-page 인덱싱; assoc 초과 금지). `set = Hash(VPN/B) % NumSets` — B>1이면 TAR 라인 하나가 연속 B페이지를 실제로 커버해 순차 스트림 TAR hit ≈ (B−1)/B, 대신 set의 충돌 흡수 way가 16/B로 감소 (B=assoc이면 블록 단위 direct-mapped). 주의: assoc을 16 미만으로 낮출 땐 block도 함께 낮춰야 함(검증 panic) |
 | `-utopia-tar-cache-bytes` / `-utopia-sf-cache-bytes` | TAR/SF 캐시 크기 (기본: TAR 4KB = baseline GMMU PWC(128 entry × 4 cached levels × 8B)와 동일 용량, SF 2KB) |
 | `-utopia-tar-sf-latency` / `-utopia-tar-sf-miss-latency` | 캐시 hit/miss 지연 |
 | `-utopia-alloc-mode` | `fault`(Mode A) / `ptw-track`(Mode B) |
@@ -76,6 +77,11 @@ miss 시 v1은 설정 가능한 메모리 지연 부과(기존 GMMU `pageWalking
 카운터(라인당 64 set) 유지. 초기 구현의 "TAR 라인당 16 set"은 way당 2bit이라
 도달 범위를 ~16배 과대평가했던 것 — `rsw_test.go`가 패킹·기본 크기를 고정.
 "실제 메모리 계층 경유 경합"(4.6)은 v2 — 현재 FSW 자체가 지연 모델이므로 v1 비대칭 회피.
+블록 인덱싱(2026-08-26 추가, `-utopia-restseg-block`): 정직한 패킹(라인=1 set)에서
+XOR hash가 연속 페이지를 연속 set으로 보내 TAR 캐시 spatial hit이 0%로 붕괴하는
+문제의 대응. B=16 sanity(matrixtranspose w=512): TAR hit 0/515 → 482/515(93.6%
+≈ 15/16), verify Pass, RSW hit·occupancy 불변. utopia.md의 `set = Hash(VPN) %
+NumSets`(per-page)로부터의 의도적 편차이며 기본값 1은 논문 기하를 유지.
 
 ## 5. 드라이버 측 RestSeg 매니저
 

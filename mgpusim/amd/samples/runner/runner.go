@@ -56,6 +56,7 @@ type Runner struct {
 	UtopiaRestSegRatio     float64
 	UtopiaRestSegBytes     uint64
 	UtopiaRestSegAssoc     int
+	UtopiaRestSegBlock     int // sbin_claude_utopia: pages per set block
 	UtopiaTARCacheBytes    uint64
 	UtopiaSFCacheBytes     uint64
 	UtopiaTARSFHitLatency  int
@@ -168,6 +169,7 @@ func (r *Runner) buildTimingPlatform() {
 			RestSegRatio:  r.UtopiaRestSegRatio,
 			RestSegBytes:  r.UtopiaRestSegBytes,
 			Associativity: r.UtopiaRestSegAssoc,
+			BlockPages:    r.UtopiaRestSegBlock, // sbin_claude_utopia
 			TARCacheBytes: r.UtopiaTARCacheBytes,
 			SFCacheBytes:  r.UtopiaSFCacheBytes,
 			HitLatency:    r.UtopiaTARSFHitLatency,

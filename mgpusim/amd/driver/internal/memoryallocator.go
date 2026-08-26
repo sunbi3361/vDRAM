@@ -44,7 +44,13 @@ type MemoryAllocator interface {
 	// ReserveRestSeg carves a contiguous RestSeg region out of a device's
 	// frame pool so the normal allocator can never hand out RestSeg frames
 	// (RestSeg XOR FlexSeg invariant, utopia.md 4.9).
-	ReserveRestSeg(deviceID int, bytes uint64, associativity int) restseg.Config
+	// Pre-edit code (commented per project convention):
+	// ReserveRestSeg(deviceID int, bytes uint64, associativity int) restseg.Config
+	// sbin_claude_utopia: blockPages consecutive pages share a set (1 =
+	// per-page indexing).
+	ReserveRestSeg(
+		deviceID int, bytes uint64, associativity int, blockPages int,
+	) restseg.Config
 
 	// sbin_claude_avatar: Avatar metadata/placement allocator APIs.
 	// SetAvatarRegistry attaches the shared authoritative Avatar state.
@@ -228,10 +234,19 @@ func (a *memoryAllocatorImpl) SetUtopiaRegistry(registry *restseg.Registry) {
 // ReserveRestSeg pops the leading contiguous frames of a device out of the
 // normal frame pool and registers them as a RestSeg. It must run right after
 // RegisterDevice, before any allocation on the device. // sbin_claude_utopia
+// Pre-edit code (commented per project convention):
+// func (a *memoryAllocatorImpl) ReserveRestSeg(
+// 	deviceID int,
+// 	bytes uint64,
+// 	associativity int,
+// ) restseg.Config {
+// sbin_claude_utopia: blockPages plumbs the block-indexing knob into the
+// shared layout.
 func (a *memoryAllocatorImpl) ReserveRestSeg(
 	deviceID int,
 	bytes uint64,
 	associativity int,
+	blockPages int,
 ) restseg.Config {
 	a.Lock()
 	defer a.Unlock()
@@ -250,7 +265,11 @@ func (a *memoryAllocatorImpl) ReserveRestSeg(
 
 	pageSize := uint64(1) << a.log2PageSize
 	base := device.MemState.getInitialAddress()
-	cfg := restseg.MakeConfig(deviceID, base, bytes, pageSize, associativity)
+	// Pre-edit code (commented per project convention):
+	// cfg := restseg.MakeConfig(deviceID, base, bytes, pageSize, associativity)
+	cfg := restseg.MakeConfig(
+		deviceID, base, bytes, pageSize, associativity,
+		blockPages) // sbin_claude_utopia
 
 	for i := 0; i < cfg.NumFrames(); i++ {
 		pAddr := device.MemState.popNextAvailablePAddrs()

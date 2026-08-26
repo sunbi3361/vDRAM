@@ -24,20 +24,47 @@ type Config struct {
 	Associativity int
 	// NumSets is the number of sets: NumFrames / Associativity.
 	NumSets int
+	// BlockPages is the number of consecutive virtual pages that index into
+	// the same set (1 = the paper's per-page indexing, utopia.md line "set =
+	// Hash(VPN) % NumSets"). With B > 1 one TAR line genuinely covers B
+	// consecutive pages, restoring spatial locality for sequential walks at
+	// the cost of spending B of the set's ways on one block (B ==
+	// Associativity degenerates to a block-direct-mapped RestSeg).
+	// sbin_claude_utopia
+	BlockPages int
 }
 
 // MakeConfig builds a RestSeg layout. The requested size is rounded down to a
 // whole number of sets (sets * assoc * pageSize). It panics when the rounded
 // segment cannot hold a single set.
+// Pre-edit code (commented per project convention):
+// func MakeConfig(
+// 	deviceID int,
+// 	basePAddr uint64,
+// 	requestedBytes uint64,
+// 	pageSize uint64,
+// 	associativity int,
+// ) Config {
+//
+// sbin_claude_utopia: blockPages selects how many consecutive pages share a
+// set (0 or 1 keeps the per-page indexing). A block wider than the
+// associativity could never fully reside and is rejected.
 func MakeConfig(
 	deviceID int,
 	basePAddr uint64,
 	requestedBytes uint64,
 	pageSize uint64,
 	associativity int,
+	blockPages int,
 ) Config {
 	if pageSize == 0 || associativity <= 0 {
 		panic("restseg: page size and associativity must be positive")
+	}
+	if blockPages < 1 {
+		blockPages = 1 // sbin_claude_utopia: per-page indexing default
+	}
+	if blockPages > associativity {
+		panic("restseg: block pages must not exceed the associativity")
 	}
 
 	frames := requestedBytes / pageSize
@@ -53,6 +80,7 @@ func MakeConfig(
 		PageSize:      pageSize,
 		Associativity: associativity,
 		NumSets:       numSets,
+		BlockPages:    blockPages, // sbin_claude_utopia
 	}
 }
 
@@ -78,8 +106,23 @@ func hashVPN(vpn uint64) uint64 {
 }
 
 // SetOf returns the RestSeg set index a virtual address hashes to.
+// Pre-edit code (commented per project convention):
+// func (c Config) SetOf(vAddr uint64) int {
+// 	return int(hashVPN(c.vpnOf(vAddr)) % uint64(c.NumSets))
+// }
+//
+// sbin_claude_utopia: hashing the block number (VPN / BlockPages) sends
+// BlockPages consecutive pages to the same set, so they occupy sibling ways
+// and share one TAR metadata line. BlockPages == 1 reproduces the original
+// per-page indexing bit-for-bit. Allocation (driver) and lookup (UTU) both go
+// through this method, so the layout stays consistent by construction.
 func (c Config) SetOf(vAddr uint64) int {
-	return int(hashVPN(c.vpnOf(vAddr)) % uint64(c.NumSets))
+	block := c.BlockPages
+	if block < 1 {
+		block = 1 // zero-value Config safety: per-page indexing
+	}
+
+	return int(hashVPN(c.vpnOf(vAddr)/uint64(block)) % uint64(c.NumSets))
 }
 
 // TagOf returns the virtual-page identity stored in the TAR for an address.

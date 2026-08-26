@@ -80,6 +80,21 @@ var utopiaRestSegSizeFlag = flag.Uint64("utopia-restseg-size", 0,
 	"RestSeg size in bytes per GPU. Overrides -utopia-restseg-ratio when set.")
 var utopiaRestSegAssocFlag = flag.Int("utopia-restseg-assoc", 16,
 	"Number of ways per RestSeg set.")
+
+// sbin_claude_utopia: block indexing knob. B consecutive pages share one set
+// (and thus one 64B TAR line), trading conflict-absorbing ways for TAR-cache
+// spatial locality. 1 = the paper's per-page indexing.
+// Pre-edit code (commented per project convention):
+// var utopiaRestSegBlockFlag = flag.Int("utopia-restseg-block", 1,
+// 	"Consecutive pages that index into one RestSeg set (1 = per-page "+
+// 		"indexing per the paper; must not exceed -utopia-restseg-assoc).")
+// sbin_claude_utopia: default 16 (user decision 2026-08-26) — one whole set
+// per block restores TAR-line spatial locality for sequential walks; pass 1
+// to reproduce the paper's per-page indexing.
+var utopiaRestSegBlockFlag = flag.Int("utopia-restseg-block", 16,
+	"Consecutive pages that index into one RestSeg set (default 16 = one "+
+		"whole set per block; 1 = per-page indexing per the paper; must "+
+		"not exceed -utopia-restseg-assoc).")
 // Pre-edit code (commented per project convention):
 // var utopiaTARCacheBytesFlag = flag.Uint64("utopia-tar-cache-bytes", 2048,
 // 	"Capacity of the GMMU-side TAR metadata cache in bytes.")
@@ -275,6 +290,7 @@ func (r *Runner) parseSimulationFlags() {
 	r.UtopiaRestSegRatio = *utopiaRestSegRatioFlag
 	r.UtopiaRestSegBytes = *utopiaRestSegSizeFlag
 	r.UtopiaRestSegAssoc = *utopiaRestSegAssocFlag
+	r.UtopiaRestSegBlock = *utopiaRestSegBlockFlag // sbin_claude_utopia
 	r.UtopiaTARCacheBytes = *utopiaTARCacheBytesFlag
 	r.UtopiaSFCacheBytes = *utopiaSFCacheBytesFlag
 	r.UtopiaTARSFHitLatency = *utopiaTARSFHitLatencyFlag
@@ -365,6 +381,14 @@ func (r *Runner) validateUtopiaFlags() {
 	}
 	if r.UtopiaRestSegAssoc <= 0 {
 		log.Panic("-utopia-restseg-assoc must be positive")
+	}
+	// sbin_claude_utopia: a block wider than the associativity could never
+	// fully reside in one set and would guarantee FlexSeg spills.
+	if r.UtopiaRestSegBlock < 1 {
+		log.Panic("-utopia-restseg-block must be at least 1")
+	}
+	if r.UtopiaRestSegBlock > r.UtopiaRestSegAssoc {
+		log.Panic("-utopia-restseg-block must not exceed -utopia-restseg-assoc")
 	}
 }
 

@@ -21,6 +21,9 @@ type UtopiaConfig struct {
 	RestSegBytes uint64
 	// Associativity is the number of ways per RestSeg set.
 	Associativity int
+	// BlockPages is the number of consecutive pages indexing into one set
+	// (1 = the paper's per-page indexing). sbin_claude_utopia
+	BlockPages int
 }
 
 // UtopiaRegistry exposes the shared authoritative RestSeg state (nil when

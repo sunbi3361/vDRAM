@@ -275,6 +275,10 @@ type UtopiaPlatformConfig struct {
 	RestSegBytes uint64
 	// Associativity is the number of ways per RestSeg set.
 	Associativity int
+	// BlockPages is the number of consecutive pages that index into one
+	// RestSeg set (1 = the paper's per-page indexing; B > 1 trades way-level
+	// conflict absorption for TAR-line spatial locality). sbin_claude_utopia
+	BlockPages int
 	// TARCacheBytes and SFCacheBytes size the GMMU-side metadata caches.
 	TARCacheBytes uint64
 	SFCacheBytes  uint64
@@ -308,6 +312,16 @@ func (b *Builder) utopiaAssociativity() int {
 	}
 
 	return 16
+}
+
+// utopiaBlockPages resolves the RestSeg block size (default 1 = per-page).
+// sbin_claude_utopia
+func (b *Builder) utopiaBlockPages() int {
+	if b.utopiaCfg.BlockPages > 0 {
+		return b.utopiaCfg.BlockPages
+	}
+
+	return 1
 }
 
 // utopiaEnabled reports whether the platform builds the Utopia GPU type.
@@ -486,11 +500,19 @@ func (b *Builder) buildGPUDriver(
 	// sbin_claude_utopia: the driver reserves the RestSeg per GPU and places
 	// pages RestSeg-first through the shared registry.
 	if b.utopiaEnabled() {
+		// Pre-edit code (commented per project convention):
+		// gpuDriverBuilder = gpuDriverBuilder.WithUtopia(driver.UtopiaConfig{
+		// 	Enabled:       true,
+		// 	Registry:      b.utopiaRegistry,
+		// 	RestSegBytes:  b.utopiaRestSegBytes(),
+		// 	Associativity: b.utopiaAssociativity(),
+		// })
 		gpuDriverBuilder = gpuDriverBuilder.WithUtopia(driver.UtopiaConfig{
 			Enabled:       true,
 			Registry:      b.utopiaRegistry,
 			RestSegBytes:  b.utopiaRestSegBytes(),
 			Associativity: b.utopiaAssociativity(),
+			BlockPages:    b.utopiaBlockPages(), // sbin_claude_utopia
 		})
 	}
 

@@ -48,7 +48,10 @@ var _ = Describe("Utopia RestSeg allocation", func() {
 
 		registry = restseg.NewRegistry()
 		allocator.SetUtopiaRegistry(registry)
-		cfg = allocator.ReserveRestSeg(1, restSegBytes, assoc)
+		// Pre-edit code (commented per project convention):
+		// cfg = allocator.ReserveRestSeg(1, restSegBytes, assoc)
+		// sbin_claude_utopia: block size 1 = per-page indexing.
+		cfg = allocator.ReserveRestSeg(1, restSegBytes, assoc, 1)
 	})
 
 	It("should reserve the leading contiguous frames as the RestSeg", func() {

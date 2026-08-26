@@ -9,11 +9,16 @@ import (
 
 func makeTestConfig() Config {
 	// 1MB RestSeg, 4KB pages, 4 ways -> 256 frames, 64 sets.
-	return MakeConfig(1, 0x1000_0000, 1<<20, 4096, 4)
+	// Pre-edit code (commented per project convention):
+	// return MakeConfig(1, 0x1000_0000, 1<<20, 4096, 4)
+	// sbin_claude_utopia: block size 1 = original per-page indexing.
+	return MakeConfig(1, 0x1000_0000, 1<<20, 4096, 4, 1)
 }
 
 func TestMakeConfigRoundsDown(t *testing.T) {
-	cfg := MakeConfig(1, 0, (1<<20)+4096*3, 4096, 4)
+	// Pre-edit code (commented per project convention):
+	// cfg := MakeConfig(1, 0, (1<<20)+4096*3, 4096, 4)
+	cfg := MakeConfig(1, 0, (1<<20)+4096*3, 4096, 4, 1) // sbin_claude_utopia
 	if cfg.SegmentBytes != 1<<20 {
 		t.Fatalf("expected rounded size %d, got %d", 1<<20, cfg.SegmentBytes)
 	}
@@ -126,6 +131,93 @@ func TestRegistrySetConflictFallsBack(t *testing.T) {
 	}
 	if reg.SFCount(1, lastVAddr) != cfg.Associativity {
 		t.Fatal("SF must saturate at the associativity")
+	}
+}
+
+// sbin_claude_utopia: block-indexing tests.
+
+// TestBlockIndexingGroupsConsecutivePages checks that with BlockPages = B,
+// aligned runs of B consecutive pages share one set and the next block moves
+// to a different set, while B = 1 keeps the original per-page spreading.
+func TestBlockIndexingGroupsConsecutivePages(t *testing.T) {
+	// 16-way, 1MB -> 16 sets; block of 16 pages = one full set.
+	cfg := MakeConfig(1, 0, 1<<20, 4096, 16, 16)
+
+	base := uint64(0x1000_0000) // block-aligned VPN (0x10000 % 16 == 0)
+	first := cfg.SetOf(base)
+	for i := uint64(1); i < 16; i++ {
+		if got := cfg.SetOf(base + i*4096); got != first {
+			t.Fatalf("page %d of the block mapped to set %d, want %d",
+				i, got, first)
+		}
+	}
+
+	next := cfg.SetOf(base + 16*4096)
+	if next == first {
+		t.Fatal("the next block must not share the set (16 sets, hash step)")
+	}
+}
+
+// TestBlockIndexingOneIsIdentity locks BlockPages = 1 (and the zero-value
+// Config) to the original per-page hash so baseline runs are unaffected.
+func TestBlockIndexingOneIsIdentity(t *testing.T) {
+	withBlock := MakeConfig(1, 0, 1<<20, 4096, 4, 1)
+	zeroValue := withBlock
+	zeroValue.BlockPages = 0
+
+	for vpn := uint64(0); vpn < 4096; vpn++ {
+		vAddr := vpn * 4096
+		want := int(hashVPN(vpn) % uint64(withBlock.NumSets))
+		if got := withBlock.SetOf(vAddr); got != want {
+			t.Fatalf("BlockPages=1 changed the set of vpn %d: %d != %d",
+				vpn, got, want)
+		}
+		if got := zeroValue.SetOf(vAddr); got != want {
+			t.Fatalf("zero-value BlockPages changed the set of vpn %d", vpn)
+		}
+	}
+}
+
+// TestBlockWiderThanAssocRejected: a block that cannot fit into one set's
+// ways would guarantee FlexSeg spills, so MakeConfig refuses it.
+func TestBlockWiderThanAssocRejected(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("MakeConfig must panic when blockPages > associativity")
+		}
+	}()
+	MakeConfig(1, 0, 1<<20, 4096, 4, 8)
+}
+
+// TestBlockAllocationFillsOneSet: allocating an aligned 16-page block with
+// B = 16 must land every page in the same set on distinct ways.
+func TestBlockAllocationFillsOneSet(t *testing.T) {
+	cfg := MakeConfig(1, 0, 1<<20, 4096, 16, 16)
+	reg := NewRegistry()
+	reg.AddSegment(cfg)
+	pid := vm.PID(1)
+
+	base := uint64(0x1000_0000)
+	set := cfg.SetOf(base)
+	seenWays := map[int]bool{}
+
+	for i := uint64(0); i < 16; i++ {
+		pAddr, ok := reg.Allocate(1, pid, base+i*4096)
+		if !ok {
+			t.Fatalf("allocation of block page %d must succeed", i)
+		}
+		gotSet, gotWay, inSeg := cfg.SetWayOf(pAddr)
+		if !inSeg || gotSet != set {
+			t.Fatalf("block page %d landed in set %d, want %d", i, gotSet, set)
+		}
+		if seenWays[gotWay] {
+			t.Fatalf("way %d used twice within one block", gotWay)
+		}
+		seenWays[gotWay] = true
+	}
+
+	if reg.SFCount(1, base) != 16 {
+		t.Fatal("SF must count all 16 ways of the filled block set")
 	}
 }
 

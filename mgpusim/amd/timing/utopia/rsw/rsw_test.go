@@ -12,8 +12,12 @@ func buildUTUWithAssoc(t *testing.T, assoc int) *Comp {
 	t.Helper()
 
 	registry := restseg.NewRegistry()
+	// Pre-edit code (commented per project convention):
+	// registry.AddSegment(restseg.MakeConfig(
+	// 	1, 0x1000_0000, 1<<20, 4096, assoc))
+	// sbin_claude_utopia: block size 1 = per-page indexing.
 	registry.AddSegment(restseg.MakeConfig(
-		1, 0x1000_0000, 1<<20, 4096, assoc))
+		1, 0x1000_0000, 1<<20, 4096, assoc, 1))
 
 	engine := sim.NewSerialEngine()
 

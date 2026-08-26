@@ -233,10 +233,16 @@ func (d *Driver) RegisterGPU(
 	// registers the segment layout in the shared registry that the GPU-side
 	// RestSeg walker reads.
 	if d.utopiaConfig.Enabled {
+		// Pre-edit code (commented per project convention):
+		// d.memAllocator.ReserveRestSeg(
+		// 	gpuDevice.ID,
+		// 	d.utopiaConfig.RestSegBytes,
+		// 	d.utopiaConfig.Associativity)
 		d.memAllocator.ReserveRestSeg(
 			gpuDevice.ID,
 			d.utopiaConfig.RestSegBytes,
-			d.utopiaConfig.Associativity)
+			d.utopiaConfig.Associativity,
+			d.utopiaConfig.BlockPages) // sbin_claude_utopia
 	}
 
 	// sbin_claude_avatar: with the fragmentation model on, the whole fresh
