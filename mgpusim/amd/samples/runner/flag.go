@@ -28,13 +28,17 @@ var archFlag = flag.String("arch", "gcn3", "GPU architecture: gcn3 or cdna3.")
 // var gpuTypeFlag = flag.String("gpu", "r9nano",
 //
 //	"GPU model for timing simulation: r9nano, mi300a, ideal-l1tlb, or virtual-caching.") // sbin_codex
+//
 // Pre-edit code (commented per project convention):
 // var gpuTypeFlag = flag.String("gpu", "r9nano",
-// 	"GPU model for timing simulation: r9nano, mi300a, ideal-l1tlb, virtual-caching, or utopia.") // sbin_claude_utopia
+//
+//	"GPU model for timing simulation: r9nano, mi300a, ideal-l1tlb, virtual-caching, or utopia.") // sbin_claude_utopia
+//
 // Pre-edit code (commented per project convention):
 // var gpuTypeFlag = flag.String("gpu", "r9nano",
-// 	"GPU model for timing simulation: r9nano, mi300a, ideal-l1tlb, "+
-// 		"virtual-caching, utopia, or avatar.") // sbin_claude_avatar
+//
+//	"GPU model for timing simulation: r9nano, mi300a, ideal-l1tlb, "+
+//		"virtual-caching, utopia, or avatar.") // sbin_claude_avatar
 var gpuTypeFlag = flag.String("gpu", "r9nano",
 	"GPU model for timing simulation: r9nano, mi300a, ideal-l1tlb, "+
 		"virtual-caching, utopia, avatar, or hpt.") // sbin_claude_hpt
@@ -53,10 +57,12 @@ var hptAccessesPerWalkFlag = flag.Int("hpt-accesses-per-walk", 1,
 var avatarCompressRatioFlag = flag.Float64("avatar-compress-ratio", 0.8,
 	"Fraction of frames whose sectors compress well enough to embed page "+
 		"information (CAVA rapid validation). Only meaningful with -gpu=avatar.")
+
 // Pre-edit v1 flag (commented per project convention). The whole
 // speculative access used to be one flat countdown:
 // var avatarValidationLatencyFlag = flag.Int("avatar-validation-latency", 200,
-// 	"Modeled speculative-fetch + CAVA validation latency in cycles.")
+//
+//	"Modeled speculative-fetch + CAVA validation latency in cycles.")
 //
 // sbin_claude_avatar v2: the sector fetch is now a real read through the
 // L2/DRAM hierarchy; only the decompress-and-compare stays a fixed latency.
@@ -80,9 +86,11 @@ var utopiaRestSegSizeFlag = flag.Uint64("utopia-restseg-size", 0,
 	"RestSeg size in bytes per GPU. Overrides -utopia-restseg-ratio when set.")
 var utopiaRestSegAssocFlag = flag.Int("utopia-restseg-assoc", 16,
 	"Number of ways per RestSeg set.")
+
 // Pre-edit code (commented per project convention):
 // var utopiaTARCacheBytesFlag = flag.Uint64("utopia-tar-cache-bytes", 2048,
-// 	"Capacity of the GMMU-side TAR metadata cache in bytes.")
+//
+//	"Capacity of the GMMU-side TAR metadata cache in bytes.")
 //
 // sbin_claude_utopia: default matches the baseline GMMU page-walk cache
 // storage (128 entries x 4 cached levels x 8B = 4KB) for iso-capacity
@@ -151,6 +159,13 @@ var uvmOversubRatioFlag = flag.Float64("uvm-oversubscription-ratio", 0,
 		"Unlike -uvm-gpu-memory-capacity-ratio this is relative to what the "+
 		"benchmark allocated, not to the GPU's physical memory. "+
 		"Overrides -uvm-gpu-memory-capacity and its ratio form.")
+
+// sbin_claude: an unlimited value reproduces the pre-fix behaviour, where the
+// GPU could park six figures of PCIe transactions in the root complex endpoint
+// and starve the migration DMA that would have ended the remote traffic.
+var uvmMaxOutstandingRemoteFlag = flag.Int("uvm-max-outstanding-remote", 256,
+	"Maximum UVM remote accesses one GPU may have in flight over PCIe. "+
+		"0 means unlimited.")
 var uvmTBNExpandRatioFlag = flag.Float64("uvm-tbn-expand-ratio", 0.51,
 	"Minimum GPU-resident page ratio inside a TBN node to migrate the whole node (UVM).")
 var uvmTBNMaxFetchSizeFlag = flag.Uint64("uvm-tbn-max-fetch-size", 1<<21,
@@ -263,11 +278,12 @@ func (r *Runner) parseSimulationFlags() {
 	r.UVMACThreshold = *uvmAccessCounterThresholdFlag
 	r.UVMExpandRatio = *uvmTBNExpandRatioFlag
 	r.UVMmaxFetchSize = *uvmTBNMaxFetchSizeFlag
-	r.UVMNoPrefetch = *uvmDisablePrefetchFlag        // sbin_codex
-	r.UVMNoEviction = *uvmDisableEvictionFlag        // sbin_codex
-	r.UVMGPUCapacityBytes = *uvmGPUCapacityFlag      // sbin_codex
-	r.UVMGPUCapacityRatio = *uvmGPUCapacityRatioFlag // sbin_codex
-	r.UVMOversubRatio = *uvmOversubRatioFlag         // sbin_codex
+	r.UVMNoPrefetch = *uvmDisablePrefetchFlag          // sbin_codex
+	r.UVMNoEviction = *uvmDisableEvictionFlag          // sbin_codex
+	r.UVMGPUCapacityBytes = *uvmGPUCapacityFlag        // sbin_codex
+	r.UVMGPUCapacityRatio = *uvmGPUCapacityRatioFlag   // sbin_codex
+	r.UVMOversubRatio = *uvmOversubRatioFlag           // sbin_codex
+	r.UVMMaxOutstanding = *uvmMaxOutstandingRemoteFlag // sbin_claude
 
 	r.validateUVMFlags()
 
@@ -394,6 +410,9 @@ func (r *Runner) validateUVMFlags() {
 	}
 	if !r.UVM && r.UVMOversubRatio > 0 { // sbin_codex
 		log.Panic("-uvm-oversubscription-ratio requires -uvm")
+	}
+	if r.UVMMaxOutstanding < 0 { // sbin_claude
+		log.Panic("-uvm-max-outstanding-remote must not be negative")
 	}
 }
 

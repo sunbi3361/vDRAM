@@ -20,5 +20,8 @@ type GPUBuilder interface {
 	// WithAccessCounterThreshold sets the GPU-side UVM remote-access counter
 	// threshold. // sbin_codex
 	WithAccessCounterThreshold(thresh uint64) GPUBuilder
+	// WithMaxOutstandingRemote caps how many UVM remote accesses one GPU may
+	// have in flight over PCIe. Zero means unlimited. // sbin_claude
+	WithMaxOutstandingRemote(n int) GPUBuilder
 	Build(name string) *sim.Domain
 }

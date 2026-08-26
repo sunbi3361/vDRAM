@@ -190,7 +190,13 @@ var _ = Describe("R9 Nano virtual L2 cache flow", func() {
 			sim.RemotePort("GPU.DRAM[0].TopPort")))
 		Expect(translationMessages.translations).NotTo(BeEmpty())
 		for _, translation := range translationMessages.translations {
-			Expect(translation.Dst).To(Equal(sim.RemotePort("GPU.L2TLB.TopPort")))
+			// Pre-edit code (commented per project convention). Fill
+			// translations used to target the L1 TLBs' port:
+			// Expect(translation.Dst).To(Equal(sim.RemotePort("GPU.L2TLB.TopPort")))
+			//
+			// sbin_claude_vc: they now target the dedicated fill channel.
+			Expect(translation.Dst).To(Equal(
+				sim.RemotePort("GPU.L2TLB.TopPort[1]")))
 		}
 		writtenBack, err := globalStorage.Read(physicalA+4, 4)
 		Expect(err).NotTo(HaveOccurred())

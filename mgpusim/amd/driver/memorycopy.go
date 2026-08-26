@@ -111,7 +111,20 @@ func (m *defaultMemoryCopyMiddleware) processMemCopyH2DCommand(
 
 	// sbin_codex: a fully managed CPU-resident copy created no DMA requests;
 	// complete the command immediately instead of waiting for responses.
-	if len(cmd.Reqs) == 0 && len(m.awaitingReqs) == 0 {
+	//
+	// Pre-edit code (commented per project convention):
+	// if len(cmd.Reqs) == 0 && len(m.awaitingReqs) == 0 {
+	//
+	// sbin_claude: awaitingReqs belongs to the middleware, not to this
+	// command. It holds whatever an earlier command queued and has not yet
+	// handed to the driver's send queue, which happens only once cyclesLeft
+	// counts down. A copy that produced no request of its own therefore
+	// failed this test whenever another command was still in that window, fell
+	// through to queue.IsRunning = true, and waited forever for a response
+	// that nothing would ever send: the engine ran out of events with the
+	// command queue still marked running. Only this command's own request list
+	// can decide whether it has anything to wait for.
+	if len(cmd.Reqs) == 0 {
 		queue.IsRunning = false
 		queue.Dequeue()
 		m.driver.logCmdComplete(cmd)
@@ -211,7 +224,12 @@ func (m *defaultMemoryCopyMiddleware) readManagedD2H(
 
 	// sbin_codex: a fully managed CPU-resident copy created no DMA requests;
 	// complete the command immediately.
-	if len(cmd.Reqs) == 0 && len(m.awaitingReqs) == 0 {
+	//
+	// Pre-edit code (commented per project convention):
+	// if len(cmd.Reqs) == 0 && len(m.awaitingReqs) == 0 {
+	//
+	// sbin_claude: same shared-state bug as the H2D path above.
+	if len(cmd.Reqs) == 0 {
 		queue.IsRunning = false
 		buf := bytes.NewReader(cmd.RawData)
 		err := binary.Read(buf, binary.LittleEndian, cmd.Dst)

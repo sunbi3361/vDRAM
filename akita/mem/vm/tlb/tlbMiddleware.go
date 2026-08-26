@@ -20,6 +20,8 @@ type tlbMiddleware struct {
 func (m *tlbMiddleware) Tick() bool {
 	madeProgress := false
 
+	m.bottomCommitsThisCycle = 0 // sbin_claude_vc
+
 	switch m.state {
 	case tlbStateDrain:
 		madeProgress = m.handleDrain() || madeProgress
@@ -38,7 +40,15 @@ func (m *tlbMiddleware) processPipeline() bool {
 
 	madeProgress = m.extractFromPipeline() || madeProgress
 
-	madeProgress = m.responsePipeline.Tick() || madeProgress
+	// Pre-edit code (commented per project convention). One shared pipeline
+	// was ticked here:
+	//
+	// madeProgress = m.responsePipeline.Tick() || madeProgress
+	//
+	// sbin_claude_vc: every top channel owns a pipeline now.
+	for _, channel := range m.topChannels {
+		madeProgress = channel.pipeline.Tick() || madeProgress
+	}
 
 	madeProgress = m.insertIntoPipeline() || madeProgress
 
@@ -46,24 +56,40 @@ func (m *tlbMiddleware) processPipeline() bool {
 }
 
 // get req from port buffer and insert into pipeline
+//
+// Pre-edit code (commented per project convention). Only the single top port
+// was drained:
+//
+//	for i := 0; i < m.numReqPerCycle; i++ {
+//		if !m.responsePipeline.CanAccept() { break }
+//		req := m.topPort.RetrieveIncoming()
+//		if req == nil { break }
+//		m.responsePipeline.Accept(&pipelineTLBReq{req: req.(*vm.TranslationReq)})
+//		madeProgress = true
+//	}
+//
+// sbin_claude_vc: each channel is drained into its own pipeline, so a channel
+// whose pipeline is backed up does not stop the others from being admitted.
 func (m *tlbMiddleware) insertIntoPipeline() bool {
 	madeProgress := false
 
-	for i := 0; i < m.numReqPerCycle; i++ {
-		if !m.responsePipeline.CanAccept() {
-			break
+	for _, channel := range m.topChannels {
+		for i := 0; i < m.numReqPerCycle; i++ {
+			if !channel.pipeline.CanAccept() {
+				break
+			}
+
+			req := channel.port.RetrieveIncoming()
+			if req == nil {
+				break
+			}
+
+			channel.pipeline.Accept(&pipelineTLBReq{
+				req: req.(*vm.TranslationReq),
+			})
+
+			madeProgress = true
 		}
-
-		req := m.topPort.RetrieveIncoming()
-		if req == nil {
-			break
-		}
-
-		m.responsePipeline.Accept(&pipelineTLBReq{
-			req: req.(*vm.TranslationReq),
-		})
-
-		madeProgress = true
 	}
 
 	return madeProgress
@@ -72,20 +98,25 @@ func (m *tlbMiddleware) insertIntoPipeline() bool {
 func (m *tlbMiddleware) extractFromPipeline() bool {
 	madeProgress := false
 
-	for i := 0; i < m.numReqPerCycle; i++ {
-		item := m.responseBuffer.Peek()
+	// sbin_claude_vc: a lookup that cannot be answered holds up only its own
+	// channel. Pre-edit, every channel shared m.responseBuffer, so one
+	// unanswerable lookup at its head stalled every other requester too.
+	for _, channel := range m.topChannels {
+		for i := 0; i < m.numReqPerCycle; i++ {
+			item := channel.buffer.Peek()
 
-		if item == nil {
-			break
-		}
+			if item == nil {
+				break
+			}
 
-		req := item.(*pipelineTLBReq).req
+			req := item.(*pipelineTLBReq).req
 
-		ok := m.lookup(req)
-		if ok {
-			m.responseBuffer.Pop()
+			ok := m.lookup(req, channel)
+			if ok {
+				channel.buffer.Pop()
 
-			madeProgress = true
+				madeProgress = true
+			}
 		}
 	}
 
@@ -98,9 +129,7 @@ func (m *tlbMiddleware) handleEnable() bool {
 	// can be reused within the same cycle's lookups.
 	madeProgress = m.processCancels() || madeProgress
 	madeProgress = m.sendPendingBottomCancels() || madeProgress
-	for i := 0; i < m.numReqPerCycle; i++ {
-		madeProgress = m.respondMSHREntry() || madeProgress
-	}
+	madeProgress = m.respondTop() || madeProgress // sbin_claude_vc
 
 	for i := 0; i < m.numReqPerCycle; i++ {
 		madeProgress = m.parseBottom() || madeProgress
@@ -117,9 +146,7 @@ func (m *tlbMiddleware) handleDrain() bool {
 	// hold the MSHR open forever.
 	madeProgress = m.processCancels() || madeProgress
 	madeProgress = m.sendPendingBottomCancels() || madeProgress
-	for i := 0; i < m.numReqPerCycle; i++ {
-		madeProgress = m.respondMSHREntry() || madeProgress
-	}
+	madeProgress = m.respondTop() || madeProgress // sbin_claude_vc
 
 	for i := 0; i < m.numReqPerCycle; i++ {
 		madeProgress = m.parseBottom() || madeProgress
@@ -127,7 +154,10 @@ func (m *tlbMiddleware) handleDrain() bool {
 
 	madeProgress = m.processPipeline() || madeProgress
 
-	if m.mshr.IsEmpty() && m.bottomPort.PeekIncoming() == nil {
+	// sbin_claude_vc: answers already queued for a channel must go out before
+	// the TLB is considered drained.
+	if m.mshr.IsEmpty() && !m.hasPendingTopRsp() &&
+		m.bottomPort.PeekIncoming() == nil {
 		m.state = tlbStatePause
 		tracing.AddMilestone(
 			m.Comp.Name()+".drain",
@@ -139,6 +169,78 @@ func (m *tlbMiddleware) handleDrain() bool {
 	}
 
 	return madeProgress
+}
+
+// respondTop hands out the answers this cycle allows. With a single channel
+// this is the pre-existing responding-MSHR-entry register; with more than one
+// channel every channel drains its own queue independently. // sbin_claude_vc
+func (m *tlbMiddleware) respondTop() bool {
+	madeProgress := false
+
+	if !m.isMultiChannel() {
+		for i := 0; i < m.numReqPerCycle; i++ {
+			madeProgress = m.respondMSHREntry() || madeProgress
+		}
+
+		return madeProgress
+	}
+
+	for _, channel := range m.topChannels {
+		for i := 0; i < m.numReqPerCycle; i++ {
+			madeProgress = m.respondPending(channel) || madeProgress
+		}
+	}
+
+	return madeProgress
+}
+
+// respondPending sends one queued answer out of a channel's own port. A
+// channel that cannot send blocks nothing but itself. // sbin_claude_vc
+func (m *tlbMiddleware) respondPending(channel *topChannel) bool {
+	if len(channel.pending) == 0 {
+		return false
+	}
+
+	pending := channel.pending[0]
+	req := pending.req
+	rspToTop := vm.TranslationRspBuilder{}.
+		WithSrc(channel.port.AsRemote()).
+		WithDst(req.Src).
+		WithRspTo(req.ID).
+		WithPage(pending.page).
+		Build()
+
+	err := channel.port.Send(rspToTop)
+	if err != nil {
+		return false
+	}
+
+	tracing.AddMilestone(
+		tracing.MsgIDAtReceiver(req, m.Comp),
+		tracing.MilestoneKindNetworkBusy,
+		channel.port.Name(),
+		m.Comp.Name(),
+		m.Comp,
+	)
+
+	channel.pending = channel.pending[1:]
+
+	tracing.TraceReqComplete(req, m.Comp)
+
+	return true
+}
+
+// queueChannelResponses splits one completed page walk across the channels
+// that are waiting for it, so each waiter is answered on the port - and
+// therefore the connection - its request arrived on. // sbin_claude_vc
+func (m *tlbMiddleware) queueChannelResponses(entry *mshrEntry, page vm.Page) {
+	entry.page = page
+
+	for _, req := range entry.Requests {
+		channel := m.channelOf(req)
+		channel.pending = append(channel.pending,
+			pendingTopRsp{req: req, page: page})
+	}
 }
 
 func (m *tlbMiddleware) respondMSHREntry() bool {
@@ -273,7 +375,11 @@ func (m *tlbMiddleware) sendPendingBottomCancels() bool {
 	return madeProgress
 }
 
-func (m *tlbMiddleware) lookup(req *vm.TranslationReq) bool {
+// sbin_claude_vc: lookup answers on the channel the request arrived on.
+func (m *tlbMiddleware) lookup(
+	req *vm.TranslationReq,
+	channel *topChannel,
+) bool {
 	// sbin_claude_avatar: a canceled request is dropped as it emerges from
 	// the pipeline - no MSHR entry, no walk, no response. The requester
 	// abandoned it (Avatar EAF answered it early).
@@ -291,7 +397,7 @@ func (m *tlbMiddleware) lookup(req *vm.TranslationReq) bool {
 	wayID, page, found := set.Lookup(req.PID, req.VAddr)
 
 	if found && page.Valid {
-		return m.handleTranslationHit(req, setID, wayID, page)
+		return m.handleTranslationHit(req, setID, wayID, page, channel)
 	}
 	return m.handleTranslationMiss(req)
 }
@@ -300,8 +406,9 @@ func (m *tlbMiddleware) handleTranslationHit(
 	req *vm.TranslationReq,
 	setID, wayID int,
 	page vm.Page,
+	channel *topChannel, // sbin_claude_vc
 ) bool {
-	ok := m.sendRspToTop(req, page)
+	ok := m.sendRspToTop(req, page, channel)
 	if !ok {
 		return false
 	}
@@ -355,23 +462,31 @@ func (m *tlbMiddleware) vAddrToSetID(vAddr uint64) (setID int) {
 	return int(vAddr / m.pageSize % uint64(m.numSets))
 }
 
+// Pre-edit code (commented per project convention). The answer always left
+// through the single top port:
+//
+//	rsp := vm.TranslationRspBuilder{}.WithSrc(m.topPort.AsRemote())...
+//	err := m.topPort.Send(rsp)
+//
+// sbin_claude_vc: it leaves through the channel the request came in on.
 func (m *tlbMiddleware) sendRspToTop(
 	req *vm.TranslationReq,
 	page vm.Page,
+	channel *topChannel,
 ) bool {
 	rsp := vm.TranslationRspBuilder{}.
-		WithSrc(m.topPort.AsRemote()).
+		WithSrc(channel.port.AsRemote()).
 		WithDst(req.Src).
 		WithRspTo(req.ID).
 		WithPage(page).
 		Build()
 
-	err := m.topPort.Send(rsp)
+	err := channel.port.Send(rsp)
 	if err == nil {
 		tracing.AddMilestone(
 			tracing.MsgIDAtReceiver(req, m.Comp),
 			tracing.MilestoneKindNetworkBusy,
-			m.topPort.Name(),
+			channel.port.Name(),
 			m.Comp.Name(),
 			m.Comp,
 		)
@@ -426,7 +541,17 @@ func (m *tlbMiddleware) fetchBottom(req *vm.TranslationReq) bool {
 }
 
 func (m *tlbMiddleware) parseBottom() bool {
-	if m.respondingMSHREntry != nil {
+	// Pre-edit code (commented per project convention):
+	// if m.respondingMSHREntry != nil {
+	// 	return false
+	// }
+	//
+	// sbin_claude_vc: the multi-channel path queues answers per channel
+	// instead of parking them in one responding-entry register, because a
+	// register shared by both classes lets a stalled class hold up the fills
+	// the other class needs. The one-fill-per-cycle rate the register
+	// enforced is kept by bottomCommitsThisCycle, checked below.
+	if !m.isMultiChannel() && m.respondingMSHREntry != nil {
 		return false
 	}
 	item := m.bottomPort.PeekIncoming()
@@ -448,6 +573,13 @@ func (m *tlbMiddleware) parseBottom() bool {
 	if !mshrEntryPresent {
 		m.bottomPort.RetrieveIncoming()
 		return true
+	}
+
+	// sbin_claude_vc: cap the fill rate at the one-per-cycle the
+	// responding-entry register used to impose. Nothing has been mutated
+	// yet, so returning here simply retries next cycle.
+	if m.isMultiChannel() && m.bottomCommitsThisCycle > 0 {
+		return false
 	}
 	// setID := m.vAddrToSetID(page.VAddr) // sbin_codex: pre-edit unconditional admission.
 	// set := m.sets[setID]
@@ -471,8 +603,16 @@ func (m *tlbMiddleware) parseBottom() bool {
 		set.Visit(wayID)
 	}
 
-	m.respondingMSHREntry = mshrEntry
-	mshrEntry.page = page
+	// Pre-edit code (commented per project convention):
+	// m.respondingMSHREntry = mshrEntry
+	// mshrEntry.page = page
+	if m.isMultiChannel() { // sbin_claude_vc
+		m.queueChannelResponses(mshrEntry, page)
+		m.bottomCommitsThisCycle++
+	} else {
+		m.respondingMSHREntry = mshrEntry
+		mshrEntry.page = page
+	}
 
 	m.mshr.Remove(rsp.Page.PID, rsp.Page.VAddr)
 	m.bottomPort.RetrieveIncoming()
@@ -493,14 +633,14 @@ func (m *tlbMiddleware) handleFlush() bool {
 
 	madeProgress := false
 
-	if m.mshr.IsEmpty() && m.respondingMSHREntry == nil && m.bottomPort.PeekIncoming() == nil {
+	// sbin_claude_vc: queued per-channel answers count as in-flight work too.
+	if m.mshr.IsEmpty() && m.respondingMSHREntry == nil &&
+		!m.hasPendingTopRsp() && m.bottomPort.PeekIncoming() == nil {
 		madeProgress = m.processTLBFlush() || madeProgress
 		return madeProgress
 	}
 
-	for i := 0; i < m.numReqPerCycle; i++ {
-		madeProgress = m.respondMSHREntry() || madeProgress
-	}
+	madeProgress = m.respondTop() || madeProgress // sbin_claude_vc
 
 	for i := 0; i < m.numReqPerCycle; i++ {
 		madeProgress = m.parseBottom() || madeProgress

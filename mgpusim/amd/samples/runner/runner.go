@@ -51,6 +51,7 @@ type Runner struct {
 	UVMGPUCapacityBytes uint64
 	UVMGPUCapacityRatio float64
 	UVMOversubRatio     float64
+	UVMMaxOutstanding   int // sbin_claude
 
 	// sbin_claude_utopia: Utopia hybrid RestSeg/FlexSeg configuration.
 	UtopiaRestSegRatio     float64
@@ -158,6 +159,7 @@ func (r *Runner) buildTimingPlatform() {
 			GPUCapacityBytes:       r.UVMGPUCapacityBytes,
 			GPUCapacityRatio:       r.UVMGPUCapacityRatio,
 			OversubscriptionRatio:  r.UVMOversubRatio,
+			MaxOutstandingRemote:   r.UVMMaxOutstanding, // sbin_claude
 		})
 	}
 

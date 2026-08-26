@@ -1,6 +1,8 @@
 package tlb
 
 import (
+	"log" // sbin_claude_vc
+
 	"github.com/sarchlab/akita/v4/mem/mem"
 	"github.com/sarchlab/akita/v4/mem/vm" // sbin_codex
 	"github.com/sarchlab/akita/v4/mem/vm/tlb/internal"
@@ -24,6 +26,9 @@ type Comp struct {
 	topPort     sim.Port
 	bottomPort  sim.Port
 	controlPort sim.Port
+	// topChannels are the independent top-side request classes. Channel 0 is
+	// always present and its port is topPort. // sbin_claude_vc
+	topChannels []*topChannel
 	// cancelPort receives out-of-band TranslationCancelReqs (Avatar EAF,
 	// refs/avatar.md 5.9). Out of band, because an in-band cancel could
 	// never overtake the queued request it names. Unconnected and inert on
@@ -50,6 +55,12 @@ type Comp struct {
 	responsePipeline    pipelining.Pipeline
 	responseBuffer      sim.Buffer
 
+	// bottomCommitsThisCycle counts the MSHR fills committed in the current
+	// cycle. The multi-channel response path has no responding-entry
+	// register to serialise on, so the fill rate is capped explicitly to
+	// stay identical to the single-channel path. // sbin_claude_vc
+	bottomCommitsThisCycle int
+
 	inflightFlushReq *FlushReq
 
 	// pendingCancels remembers canceled request IDs whose request has not
@@ -59,6 +70,72 @@ type Comp struct {
 	// pendingBottomCancels are cancels bound for the downstream walker,
 	// waiting for the bottom port. // sbin_claude_avatar
 	pendingBottomCancels []*vm.TranslationCancelReq
+}
+
+// topChannel is one independent top-side request class. Each channel owns its
+// port, its lookup pipeline and its pending-response queue, so a channel whose
+// requester is back-pressured cannot stall the other channels.
+//
+// This exists because a TLB whose top port is shared by two client classes
+// with different drain paths can deadlock: the shared, in-order port queue
+// lets a blocked client of one class hold up every answer of the other class
+// (head-of-line blocking in directconnection). Giving each class its own
+// channel removes that coupling while keeping one TLB, one set array and one
+// MSHR. // sbin_claude_vc
+type topChannel struct {
+	port     sim.Port
+	pipeline pipelining.Pipeline
+	buffer   sim.Buffer
+
+	// pending holds the answers waiting for this channel's port. Only the
+	// multi-channel response path uses it; with a single channel the
+	// pre-existing respondingMSHREntry path is kept untouched so that
+	// single-channel timing does not change. // sbin_claude_vc
+	pending []pendingTopRsp
+}
+
+// pendingTopRsp is one page-walk answer waiting for its channel's top port.
+// sbin_claude_vc
+type pendingTopRsp struct {
+	req  *vm.TranslationReq
+	page vm.Page
+}
+
+// isMultiChannel reports whether the top side is split into more than one
+// request class. // sbin_claude_vc
+func (c *Comp) isMultiChannel() bool {
+	return len(c.topChannels) > 1
+}
+
+// channelOf returns the channel a request arrived on. A request always names
+// the top port it was addressed to, so the reply can be routed back out of
+// the same port - and therefore over the same connection - as the request
+// came in. // sbin_claude_vc
+func (c *Comp) channelOf(req *vm.TranslationReq) *topChannel {
+	dst := req.Meta().Dst
+
+	for _, channel := range c.topChannels {
+		if channel.port.AsRemote() == dst {
+			return channel
+		}
+	}
+
+	log.Panicf("%s received a request addressed to %s, which is not one of its top ports",
+		c.Name(), dst)
+
+	return nil
+}
+
+// hasPendingTopRsp reports whether any channel still owes an answer to its
+// requesters. // sbin_claude_vc
+func (c *Comp) hasPendingTopRsp() bool {
+	for _, channel := range c.topChannels {
+		if len(channel.pending) > 0 {
+			return true
+		}
+	}
+
+	return false
 }
 
 // SetWalkCancelProvider sets the downstream Cancel port that is told to

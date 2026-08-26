@@ -78,6 +78,7 @@ type Builder struct {
 	tlbCtrlPorts         []sim.RemotePort    // sbin_codex: UVM range-invalidation targets.
 	accessCounter        *accesscounter.Comp // sbin_codex: GPU-side UVM counter.
 	accessCounterThresh  uint64              // sbin_codex
+	maxOutstandingRemote int                 // sbin_claude
 	utu                  *rsw.Comp           // sbin_claude_utopia: RestSeg walker (nil on baseline).
 	asu                  *asu.Comp           // sbin_claude_avatar: speculation unit (nil on baseline).
 }
@@ -206,6 +207,13 @@ func (b Builder) WithAccessCounterThreshold(
 	thresh uint64,
 ) gpubuilder.GPUBuilder {
 	b.accessCounterThresh = thresh
+	return b
+}
+
+// WithMaxOutstandingRemote caps how many UVM remote accesses this GPU may
+// have in flight over PCIe. Zero means unlimited. // sbin_claude
+func (b Builder) WithMaxOutstandingRemote(n int) gpubuilder.GPUBuilder {
+	b.maxOutstandingRemote = n
 	return b
 }
 
@@ -763,6 +771,7 @@ func (b *Builder) buildAccessCounter() {
 		WithFreq(b.freq).
 		WithDeviceID(b.gpuID).
 		WithThreshold(threshold).
+		WithMaxOutstanding(b.maxOutstandingRemote). // sbin_claude
 		WithBottomDestination(b.rdmaEngine.RDMARequestInside.AsRemote()).
 		Build(fmt.Sprintf("%s.UVMAccessCounter", b.name))
 
@@ -869,6 +878,9 @@ func (b *Builder) buildL2TLB() {
 		WithNumSets(numSets).
 		WithNumMSHREntry(64).
 		WithNumReqPerCycle(1024).
+		// sbin_claude_vc: the memory topology decides whether the L2 TLB
+		// needs a second top channel for the memory-side translators.
+		WithNumTopChannels(b.memoryTopology.l2TLBTopChannels()).
 		WithLog2PageSize(b.log2PageSize).
 		// WithLowModule(b.gmmu.GetPortByName("Top").AsRemote()). // sbin_codex: route L2 misses through GMMU.
 		// Pre-edit code (commented per project convention):

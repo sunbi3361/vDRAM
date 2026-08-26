@@ -153,8 +153,21 @@ func (m *ctrlMiddleware) handleTLBRestart(req *RestartReq) bool {
 
 	m.state = tlbStateEnable
 
-	for m.topPort.PeekIncoming() != nil {
-		m.topPort.RetrieveIncoming()
+	// Pre-edit code (commented per project convention). Only the single top
+	// port was drained:
+	//
+	// for m.topPort.PeekIncoming() != nil {
+	// 	m.topPort.RetrieveIncoming()
+	// }
+	//
+	// sbin_claude_vc: a restart abandons the in-flight work of every channel,
+	// so every channel's ingress and queued answers are dropped.
+	for _, channel := range m.topChannels {
+		for channel.port.PeekIncoming() != nil {
+			channel.port.RetrieveIncoming()
+		}
+
+		channel.pending = nil
 	}
 
 	for m.bottomPort.PeekIncoming() != nil {

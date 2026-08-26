@@ -155,6 +155,9 @@ var _ = Describe("R9 Nano builder", func() {
 			"GPU.L2ToL2AddrTrans[1]",
 			"GPU.L2AddrTransToDRAM",
 			"GPU.TranslationToL2TLB",
+			// sbin_claude_vc: the memory-side translators get their own
+			// network to the L2 TLB's fill channel.
+			"GPU.L2AddrTransToL2TLB",
 			"GPU.L2TLBToGMMU",
 		))
 		Expect(componentNames.connections).NotTo(ContainElement("GPU.L2ToDRAM"))
@@ -215,6 +218,12 @@ var _ = Describe("R9 Nano builder", func() {
 			testSimulation.GetComponentByName(
 				"GPU.L2TLB").GetPortByName("Top"),
 		}
+		// sbin_claude_vc: fill translations must not share the L1 TLBs'
+		// network - that shared, in-order queue is what deadlocked.
+		fillTranslationPorts := []sim.Port{
+			testSimulation.GetComponentByName(
+				"GPU.L2TLB").GetPortByName(l2FillTranslationPort),
+		}
 		physicalMemoryPorts := []sim.Port{
 			testSimulation.GetComponentByName("GPU.DMA").(*cp.DMAEngine).ToMem,
 			testSimulation.GetComponentByName("GPU.PMC").GetPortByName("LocalMem"),
@@ -230,7 +239,7 @@ var _ = Describe("R9 Nano builder", func() {
 				expectPortConnectedTo(port,
 					fmt.Sprintf("GPU.L2ToL2AddrTrans[%d]", i))
 			}
-			sharedTranslationPorts = append(sharedTranslationPorts,
+			fillTranslationPorts = append(fillTranslationPorts, // sbin_claude_vc
 				translator.GetPortByName("Translation"))
 			physicalMemoryPorts = append(physicalMemoryPorts,
 				translator.GetPortByName("Bottom"),
@@ -239,6 +248,9 @@ var _ = Describe("R9 Nano builder", func() {
 		}
 		for _, port := range sharedTranslationPorts {
 			expectPortConnectedTo(port, "GPU.TranslationToL2TLB")
+		}
+		for _, port := range fillTranslationPorts { // sbin_claude_vc
+			expectPortConnectedTo(port, "GPU.L2AddrTransToL2TLB")
 		}
 		for _, port := range physicalMemoryPorts {
 			expectPortConnectedTo(port, "GPU.L2AddrTransToDRAM")
@@ -264,8 +276,9 @@ var _ = Describe("R9 Nano builder", func() {
 				fmt.Sprintf("GPU.L2AddrTrans[%d]", i)).(*addresstranslator.Comp)
 			expectTranslatorRoutesAccess(translator, translationRouteExpectation{
 				accessReq: accessReq,
-				tlb: testSimulation.GetComponentByName(
-					"GPU.L2TLB").GetPortByName("Top").AsRemote(),
+				// sbin_claude_vc: the fill channel, not the L1 TLBs' port.
+				tlb: testSimulation.GetComponentByName("GPU.L2TLB").
+					GetPortByName(l2FillTranslationPort).AsRemote(),
 				dram: testSimulation.GetComponentByName(
 					fmt.Sprintf("GPU.DRAM[%d]", i)).GetPortByName("Top").AsRemote(),
 				physicalPage: 0x8000,
