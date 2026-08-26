@@ -411,19 +411,65 @@ func (m *defaultMemoryCopyMiddleware) processFlushReturn(
 
 	m.driver.logTaskToGPUClear(req)
 
-	cmd, _ := m.driver.findCommandByReq(req)
+	// Pre-edit code (commented per project convention):
+	// cmd, _ := m.driver.findCommandByReq(req)
+	cmd, cmdQueue := m.driver.findCommandByReq(req) // sbin_claude
 
 	cmd.RemoveReq(req)
 
-	// sbin_codex: a deferred managed D2H becomes readable once every flush
-	// request of its command has returned.
-	if m.pendingD2H != nil && cmd == m.pendingD2H.cmd && len(cmd.GetReqs()) == 0 {
-		m.pendingD2HFlushed = true
-	}
+	// Pre-edit code (commented per project convention):
+	// // sbin_codex: a deferred managed D2H becomes readable once every flush
+	// // request of its command has returned.
+	// if m.pendingD2H != nil && cmd == m.pendingD2H.cmd &&
+	// 	len(cmd.GetReqs()) == 0 {
+	// 	m.pendingD2HFlushed = true
+	// }
+	m.settleFlushedCommand(cmd, cmdQueue) // sbin_claude
 
 	m.driver.logTaskToGPUClear(req)
 
 	return true
+}
+
+// settleFlushedCommand decides what a copy command still owes once one of its
+// flush requests has come back.
+//
+// sbin_claude: the case that was missing is a command whose flush request was
+// its only request. A copy whose range is entirely managed and CPU-resident
+// issues no DMA at all - it writes straight into globalStorage - so when it
+// also needs a flush, cmd.Reqs holds nothing but that flush. The early
+// completion at issue time cannot fire, because the list is not empty yet, and
+// the copy-return handlers never run, because there is no copy request. The
+// command therefore sat at the head of its queue with IsRunning set, and the
+// simulation ran out of events with the benchmark still waiting on it. Nothing
+// but this path is left to retire it.
+func (m *defaultMemoryCopyMiddleware) settleFlushedCommand(
+	cmd Command,
+	queue *CommandQueue,
+) {
+	if len(cmd.GetReqs()) != 0 {
+		// Copy requests are still outstanding; their returns finish it.
+		return
+	}
+
+	// sbin_codex: a deferred managed D2H becomes readable once every flush
+	// request of its command has returned.
+	if m.pendingD2H != nil && cmd == m.pendingD2H.cmd {
+		m.pendingD2HFlushed = true
+		return
+	}
+
+	if d2h, ok := cmd.(*MemCopyD2HCommand); ok {
+		// The bytes were gathered into RawData at issue time.
+		buf := bytes.NewReader(d2h.RawData)
+		if err := binary.Read(buf, binary.LittleEndian, d2h.Dst); err != nil {
+			panic(err)
+		}
+	}
+
+	queue.IsRunning = false
+	queue.Dequeue()
+	m.driver.logCmdComplete(cmd)
 }
 
 // processDeferredD2H performs the data read of a deferred managed D2H once the
