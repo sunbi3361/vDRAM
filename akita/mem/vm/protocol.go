@@ -7,6 +7,20 @@ import (
 	"github.com/sarchlab/akita/v4/sim"
 )
 
+// TranslationGroupHint carries the LATPC Regularity Detector's triple for
+// one translation of a warp memory instruction (MICRO'25, refs/latpc-plan.md
+// 1.1). A demand translation has StridePages = 0 and Index = 0; a prefetch
+// translation has both non-zero. Translations that share a GroupID belong to
+// the same detected stride group: their VPNs are BaseVPN + StridePages*i,
+// all inside one 512-page region, so their L4 PTEs share one page-table
+// page. A nil hint means "no group information" and preserves pre-LATPC
+// behavior everywhere. // sbin_claude_latpc
+type TranslationGroupHint struct {
+	GroupID     string
+	StridePages int64
+	Index       int
+}
+
 // A TranslationReq asks the receiver component to translate the request.
 type TranslationReq struct {
 	sim.MsgMeta
@@ -18,6 +32,14 @@ type TranslationReq struct {
 	// remotely-accessible pages on write immediately instead of counting the
 	// remote access. // sbin_codex
 	IsWrite bool
+
+	// GroupID, GroupStride, and GroupIndex are the LATPC Regularity
+	// Detector's triple (see TranslationGroupHint). Zero values mean the
+	// request carries no group information (a demand request), which is the
+	// pre-LATPC behavior. // sbin_claude_latpc
+	GroupID     string
+	GroupStride int64
+	GroupIndex  int
 }
 
 // Meta returns the meta data associated with the message.
@@ -52,6 +74,10 @@ type TranslationReqBuilder struct {
 	pid      PID
 	deviceID uint64
 	isWrite  bool // sbin_codex
+	// sbin_claude_latpc: LATPC group triple, zero when absent.
+	groupID     string
+	groupStride int64
+	groupIndex  int
 }
 
 // WithSrc sets the source of the request to build.
@@ -96,6 +122,36 @@ func (b TranslationReqBuilder) WithIsWrite(isWrite bool) TranslationReqBuilder {
 	return b
 }
 
+// WithGroupHint attaches the LATPC group triple from a hint. A nil hint
+// leaves the request without group information. // sbin_claude_latpc
+func (b TranslationReqBuilder) WithGroupHint(
+	hint *TranslationGroupHint,
+) TranslationReqBuilder {
+	if hint == nil {
+		return b
+	}
+
+	b.groupID = hint.GroupID
+	b.groupStride = hint.StridePages
+	b.groupIndex = hint.Index
+
+	return b
+}
+
+// WithGroup sets the LATPC group triple field-by-field, for propagating the
+// triple of an existing TranslationReq downstream. // sbin_claude_latpc
+func (b TranslationReqBuilder) WithGroup(
+	groupID string,
+	stridePages int64,
+	index int,
+) TranslationReqBuilder {
+	b.groupID = groupID
+	b.groupStride = stridePages
+	b.groupIndex = index
+
+	return b
+}
+
 // Build creates a new TranslationReq
 func (b TranslationReqBuilder) Build() *TranslationReq {
 	r := &TranslationReq{}
@@ -106,6 +162,10 @@ func (b TranslationReqBuilder) Build() *TranslationReq {
 	r.PID = b.pid
 	r.DeviceID = b.deviceID
 	r.IsWrite = b.isWrite
+	// sbin_claude_latpc: LATPC group triple, zero when absent.
+	r.GroupID = b.groupID
+	r.GroupStride = b.groupStride
+	r.GroupIndex = b.groupIndex
 	r.TrafficClass = reflect.TypeOf(TranslationReq{}).String()
 
 	return r

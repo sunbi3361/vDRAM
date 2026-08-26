@@ -82,6 +82,10 @@ type Runner struct {
 	// sbin_claude_softwalker: baseline sweep knobs (0 = defaults).
 	GMMUMaxInflight int
 	L2TLBNumMSHR    int
+	// sbin_claude_latpc: LATPC (MICRO'25) configuration. L1TLBMSHREntries
+	// also applies to the r9nano and hpt types (0 keeps the default 64).
+	LATPCL4RowHitLatency int
+	L1TLBMSHREntries     int
 
 	GPUIDs     []int
 	benchmarks []benchmarks.Benchmark
@@ -210,6 +214,7 @@ func (r *Runner) buildTimingPlatform() {
 	}
 
 	b = r.applySoftWalkerConfig(b) // sbin_claude_softwalker
+	b = r.withLATPCConfig(b)       // sbin_claude_latpc
 
 	if *magicMemoryCopy {
 		b = b.WithMagicMemoryCopy()
@@ -241,6 +246,19 @@ func (r *Runner) applySoftWalkerConfig(
 	}
 
 	return b
+}
+
+// withLATPCConfig hands the LATPC knobs to the platform builder - always:
+// L4RowHitLatency only takes effect with -gpu=latpc, while L1TLBMSHREntries
+// also sizes the r9nano and hpt configurations (0 keeps the default).
+// sbin_claude_latpc
+func (r *Runner) withLATPCConfig(
+	b timingconfig.Builder,
+) timingconfig.Builder {
+	return b.WithLATPC(timingconfig.LATPCPlatformConfig{
+		L4RowHitLatency:  r.LATPCL4RowHitLatency,
+		L1TLBMSHREntries: r.L1TLBMSHREntries,
+	})
 }
 
 func (r *Runner) createUnifiedGPUs() {

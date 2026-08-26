@@ -184,6 +184,29 @@ var _ = Describe("TLB", func() {
 			Expect(tlb.mshr.IsEntryPresent(vm.PID(1), uint64(0x100))).
 				To(Equal(true))
 		})
+
+		// sbin_claude_latpc: the LATPC group triple must ride the bottom
+		// request so the L2 TLB and the GMMU can batch same-group walks.
+		It("should propagate the LATPC group triple to the bottom", func() {
+			hintedReq := vm.TranslationReqBuilder{}.
+				WithPID(1).
+				WithVAddr(0x100).
+				WithDeviceID(1).
+				WithGroup("g1", 2, 3).
+				Build()
+
+			bottomPort.EXPECT().Send(gomock.Any()).
+				Do(func(req *vm.TranslationReq) {
+					Expect(req.GroupID).To(Equal("g1"))
+					Expect(req.GroupStride).To(Equal(int64(2)))
+					Expect(req.GroupIndex).To(Equal(3))
+				}).
+				Return(nil)
+
+			madeProgress := tlbMW.lookup(hintedReq, tlb.topChannels[0])
+
+			Expect(madeProgress).To(BeTrue())
+		})
 	})
 
 	Context("parse bottom", func() {

@@ -437,6 +437,27 @@ func (m *tlbMiddleware) handleTranslationHit(
 	return true
 }
 
+// mshrCanAccept reports whether the MSHR can track a new miss for the
+// request. The LATC MSHR accepts a miss that can be compressed into an
+// existing group even when every group entry is taken. // sbin_claude_latpc
+func (m *tlbMiddleware) mshrCanAccept(req *vm.TranslationReq) bool {
+	if latc, ok := m.mshr.(*latcMSHR); ok {
+		return latc.CanAccept(req)
+	}
+
+	return !m.mshr.IsFull()
+}
+
+// mshrAdd tracks a new outstanding miss, compressed when LATC is enabled.
+// sbin_claude_latpc
+func (m *tlbMiddleware) mshrAdd(req *vm.TranslationReq) *mshrEntry {
+	if latc, ok := m.mshr.(*latcMSHR); ok {
+		return latc.AddCompressed(req)
+	}
+
+	return m.mshr.Add(req.PID, req.VAddr)
+}
+
 func (m *tlbMiddleware) handleTranslationMiss(
 	req *vm.TranslationReq,
 ) bool {
@@ -451,13 +472,19 @@ func (m *tlbMiddleware) handleTranslationMiss(
 	inTLB := false
 	var setID, wayID int
 
-	if m.mshr.IsFull() {
-		var ok bool
-		setID, wayID, ok = m.pickInTLBWay(req)
-		if !ok {
+	if !m.mshrCanAccept(req) {
+		if m.mshr.IsFull() && m.inTLBMSHRMax > 0 {
+			var ok bool
+			setID, wayID, ok = m.pickInTLBWay(req)
+			if !ok {
+				m.reservationFailureCount++
+				return false
+			}
+			inTLB = true
+		} else {
+			m.reservationFailureCount++
 			return false
 		}
-		inTLB = true
 	}
 
 	tracing.AddMilestone(
@@ -508,6 +535,32 @@ func (m *tlbMiddleware) pickInTLBWay(
 	}
 
 	return setID, wayID, true
+}
+
+// ReservationFailureCount returns how many lookup attempts were blocked
+// because the MSHR could not accept the miss - one count per blocked attempt,
+// i.e. per stall cycle at the head of a channel. // sbin_claude_latpc
+func (c *Comp) ReservationFailureCount() uint64 {
+	return c.reservationFailureCount
+}
+
+// CompressedMSHREnabled reports whether this TLB uses the LATC compressed
+// MSHR. // sbin_claude_latpc
+func (c *Comp) CompressedMSHREnabled() bool {
+	_, ok := c.mshr.(*latcMSHR)
+	return ok
+}
+
+// LATCStats returns the compressed MSHR's counters: group entries allocated
+// and misses compressed into an existing group. Zeros when LATC is off.
+// sbin_claude_latpc
+func (c *Comp) LATCStats() (groupsAllocated, coalescedSubentries uint64) {
+	latc, ok := c.mshr.(*latcMSHR)
+	if !ok {
+		return 0, 0
+	}
+
+	return latc.groupsAllocated, latc.coalescedSubentries
 }
 
 func (m *tlbMiddleware) vAddrToSetID(vAddr uint64) (setID int) {
@@ -577,6 +630,9 @@ func (m *tlbMiddleware) fetchBottom(
 		WithVAddr(req.VAddr).
 		WithDeviceID(req.DeviceID).
 		WithIsWrite(req.IsWrite). // sbin_codex: propagate write intent to the GMMU.
+		// sbin_claude_latpc: propagate the LATPC group triple so the L2 TLB
+		// and the GMMU can batch same-group walks.
+		WithGroup(req.GroupID, req.GroupStride, req.GroupIndex).
 		Build()
 
 	err := m.bottomPort.Send(fetchBottom)
@@ -602,7 +658,7 @@ func (m *tlbMiddleware) fetchBottom(
 		mshrEntry = m.mshr.AddInTLB(req.PID, req.VAddr, setID, wayID)
 		m.inTLBAllocCount++
 	} else {
-		mshrEntry = m.mshr.Add(req.PID, req.VAddr)
+		mshrEntry = m.mshrAdd(req)
 	}
 	mshrEntry.Requests = append(mshrEntry.Requests, req)
 	mshrEntry.reqToBottom = fetchBottom

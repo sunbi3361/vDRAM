@@ -57,6 +57,8 @@ type Builder struct {
 	softWalkerSettings             SoftWalkerSettings  // sbin_claude_softwalker: software page-walk mode.
 	gmmuMaxInflight                int                 // sbin_claude_softwalker: baseline PTW sweep (0 = default).
 	l2TLBNumMSHR                   int                 // sbin_claude_softwalker: L2 TLB MSHR sweep (0 = default).
+	latpcSettings                  LATPCSettings       // sbin_claude_latpc: RD + LATC + LATP.
+	l1TLBMSHREntries               int                 // sbin_claude_latpc: 0 keeps the 64-entry default.
 
 	gpu                  *sim.Domain
 	cp                   *cp.CommandProcessor
@@ -356,6 +358,35 @@ func (b Builder) WithL2TLBNumMSHR(n int) Builder {
 	return b
 }
 
+// LATPCSettings selects the LATPC translation path (MICRO'25,
+// refs/latpc-plan.md): the Regularity Detector on every CU's coalescer, the
+// LATC compressed MSHR on every L1V TLB, and LATP batched walks in the GMMU.
+// Like HPT it needs no extra component and no rewiring - the translation
+// topology stays the baseline. Non-UVM only. // sbin_claude_latpc
+type LATPCSettings struct {
+	// Enabled turns all three LATPC mechanisms on.
+	Enabled bool
+	// L4RowHitLatency is the cycles one batched member's L4 PTE load costs
+	// (a DRAM row-buffer hit). The GMMU default is 20.
+	L4RowHitLatency int
+}
+
+// WithLATPCSettings selects the LATPC translation path for this GPU.
+// sbin_claude_latpc
+func (b Builder) WithLATPCSettings(settings LATPCSettings) Builder {
+	b.latpcSettings = settings
+	return b
+}
+
+// WithL1TLBMSHREntries overrides the per-CU L1V TLB MSHR entry count
+// (default 64) for any configuration, so the paper's 8-entry contention
+// regime is measurable on the baseline and LATPC symmetrically.
+// sbin_claude_latpc
+func (b Builder) WithL1TLBMSHREntries(n int) Builder {
+	b.l1TLBMSHREntries = n
+	return b
+}
+
 // Build builds the hardware platform.
 func (b Builder) Build(name string) *sim.Domain {
 	b.validateTopologyPair() // sbin_codex: reject invalid composition before domain or mapper construction.
@@ -652,6 +683,16 @@ func (b *Builder) buildSAs() {
 		// WithRemoteMemoryProviderMapper(b.remoteMemoryProvider). // sbin_codex: topology config owns data-path policy.
 		WithPageTable(b.pageTable).      // sbin_codex: pass page table for ideal-L1-TLB factory (todo 5).
 		WithL1TLBFactory(b.l1tlbFactory) // sbin_codex: pass ideal-L1-TLB factory hook (todo 5).
+
+	// sbin_claude_latpc: LATPC's per-SA pieces (RD on the CU coalescers,
+	// LATC on the L1V TLBs) and the L1 TLB MSHR sizing knob.
+	if b.latpcSettings.Enabled {
+		saBuilder = saBuilder.WithLATPC(true)
+	}
+	if b.l1TLBMSHREntries > 0 {
+		saBuilder = saBuilder.WithL1TLBMSHRSize(b.l1TLBMSHREntries)
+	}
+
 	saBuilder = b.dataPathTopology.configureShaderArray(b, saBuilder) // sbin_codex
 
 	// if b.enableISADebugging {
@@ -904,6 +945,14 @@ func (b *Builder) buildGMMU() {
 	// Figure 5 replication). 0 keeps the GMMU builder default.
 	if b.gmmuMaxInflight > 0 {
 		gmmuBuilder = gmmuBuilder.WithMaxNumReqInFlight(b.gmmuMaxInflight)
+	}
+	// sbin_claude_latpc: LATP batches same-group walks in the GMMU.
+	if b.latpcSettings.Enabled {
+		gmmuBuilder = gmmuBuilder.WithLATPBatching(true)
+		if b.latpcSettings.L4RowHitLatency > 0 {
+			gmmuBuilder = gmmuBuilder.
+				WithLATPL4RowHitLatency(b.latpcSettings.L4RowHitLatency)
+		}
 	}
 
 	if b.uvmServiceProvider != "" { // sbin_codex

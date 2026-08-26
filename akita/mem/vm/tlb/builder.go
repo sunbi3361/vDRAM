@@ -27,6 +27,7 @@ type Builder struct {
 	remotePorts            []sim.RemotePort
 	pageAdmissionPredicate func(vm.Page) bool // sbin_codex
 	inTLBMSHRMax           int                // sbin_claude_softwalker
+	compressedMSHR         bool               // sbin_claude_latpc
 }
 
 // MakeBuilder returns a Builder
@@ -167,6 +168,15 @@ func (b Builder) WithInTLBMSHR(maxEntries int) Builder {
 	return b
 }
 
+// WithCompressedMSHR selects LATPC's LATC compressed MSHR (MICRO'25 §5.3):
+// one MSHR entry tracks up to 32 outstanding misses of one
+// Regularity-Detector group. The entry count set by WithNumMSHREntry then
+// counts group entries. Off by default. // sbin_claude_latpc
+func (b Builder) WithCompressedMSHR(enabled bool) Builder {
+	b.compressedMSHR = enabled
+	return b
+}
+
 // WithLatency sets the latency of the TLB lookup. The latency is counted in
 // both hit and miss cases.
 func (b Builder) WithLatency(cycles int) Builder {
@@ -222,7 +232,12 @@ func (b Builder) Build(name string) *Comp {
 	tlb.numReqPerCycle = b.numReqPerCycle
 	tlb.pageSize = b.pageSize
 	tlb.addressMapper = b.addressMapper
-	tlb.mshr = newMSHR(b.numMSHREntry)
+	// tlb.mshr = newMSHR(b.numMSHREntry) // sbin_claude_latpc: pre-edit unconditional classic MSHR.
+	if b.compressedMSHR { // sbin_claude_latpc
+		tlb.mshr = newLATCMSHR(b.numMSHREntry, b.pageSize)
+	} else {
+		tlb.mshr = newMSHR(b.numMSHREntry)
+	}
 	// tlb.state = b.state // sbin_codex: pre-edit assignment.
 	tlb.state = b.state
 	tlb.pageAdmissionPredicate = b.pageAdmissionPredicate // sbin_codex

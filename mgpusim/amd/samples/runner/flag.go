@@ -47,7 +47,17 @@ var archFlag = flag.String("arch", "gcn3", "GPU architecture: gcn3 or cdna3.")
 //		"virtual-caching, utopia, avatar, or hpt.") // sbin_claude_hpt
 var gpuTypeFlag = flag.String("gpu", "r9nano",
 	"GPU model for timing simulation: r9nano, mi300a, ideal-l1tlb, "+
-		"virtual-caching, utopia, avatar, hpt, or softwalker.") // sbin_claude_softwalker
+		"virtual-caching, utopia, avatar, hpt, softwalker, or latpc.") // sbin_claude_latpc
+
+// sbin_claude_latpc: LATPC (MICRO'25) flags. LATPC = Regularity Detector +
+// LATC compressed L1 TLB MSHR + LATP batched page walks; non-UVM only.
+var latpcL4RowHitLatencyFlag = flag.Int("latpc-l4-row-hit-latency", 20,
+	"Cycles one LATP batch member's L4 PTE load costs in the GMMU (a DRAM "+
+		"row-buffer hit). Only meaningful with -gpu=latpc.")
+var l1TLBMSHRFlag = flag.Int("l1tlb-mshr", 0,
+	"Per-CU L1V TLB MSHR entry count; 0 keeps the configuration default "+
+		"(64). Honored by the r9nano, hpt, and latpc GPU types, so the "+
+		"paper's 8-entry contention regime can be measured symmetrically.")
 
 // sbin_claude_hpt: FS-HPT (PACT'24) hashed-page-table flags. The cost of one
 // memory reference is the GMMU's existing per-level page-walking latency, so
@@ -128,8 +138,10 @@ var utopiaRestSegAssocFlag = flag.Int("utopia-restseg-assoc", 16,
 // spatial locality. 1 = the paper's per-page indexing.
 // Pre-edit code (commented per project convention):
 // var utopiaRestSegBlockFlag = flag.Int("utopia-restseg-block", 1,
-// 	"Consecutive pages that index into one RestSeg set (1 = per-page "+
-// 		"indexing per the paper; must not exceed -utopia-restseg-assoc).")
+//
+//	"Consecutive pages that index into one RestSeg set (1 = per-page "+
+//		"indexing per the paper; must not exceed -utopia-restseg-assoc).")
+//
 // sbin_claude_utopia: default 16 (user decision 2026-08-26) — one whole set
 // per block restores TAR-line spatial locality for sequential walks; pass 1
 // to reproduce the paper's per-page indexing.
@@ -137,6 +149,7 @@ var utopiaRestSegBlockFlag = flag.Int("utopia-restseg-block", 16,
 	"Consecutive pages that index into one RestSeg set (default 16 = one "+
 		"whole set per block; 1 = per-page indexing per the paper; must "+
 		"not exceed -utopia-restseg-assoc).")
+
 // Pre-edit code (commented per project convention):
 // var utopiaTARCacheBytesFlag = flag.Uint64("utopia-tar-cache-bytes", 2048,
 //
@@ -289,6 +302,7 @@ func metricFileNameFlagIsSet() bool {
 func (r *Runner) parseFlag() *Runner {
 	r.parseSimulationFlags()
 	r.parseSoftWalkerFlags() // sbin_claude_softwalker
+	r.parseLATPCFlags()      // sbin_claude_latpc
 	r.parseGPUFlag()
 
 	// sbin_claude_utopia: needs r.GPUType and r.GPUIDs, so it runs after both
@@ -297,6 +311,7 @@ func (r *Runner) parseFlag() *Runner {
 	r.validateAvatarFlags()     // sbin_claude_avatar
 	r.validateHPTFlags()        // sbin_claude_hpt
 	r.validateSoftWalkerFlags() // sbin_claude_softwalker
+	r.validateLATPCFlags()      // sbin_claude_latpc
 
 	return r
 }
@@ -375,6 +390,12 @@ func (r *Runner) parseSoftWalkerFlags() {
 	r.L2TLBNumMSHR = *l2TLBMSHRFlag
 }
 
+// parseLATPCFlags applies the LATPC flags to the runner. // sbin_claude_latpc
+func (r *Runner) parseLATPCFlags() {
+	r.LATPCL4RowHitLatency = *latpcL4RowHitLatencyFlag
+	r.L1TLBMSHREntries = *l1TLBMSHRFlag
+}
+
 // validateAvatarFlags rejects invalid Avatar flag combinations (v1 scope).
 // sbin_claude_avatar
 func (r *Runner) validateAvatarFlags() {
@@ -447,6 +468,31 @@ func (r *Runner) validateSoftWalkerFlags() {
 	}
 	if r.SWInTLBMSHRMax < 0 {
 		log.Panic("-sw-in-tlb-mshr-max must not be negative")
+	}
+}
+
+// validateLATPCFlags rejects invalid LATPC flag combinations. The single-GPU
+// cap is a scope choice; the -uvm rejection is a hard constraint: the GMMU's
+// batch drain answers members straight from the page table and would bypass
+// the managed-page fault gating (refs/latpc-plan.md 1.4). // sbin_claude_latpc
+func (r *Runner) validateLATPCFlags() {
+	if r.L1TLBMSHREntries < 0 {
+		log.Panic("-l1tlb-mshr must not be negative")
+	}
+	if r.GPUType != "latpc" {
+		return
+	}
+	if !r.Timing {
+		log.Panic("-gpu=latpc requires -timing")
+	}
+	if r.UVM {
+		log.Panic("-gpu=latpc does not support -uvm (non-UVM only)")
+	}
+	if len(r.GPUIDs) > 1 {
+		log.Panic("-gpu=latpc currently supports a single GPU")
+	}
+	if r.LATPCL4RowHitLatency < 1 {
+		log.Panic("-latpc-l4-row-hit-latency must be at least 1")
 	}
 }
 

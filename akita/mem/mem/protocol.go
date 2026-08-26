@@ -47,6 +47,10 @@ type ReadReq struct {
 	// Info interface{} // sbin_codex: pre-edit field retained for compatibility below.
 	Info             interface{}
 	RemoteDemandInfo *RemoteDemandInfo // sbin_codex: nil for ordinary memory requests.
+	// TranslationHint is the LATPC Regularity Detector's group triple for
+	// the translation this access needs; nil for every non-LATPC producer.
+	// sbin_claude_latpc
+	TranslationHint *vm.TranslationGroupHint
 }
 
 // Meta returns the message meta.
@@ -97,7 +101,8 @@ type ReadReqBuilder struct {
 	canWaitForCoalesce bool
 	// info interface{} // sbin_codex: pre-edit builder field retained below.
 	info             interface{}
-	remoteDemandInfo *RemoteDemandInfo // sbin_codex
+	remoteDemandInfo *RemoteDemandInfo        // sbin_codex
+	translationHint  *vm.TranslationGroupHint // sbin_claude_latpc
 }
 
 // WithSrc sets the source of the request to build.
@@ -127,6 +132,15 @@ func (b ReadReqBuilder) WithInfo(info interface{}) ReadReqBuilder {
 // WithRemoteDemandInfo attaches typed UVM remote-demand metadata. // sbin_codex
 func (b ReadReqBuilder) WithRemoteDemandInfo(info RemoteDemandInfo) ReadReqBuilder {
 	b.remoteDemandInfo = &info
+	return b
+}
+
+// WithTranslationHint attaches the LATPC group triple; nil is a no-op.
+// sbin_claude_latpc
+func (b ReadReqBuilder) WithTranslationHint(
+	hint *vm.TranslationGroupHint,
+) ReadReqBuilder {
+	b.translationHint = hint
 	return b
 }
 
@@ -160,6 +174,7 @@ func (b ReadReqBuilder) Build() *ReadReq {
 	// r.Info = b.info // sbin_codex: pre-edit assignment.
 	r.Info = b.info
 	r.RemoteDemandInfo = b.remoteDemandInfo // sbin_codex
+	r.TranslationHint = b.translationHint   // sbin_claude_latpc
 	r.AccessByteSize = b.byteSize
 	r.CanWaitForCoalesce = b.canWaitForCoalesce
 	r.TrafficClass = reflect.TypeOf(ReadReq{}).String()
@@ -179,6 +194,10 @@ type WriteReq struct {
 	// Info interface{} // sbin_codex: pre-edit field retained for compatibility below.
 	Info             interface{}
 	RemoteDemandInfo *RemoteDemandInfo // sbin_codex: nil for ordinary memory requests.
+	// TranslationHint is the LATPC Regularity Detector's group triple for
+	// the translation this access needs; nil for every non-LATPC producer.
+	// sbin_claude_latpc
+	TranslationHint *vm.TranslationGroupHint
 }
 
 // Meta returns the meta data attached to a request.
@@ -226,7 +245,8 @@ type WriteReqBuilder struct {
 	pid      vm.PID
 	// info interface{} // sbin_codex: pre-edit builder field retained below.
 	info               interface{}
-	remoteDemandInfo   *RemoteDemandInfo // sbin_codex
+	remoteDemandInfo   *RemoteDemandInfo        // sbin_codex
+	translationHint    *vm.TranslationGroupHint // sbin_claude_latpc
 	address            uint64
 	data               []byte
 	dirtyMask          []bool
@@ -260,6 +280,15 @@ func (b WriteReqBuilder) WithInfo(info interface{}) WriteReqBuilder {
 // WithRemoteDemandInfo attaches typed UVM remote-demand metadata. // sbin_codex
 func (b WriteReqBuilder) WithRemoteDemandInfo(info RemoteDemandInfo) WriteReqBuilder {
 	b.remoteDemandInfo = &info
+	return b
+}
+
+// WithTranslationHint attaches the LATPC group triple; nil is a no-op.
+// sbin_claude_latpc
+func (b WriteReqBuilder) WithTranslationHint(
+	hint *vm.TranslationGroupHint,
+) WriteReqBuilder {
+	b.translationHint = hint
 	return b
 }
 
@@ -297,6 +326,7 @@ func (b WriteReqBuilder) Build() *WriteReq {
 	// r.Info = b.info // sbin_codex: pre-edit assignment.
 	r.Info = b.info
 	r.RemoteDemandInfo = b.remoteDemandInfo // sbin_codex
+	r.TranslationHint = b.translationHint   // sbin_claude_latpc
 	r.Address = b.address
 	r.Data = b.data
 	r.TrafficBytes = len(r.Data) + accessReqByteOverhead

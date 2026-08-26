@@ -8,7 +8,7 @@ import (
 
 	"github.com/sarchlab/akita/v4/datarecording"
 	"github.com/sarchlab/akita/v4/mem/vm/gmmu" // sbin_claude_hpt
-	"github.com/sarchlab/akita/v4/mem/vm/tlb"  // sbin_claude_softwalker
+	"github.com/sarchlab/akita/v4/mem/vm/tlb"
 	"github.com/sarchlab/akita/v4/sim"
 	"github.com/sarchlab/akita/v4/simulation"
 	"github.com/sarchlab/akita/v4/tracing"
@@ -128,6 +128,14 @@ type reporter struct {
 	// fbtUnits are the per-GPU Forward-Backward Tables. They own the count of
 	// page walks the virtual cache hierarchy avoided. // sbin_claude_fbt
 	fbtUnits []*fbt.Comp
+
+	// l1vTLBs are every GPU's per-CU L1V TLBs, keyed by GPU index. They own
+	// the MSHR reservation-failure counter (all configurations) and the LATC
+	// compression counters (-gpu=latpc). // sbin_claude_latpc
+	l1vTLBs map[int][]*tlb.Comp
+	// latpGMMUs are the per-GPU walkers with LATP batching enabled. They own
+	// the batched-walk counters. // sbin_claude_latpc
+	latpGMMUs []*gmmu.Comp
 }
 
 func newReporter(s *simulation.Simulation) *reporter {
@@ -144,12 +152,13 @@ func newReporter(s *simulation.Simulation) *reporter {
 		r.driver = c.(*driver.Driver)
 	}
 
-	r.collectAccessCounters(s)  // sbin_codex
-	r.collectUtopiaUnits(s)     // sbin_claude_utopia
-	r.collectAvatarUnits(s)     // sbin_claude_avatar
-	r.collectHPTGMMUs(s)        // sbin_claude_hpt
-	r.collectSoftWalkerUnits(s) // sbin_claude_softwalker
-	r.collectFBTUnits(s)        // sbin_claude_fbt
+	r.collectAccessCounters(s) // sbin_codex
+	r.collectUtopiaUnits(s)    // sbin_claude_utopia
+	r.collectAvatarUnits(s)    // sbin_claude_avatar
+	r.collectHPTGMMUs(s)       // sbin_claude_hpt
+	r.collectFBTUnits(s)       // sbin_claude_fbt
+	r.collectL1VTLBs(s)        // sbin_claude_latpc
+	r.collectLATPGMMUs(s)      // sbin_claude_latpc
 
 	return r
 }
@@ -190,6 +199,74 @@ func (r *reporter) collectSoftWalkerUnits(s *simulation.Simulation) {
 		}
 
 		r.swL2TLBs = append(r.swL2TLBs, l2TLB)
+	}
+}
+
+// collectL1VTLBs finds every per-CU L1V TLB of every GPU. A missing name
+// makes GetComponentByName fall back to component index 0, so every hit is
+// verified by name, like collectHPTGMMUs. The ideal-l1tlb configuration
+// injects a different component type there, so a non-*tlb.Comp hit ends the
+// collection entirely. // sbin_claude_latpc
+func (r *reporter) collectL1VTLBs(s *simulation.Simulation) {
+	r.l1vTLBs = make(map[int][]*tlb.Comp)
+
+	for gpu := 1; ; gpu++ {
+		found := false
+
+		for sa := 0; ; sa++ {
+			saDone := false
+
+			for cuID := 0; ; cuID++ {
+				name := fmt.Sprintf(
+					"GPU[%d].SA[%d].L1VTLB[%d]", gpu, sa, cuID)
+
+				c := s.GetComponentByName(name)
+				if c == nil || c.Name() != name {
+					saDone = cuID == 0
+					break
+				}
+
+				comp, ok := c.(*tlb.Comp)
+				if !ok {
+					return
+				}
+
+				r.l1vTLBs[gpu] = append(r.l1vTLBs[gpu], comp)
+				found = true
+			}
+
+			if saDone {
+				break
+			}
+		}
+
+		if !found {
+			return
+		}
+	}
+}
+
+// collectLATPGMMUs finds every GPU-side walker with LATP batching enabled,
+// so the latp_* metrics appear only in an -gpu=latpc run. // sbin_claude_latpc
+func (r *reporter) collectLATPGMMUs(s *simulation.Simulation) {
+	for i := 1; ; i++ {
+		name := fmt.Sprintf("GPU[%d].GMMU", i)
+
+		c := s.GetComponentByName(name)
+		if c == nil {
+			return
+		}
+
+		walker, ok := c.(*gmmu.Comp)
+		if !ok || walker.Name() != name {
+			return
+		}
+
+		if !walker.LATPBatchingEnabled() {
+			return
+		}
+
+		r.latpGMMUs = append(r.latpGMMUs, walker)
 	}
 }
 
@@ -612,6 +689,7 @@ func (r *reporter) report() {
 	r.reportAvatar()     // sbin_claude_avatar: speculation statistics.
 	r.reportHPT()        // sbin_claude_hpt: hashed-walk statistics.
 	r.reportSoftWalker() // sbin_claude_softwalker: software-walk statistics.
+	r.reportLATPC()      // sbin_claude_latpc: MSHR and batched-walk statistics.
 }
 
 // reportSoftWalker emits the software-walk counters of every GMMU in
@@ -655,6 +733,84 @@ func (r *reporter) reportSoftWalker() {
 			{"in_tlb_mshr_refuse_set_count", float64(stats.RefuseSetFull)},
 		}
 
+		for _, row := range rows {
+			r.dataRecorder.InsertData(tableName, metric{
+				Location: location,
+				What:     row.what,
+				Value:    row.val,
+				Unit:     "",
+			})
+		}
+	}
+}
+
+// reportLATPC emits, per GPU: the L1V TLB MSHR reservation-failure count
+// (every configuration - the paper's Figure-18b metric), the LATC
+// compression counters (when the compressed MSHR is built), and the LATP
+// batched-walk counters (when batching is enabled).
+// refs/latpc-plan.md 2.7. // sbin_claude_latpc
+func (r *reporter) reportLATPC() {
+	r.reportLATC()
+	r.reportLATP()
+}
+
+// reportLATC emits the per-GPU L1V TLB MSHR counters. // sbin_claude_latpc
+func (r *reporter) reportLATC() {
+	for gpu, tlbs := range r.l1vTLBs {
+		var failures, groups, coalesced uint64
+		compressed := false
+
+		for _, comp := range tlbs {
+			failures += comp.ReservationFailureCount()
+			g, c := comp.LATCStats()
+			groups += g
+			coalesced += c
+			compressed = compressed || comp.CompressedMSHREnabled()
+		}
+
+		location := fmt.Sprintf("GPU[%d]", gpu)
+		r.dataRecorder.InsertData(tableName, metric{
+			Location: location,
+			What:     "l1vtlb_mshr_reservation_failure_count",
+			Value:    float64(failures),
+			Unit:     "",
+		})
+
+		if !compressed {
+			continue
+		}
+
+		rows := []struct {
+			what string
+			val  float64
+		}{
+			{"latc_mshr_group_count", float64(groups)},
+			{"latc_mshr_coalesced_miss_count", float64(coalesced)},
+		}
+		for _, row := range rows {
+			r.dataRecorder.InsertData(tableName, metric{
+				Location: location,
+				What:     row.what,
+				Value:    row.val,
+				Unit:     "",
+			})
+		}
+	}
+}
+
+// reportLATP emits the per-GMMU batched-walk counters. // sbin_claude_latpc
+func (r *reporter) reportLATP() {
+	for i, walker := range r.latpGMMUs {
+		stats := walker.LATPStats()
+		location := fmt.Sprintf("GPU[%d].GMMU", i+1)
+
+		rows := []struct {
+			what string
+			val  float64
+		}{
+			{"latp_batch_count", float64(stats.Batches)},
+			{"latp_batched_member_count", float64(stats.BatchedMembers)},
+		}
 		for _, row := range rows {
 			r.dataRecorder.InsertData(tableName, metric{
 				Location: location,

@@ -38,6 +38,11 @@ type Builder struct {
 	// sbin_claude_softwalker: SoftWalker (MICRO'25) software walk mode.
 	swEnabled bool
 	swConfig  SoftwareWalkConfig
+	// sbin_claude_latpc: LATP batched page walks (MICRO'25 §5.4). Members
+	// of an in-flight walk's group share its walker slot and are answered
+	// at the L4 row-buffer-hit latency each after the lead completes.
+	latpEnabled         bool
+	latpL4RowHitLatency int
 }
 
 // MakeBuilder creates a new builder
@@ -48,6 +53,9 @@ func MakeBuilder() Builder {
 		maxNumReqInFlight:  16,
 		pageWalkingLatency: 100, // sbin_codex: latency of each uncached page-table level.
 		hptAccessesPerWalk: 1,   // sbin_claude_hpt: ideal HPT resolves in one access.
+		// sbin_claude_latpc: a row-buffer hit is a CAS-only access, ~1/5 of
+		// the 100-cycle modeled memory reference (refs/latpc-plan.md 1.4).
+		latpL4RowHitLatency: 20,
 	}
 }
 
@@ -149,6 +157,24 @@ func (b Builder) WithSoftwareWalk(cfg SoftwareWalkConfig) Builder {
 	return b
 }
 
+// WithLATPBatching selects LATP batched page walks (MICRO'25 §5.4): a
+// translation request whose GroupID matches an in-flight walk attaches to it
+// as a member instead of taking a walker slot; the L1-L3 traversal and the
+// page-walk cache are shared, and each member costs one L4 row-buffer hit
+// after the lead completes. Non-UVM only. Off by default. // sbin_claude_latpc
+func (b Builder) WithLATPBatching(enabled bool) Builder {
+	b.latpEnabled = enabled
+	return b
+}
+
+// WithLATPL4RowHitLatency sets the cycles one batch member's L4 PTE load
+// costs (a DRAM row-buffer hit). Only meaningful with WithLATPBatching(true).
+// sbin_claude_latpc
+func (b Builder) WithLATPL4RowHitLatency(cycles int) Builder {
+	b.latpL4RowHitLatency = cycles
+	return b
+}
+
 // func (b Builder) WithAccessCounterThreshold(thresh uint64) Builder { // sbin_codex
 // 	b.accessCounterThresh = thresh
 // 	return b
@@ -166,6 +192,10 @@ func (b Builder) Build(name string) *Comp {
 	}
 
 	b.validateSoftwareWalk() // sbin_claude_softwalker
+	// sbin_claude_latpc: a member's L4 access must cost at least one cycle.
+	if b.latpEnabled && b.latpL4RowHitLatency < 1 {
+		panic("GMMU LATP L4 row-hit latency must be at least 1")
+	}
 
 	gmmu := new(Comp)
 	gmmu.TickingComponent = *sim.NewTickingComponent(
@@ -229,6 +259,8 @@ func (b Builder) configureInternalStates(c *Comp) {
 	if b.swEnabled {                            // sbin_claude_softwalker
 		c.swCoreInFlight = make([]int, b.swConfig.NumCores)
 	}
+	c.latpEnabled = b.latpEnabled                 // sbin_claude_latpc
+	c.latpL4RowHitLatency = b.latpL4RowHitLatency // sbin_claude_latpc
 	c.canceledReqs = make(map[string]struct{})    // sbin_claude_avatar
 	c.addressToPortMapper = b.addressToPortMapper // sbin_gmmu
 	c.UVMServiceProvider = b.uvmServiceProvider   // sbin_codex

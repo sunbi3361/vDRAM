@@ -134,6 +134,37 @@ var _ = Describe("Address Translator", func() {
 				To(BeEquivalentTo(transReqReturn))
 		})
 
+		// sbin_claude_latpc: the LATPC group hint on the access request must
+		// appear on the TranslationReq the AT builds.
+		It("should carry the LATPC group hint onto the translation request",
+			func() {
+				var transReqReturn *vm.TranslationReq
+
+				req.TranslationHint = &vm.TranslationGroupHint{
+					GroupID:     "g1",
+					StridePages: -3,
+					Index:       2,
+				}
+
+				translationPortMapper.EXPECT().
+					Find(uint64(0x100)).
+					Return(translationPort.AsRemote())
+				topPort.EXPECT().PeekIncoming().Return(req)
+				topPort.EXPECT().RetrieveIncoming()
+				translationPort.EXPECT().Send(gomock.Any()).
+					DoAndReturn(func(r *vm.TranslationReq) *sim.SendError {
+						transReqReturn = r
+						return nil
+					})
+
+				needTick := tMiddleware.translate()
+
+				Expect(needTick).To(BeTrue())
+				Expect(transReqReturn.GroupID).To(Equal("g1"))
+				Expect(transReqReturn.GroupStride).To(Equal(int64(-3)))
+				Expect(transReqReturn.GroupIndex).To(Equal(2))
+			})
+
 		It("forwards PID zero physical instruction traffic when configured", func() {
 			physicalReq := mem.ReadReqBuilder{}.
 				WithAddress(0x100005040).
