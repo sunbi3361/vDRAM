@@ -36,6 +36,11 @@ configs = [
     # avatar_compress_ratios in 3_gen_runners.py.
     # 'avatar-cr-50',
     # 'avatar-cr-100',
+    'hpt',  # sbin_claude_hpt
+    # sbin_claude_hpt: access-count sweep configs, matching
+    # hpt_accesses_per_walk in 3_gen_runners.py.
+    # 'hpt-acc-2',
+    # 'hpt-acc-5',
     ]
 
 benchmarks=[
@@ -111,6 +116,11 @@ AVATAR_WHATS = (
     "avatar_stale_validation_rsp_count",
     "avatar_frame_install_count", "avatar_frame_invalidate_count",
     "avatar_region_bound_count", "avatar_region_free_count",
+)
+# sbin_claude_hpt: hashed-page-table walk counters emitted per GMMU by the
+# runner's reportHPT (report.go). Present only in -gpu=hpt runs.
+HPT_WHATS = (
+    "hpt_walk_count", "hpt_memory_access_count",
 )
 
 TIMESTAMP_RE = re.compile(r"^\d{6}_\d{4}$")
@@ -201,6 +211,10 @@ def extract_metrics(sqlite_path):
         elif what in AVATAR_WHATS and loc.endswith(".ASU"):
             out.setdefault(what, 0.0)
             out[what] += float(value)
+        # sbin_claude_hpt: sum hashed-walk counters over every GMMU.
+        elif what in HPT_WHATS and loc.endswith(".GMMU"):
+            out.setdefault(what, 0.0)
+            out[what] += float(value)
     return out
 
 
@@ -240,6 +254,8 @@ def main():
         *UTOPIA_WHATS,
         # sbin_claude_avatar: speculation/CAVA/EAF summary columns.
         *AVATAR_WHATS,
+        # sbin_claude_hpt: hashed-page-table walk summary columns.
+        *HPT_WHATS,
         "error",
     ]
 

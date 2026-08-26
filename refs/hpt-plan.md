@@ -120,8 +120,9 @@ That is the clean scientific control.
 `-hpt-accesses-per-walk` (default 1) is therefore the single knob:
 
 - `=1` — ideal HPT, the configuration being measured.
-- `=5` — a sanity check: should land close to baseline kernel time, since 5
-  accesses is a full radix walk minus the PWC's help.
+- `=5` — a sanity check: a full radix walk's worth of accesses, minus the
+  PWC's help. Measured 40% *slower* than baseline, which is the right answer
+  and isolates the PWC's contribution (section 6).
 - `>1` in general — the extension point for collision chains (1.7).
 
 ### 1.4 The page-walk cache is not built in HPT mode
@@ -330,8 +331,56 @@ in `memorycopy.go`, `go.mod` gomoddirectives, `l2_shootdown_test.go`,
 
 | phase | content | status |
 |---|---|---|
-| P1 | `akita/mem/vm/gmmu` HPT walk mode + unit tests | todo |
-| P2 | `r9nano` HPTSettings + `timingconfig` `case "hpt"` + topology test | todo |
-| P3 | flags, runner wiring, report metrics | todo |
-| P4 | scripts 2/3/4/5/6, end-to-end verify + UVM smoke + sanity comparison | todo |
+| P1 | `akita/mem/vm/gmmu` HPT walk mode + unit tests | **done** |
+| P2 | `r9nano` HPTSettings + `timingconfig` `case "hpt"` + topology test | **done** |
+| P3 | flags, runner wiring, report metrics | **done** |
+| P4 | scripts 2/3/4/5/6, end-to-end verify + sanity comparison | **done** |
+| P4b | `-gpu=hpt -uvm` smoke test (1.6) | not run yet |
 | P5 (optional, beyond ideal) | `-hpt-collision-rate`, victim buffer, step table, real PTE memory traffic | not planned |
+
+## 6. Measured results (2026-08-26)
+
+`matrixtranspose -timing -parallel -arch=gcn3 -report-all -verify -width=256`,
+all three runs verified:
+
+| config | kernel_time | hpt_walk_count | hpt_memory_access_count |
+|---|---|---|---|
+| `-gpu=r9nano` (radix + PWC) | 8.707e-06 | - | - |
+| `-gpu=hpt` (ideal, 1 access) | **8.465e-06** (-2.8%) | 131 | 131 |
+| `-gpu=hpt -hpt-accesses-per-walk=5` | 1.2204e-05 (+40%) | 131 | 655 |
+
+Two things to read from this:
+
+- The 1:1 walk-to-access ratio confirms the ideal-HPT assumption is what the
+  model actually charges.
+- **The `=5` sanity run came out 40% slower than baseline, not "close to
+  baseline" as section 3 predicted.** That is correct behavior, and it
+  isolates a number worth having: 5 hashed accesses *without* a page-walk
+  cache cost markedly more than 5 radix levels *with* one, so the gap is the
+  page-walk cache's contribution on this benchmark. It also means the ideal
+  HPT's modest 2.8% win is a net of two opposing effects (4 fewer accesses,
+  minus the lost PWC), not a pure 5x walk-latency reduction.
+
+The 2.8% figure is small because matrixtranspose at width=256 issues only 131
+walks; the TLB absorbs nearly everything. Benchmarks with real L2-TLB miss
+pressure are where this configuration should be read.
+
+## 7. Regression evidence
+
+Because the change edits a shared akita component, the untouched
+configurations were re-verified after it:
+
+- `-gpu=r9nano -verify` passed; `-gpu=virtual-caching -verify` passed.
+- `akita`: `go test ./mem/vm/...` all pass, including the pre-existing radix
+  page-walk tests.
+- `mgpusim`: Timing Config 22/22, R9 Nano 11/11, Shader Array 2/2 specs pass.
+- `golangci-lint run ./amd/samples/runner/...` reports only the three
+  pre-existing issues (gomoddirectives, and two `lll` hits in
+  `l2_shootdown_test.go` / `topology_validation.go`).
+- Pre-existing and unrelated: `akita/mem/idealmemcontroller` fails to build
+  its tests (checked-in test file references mockgen output that is not in
+  the tree); that package is untouched and clean in git.
+- `gofmt -l` flags `gmmuMiddleware.go` and `flag.go`, but both are already
+  unformatted at HEAD: gofmt wants to re-indent the project's "Pre-edit code
+  (commented per convention)" blocks. The new code follows the same
+  convention and adds no new formatting deviation.

@@ -68,6 +68,9 @@ type Runner struct {
 	AvatarConfidenceThreshold int
 	AvatarFrag                bool
 
+	// sbin_claude_hpt: FS-HPT hashed-page-table configuration.
+	HPTAccessesPerWalk int
+
 	GPUIDs     []int
 	benchmarks []benchmarks.Benchmark
 
@@ -179,6 +182,14 @@ func (r *Runner) buildTimingPlatform() {
 			ModEntries:          r.AvatarModEntries,
 			ConfidenceThreshold: r.AvatarConfidenceThreshold,
 			FragDisabled:        !r.AvatarFrag,
+		})
+	}
+
+	// sbin_claude_hpt: hand the HPT knob to the platform builder. It only
+	// takes effect with -gpu=hpt.
+	if r.GPUType == "hpt" {
+		b = b.WithHPT(timingconfig.HPTPlatformConfig{
+			AccessesPerWalk: r.HPTAccessesPerWalk,
 		})
 	}
 

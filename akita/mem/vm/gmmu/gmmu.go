@@ -115,6 +115,15 @@ type Comp struct {
 	maxRequestsInFlight int
 	log2PageSize        uint64
 
+	// sbin_claude_hpt: FS-HPT (PACT'24) walk mode. hash(VPN) indexes a
+	// fixed-size hashed table directly, so a walk costs hptAccessesPerWalk
+	// memory references (1 when there is no hash collision) instead of one
+	// per radix level, and no page-walk cache exists.
+	hptEnabled         bool
+	hptAccessesPerWalk int
+	hptWalks           uint64
+	hptMemoryAccesses  uint64
+
 	walkingTranslations []transaction
 }
 
@@ -125,6 +134,37 @@ func (c *Comp) Tick() bool {
 // sbin_mcm
 func (c *Comp) SetCommandProcessor(cp sim.Port) {
 	c.commandProcessor = cp
+}
+
+// HPTStats reports the hashed-page-table walk counters. // sbin_claude_hpt
+type HPTStats struct {
+	// Walks is the number of page walks served by the hashed table.
+	Walks uint64
+	// MemoryAccesses is the number of modeled memory references those walks
+	// cost (Walks x accesses-per-walk).
+	MemoryAccesses uint64
+}
+
+// HashedPageTableEnabled reports whether this GMMU walks a hashed page table
+// instead of the radix page table. // sbin_claude_hpt
+func (c *Comp) HashedPageTableEnabled() bool {
+	return c.hptEnabled
+}
+
+// HasPageWalkCache reports whether this GMMU owns a page-walk cache. HPT mode
+// builds none: a hashed page table has no intermediate levels to cache.
+// sbin_claude_hpt
+func (c *Comp) HasPageWalkCache() bool {
+	return c.pageWalkCachePort != nil
+}
+
+// HPTStats returns the hashed-page-table walk counters. They stay zero when
+// the GMMU walks the radix page table. // sbin_claude_hpt
+func (c *Comp) HPTStats() HPTStats {
+	return HPTStats{
+		Walks:          c.hptWalks,
+		MemoryAccesses: c.hptMemoryAccesses,
+	}
 }
 
 // SetTLBs registers every TLB control port that the GMMU must reach when it

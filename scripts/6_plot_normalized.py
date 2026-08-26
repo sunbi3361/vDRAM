@@ -40,6 +40,7 @@ configs = [
     'virtual-caching',
     'utopia',  # sbin_claude_utopia
     'avatar',  # sbin_claude_avatar
+    'hpt',  # sbin_claude_hpt
     ]
 
 benchmarks=[
@@ -84,6 +85,7 @@ COLORS = {
     "baseline": "#7F7F7F",
     "utopia": "#CCB974",  # sbin_claude_utopia
     "avatar": "#64B5CD",  # sbin_claude_avatar
+    "hpt": "#DA8BC3",  # sbin_claude_hpt
 }
 
 

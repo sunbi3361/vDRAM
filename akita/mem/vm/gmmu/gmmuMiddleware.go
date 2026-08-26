@@ -94,7 +94,16 @@ func (m *middleware) walkPageTable() bool {
 		// }
 		switch trans.state {
 		case newTransaction:
-			madeProgress = m.sendToPageWalkCache(i) || madeProgress
+			// Pre-edit code (commented per AGENTS.md convention):
+			// madeProgress = m.sendToPageWalkCache(i) || madeProgress
+			//
+			// sbin_claude_hpt: a hashed page table is indexed directly, so
+			// the walk skips the page-walk cache entirely.
+			if m.hptEnabled {
+				madeProgress = m.startHashedWalk(i) || madeProgress
+			} else {
+				madeProgress = m.sendToPageWalkCache(i) || madeProgress
+			}
 		case pageWalkCacheDone:
 			madeProgress = m.advancePageWalk(i) || madeProgress
 		case fillingPageWalkCache:
@@ -113,6 +122,12 @@ func (m *middleware) walkPageTable() bool {
 
 // sbin_codex: pagewalkcache uses its own typed LookupRsp protocol.
 func (m *middleware) parseFromPageWalkCache() bool {
+	// sbin_claude_hpt: HPT mode builds no page-walk cache, so there is no
+	// port to drain.
+	if m.pageWalkCachePort == nil {
+		return false
+	}
+
 	item := m.pageWalkCachePort.PeekIncoming()
 	if item == nil {
 		return false
@@ -125,6 +140,38 @@ func (m *middleware) parseFromPageWalkCache() bool {
 
 	m.pageWalkCachePort.RetrieveIncoming()
 	return m.handlePageWalkCacheResponse(rsp)
+}
+
+// startHashedWalk models an FS-HPT lookup (PACT'24). hash(VPN) indexes the
+// fixed-size hashed table directly, so the walk costs hptAccessesPerWalk
+// memory references - one when there is no hash collision - and there are no
+// intermediate levels to cache. fillLevel = -1 makes fillPageWalkCache a
+// no-op, so no page-walk-cache message is ever sent. The transaction then
+// runs the same pageWalkComplete -> finalizePageWalk path as a radix walk,
+// which keeps the UVM demand-fault gating intact. // sbin_claude_hpt
+func (m *middleware) startHashedWalk(i int) bool {
+	trans := &m.walkingTranslations[i]
+	if trans.state != newTransaction {
+		panic("this state shouldn't be here!")
+	}
+
+	trans.level = 0
+	trans.fillLevel = -1
+	trans.cycleLeft = uint64(m.hptAccessesPerWalk) * uint64(m.latency)
+	// The countdown state is shared with the radix path; despite its name no
+	// page-walk cache was consulted here.
+	trans.state = pageWalkCacheDone
+
+	m.hptWalks++
+	m.hptMemoryAccesses += uint64(m.hptAccessesPerWalk)
+
+	tracing.AddTaskStep(
+		tracing.MsgIDAtReceiver(trans.req, m.Comp),
+		m.Comp,
+		"hpt-walk",
+	)
+
+	return true
 }
 
 // sbin_codex: issue one aggregate lookup for all page-walk-cache levels.

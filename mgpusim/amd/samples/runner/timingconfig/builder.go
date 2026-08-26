@@ -67,6 +67,9 @@ type Builder struct {
 	// sbin_claude_avatar: Avatar speculative-translation configuration.
 	avatarCfg      AvatarPlatformConfig
 	avatarRegistry *avatarmeta.Registry
+
+	// sbin_claude_hpt: hashed-page-table (FS-HPT) walk configuration.
+	hptCfg HPTPlatformConfig
 }
 
 // uvmCapacity resolves the GPU capacity UVM managed memory may occupy. An
@@ -120,7 +123,7 @@ func (b Builder) WithMagicMemoryCopy() Builder {
 }
 
 // WithGPUType sets the GPU type for timing simulation (r9nano, mi300a,
-// ideal-l1tlb, or virtual-caching). // sbin_codex
+// ideal-l1tlb, virtual-caching, utopia, avatar, or hpt). // sbin_claude_hpt
 func (b Builder) WithGPUType(gpuType string) Builder {
 	b.gpuType = gpuType
 	return b
@@ -156,6 +159,51 @@ func (b Builder) WithUtopia(config UtopiaPlatformConfig) Builder {
 func (b Builder) WithAvatar(config AvatarPlatformConfig) Builder {
 	b.avatarCfg = config
 	return b
+}
+
+// WithHPT sets the hashed-page-table configuration. It only takes effect when
+// the GPU type is "hpt". // sbin_claude_hpt
+func (b Builder) WithHPT(config HPTPlatformConfig) Builder {
+	b.hptCfg = config
+	return b
+}
+
+// HPTPlatformConfig carries the FS-HPT knobs from the runner into the
+// platform builder (hpt-plan.md 1.3). // sbin_claude_hpt
+type HPTPlatformConfig struct {
+	// AccessesPerWalk is how many memory references one hashed-page-table
+	// walk costs. Ideal HPT (no hash collision) is 1; the cost of a single
+	// access is the GMMU's existing per-level page-walking latency, so this
+	// is the only variable between the radix and hashed configurations.
+	AccessesPerWalk int
+}
+
+// hptEnabled reports whether the platform builds the HPT GPU type.
+// sbin_claude_hpt
+func (b *Builder) hptEnabled() bool {
+	return b.gpuType == "hpt"
+}
+
+// hptAccessesPerWalk resolves the per-walk access count (default 1, the
+// ideal-HPT assumption and the runner flag default). // sbin_claude_hpt
+func (b *Builder) hptAccessesPerWalk() int {
+	if b.hptCfg.AccessesPerWalk > 0 {
+		return b.hptCfg.AccessesPerWalk
+	}
+
+	return 1
+}
+
+// validateHPTConfig rejects unsupported HPT combinations (v1 scope). The
+// single-GPU cap is a scope choice, not a technical constraint: the walk mode
+// is per-GMMU and owns no shared state. // sbin_claude_hpt
+func (b *Builder) validateHPTConfig() {
+	if !b.hptEnabled() {
+		return
+	}
+	if b.numGPUs > 1 {
+		panic("-gpu=hpt currently supports a single GPU")
+	}
 }
 
 // AvatarPlatformConfig carries the Avatar knobs from the runner into the
@@ -318,6 +366,8 @@ func (b Builder) Build() *sim.Domain {
 	if b.avatarEnabled() {
 		b.avatarRegistry = b.makeAvatarRegistry()
 	}
+	// sbin_claude_hpt: the hashed walk needs no shared state, only validation.
+	b.validateHPTConfig()
 
 	b.platform = &sim.Domain{}
 
@@ -481,6 +531,19 @@ func (b *Builder) createGPUBuilder(
 				ValidationLatency:   b.avatarCfg.ValidationLatency,
 				ModNumEntries:       b.avatarCfg.ModEntries,
 				ConfidenceThreshold: b.avatarCfg.ConfidenceThreshold,
+			}).
+			WithSimulation(b.simulation).
+			WithMMU(mmuComponent).
+			WithLog2PageSize(b.log2PageSize).
+			WithGlobalStorage(b.globalStorage)
+	case "hpt": // sbin_claude_hpt: hashed-page-table (FS-HPT) GPU config.
+		// HPT swaps neither a component factory nor a topology, only a GMMU
+		// walk mode, so the r9nano builder is returned directly instead of
+		// through a wrapper package.
+		return r9nano.MakeBuilder().
+			WithHPTSettings(r9nano.HPTSettings{
+				Enabled:         true,
+				AccessesPerWalk: b.hptAccessesPerWalk(),
 			}).
 			WithSimulation(b.simulation).
 			WithMMU(mmuComponent).

@@ -31,9 +31,22 @@ var archFlag = flag.String("arch", "gcn3", "GPU architecture: gcn3 or cdna3.")
 // Pre-edit code (commented per project convention):
 // var gpuTypeFlag = flag.String("gpu", "r9nano",
 // 	"GPU model for timing simulation: r9nano, mi300a, ideal-l1tlb, virtual-caching, or utopia.") // sbin_claude_utopia
+// Pre-edit code (commented per project convention):
+// var gpuTypeFlag = flag.String("gpu", "r9nano",
+// 	"GPU model for timing simulation: r9nano, mi300a, ideal-l1tlb, "+
+// 		"virtual-caching, utopia, or avatar.") // sbin_claude_avatar
 var gpuTypeFlag = flag.String("gpu", "r9nano",
 	"GPU model for timing simulation: r9nano, mi300a, ideal-l1tlb, "+
-		"virtual-caching, utopia, or avatar.") // sbin_claude_avatar
+		"virtual-caching, utopia, avatar, or hpt.") // sbin_claude_hpt
+
+// sbin_claude_hpt: FS-HPT (PACT'24) hashed-page-table flags. The cost of one
+// memory reference is the GMMU's existing per-level page-walking latency, so
+// the access count is the only variable between the radix and hashed
+// configurations.
+var hptAccessesPerWalkFlag = flag.Int("hpt-accesses-per-walk", 1,
+	"Memory references one hashed-page-table walk costs. 1 is ideal HPT "+
+		"(no hash collision); larger values model collision chains. Only "+
+		"meaningful with -gpu=hpt.")
 
 // sbin_claude_avatar: Avatar (speculative translation with rapid
 // validation) flags.
@@ -208,6 +221,7 @@ func (r *Runner) parseFlag() *Runner {
 	// parse steps.
 	r.validateUtopiaFlags()
 	r.validateAvatarFlags() // sbin_claude_avatar
+	r.validateHPTFlags()    // sbin_claude_hpt
 
 	return r
 }
@@ -265,6 +279,9 @@ func (r *Runner) parseSimulationFlags() {
 	r.AvatarConfidenceThreshold = *avatarConfidenceThresholdFlag
 	r.AvatarFrag = *avatarFragFlag
 
+	// sbin_claude_hpt: HPT flags.
+	r.HPTAccessesPerWalk = *hptAccessesPerWalkFlag
+
 	r.ArchType = parseArchFlag()
 	r.GPUType = parseGPUTypeFlag()
 }
@@ -295,6 +312,24 @@ func (r *Runner) validateAvatarFlags() {
 	}
 	if r.AvatarConfidenceThreshold <= 0 {
 		log.Panic("-avatar-confidence-threshold must be positive")
+	}
+}
+
+// validateHPTFlags rejects invalid HPT flag combinations (v1 scope). The
+// single-GPU cap is a scope choice, not a technical constraint: the hashed
+// walk is a per-GMMU mode and owns no shared state. // sbin_claude_hpt
+func (r *Runner) validateHPTFlags() {
+	if r.GPUType != "hpt" {
+		return
+	}
+	if !r.Timing {
+		log.Panic("-gpu=hpt requires -timing")
+	}
+	if len(r.GPUIDs) > 1 {
+		log.Panic("-gpu=hpt currently supports a single GPU")
+	}
+	if r.HPTAccessesPerWalk < 1 {
+		log.Panic("-hpt-accesses-per-walk must be at least 1")
 	}
 }
 

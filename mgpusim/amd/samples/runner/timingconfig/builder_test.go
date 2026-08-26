@@ -65,6 +65,11 @@ var _ = Describe("GPU builder selector", func() {
 		// sbin_codex: selector target.
 		Entry("virtual-caching returns virtualcaching.Builder", "virtual-caching", virtualcaching.Builder{}),
 		Entry("utopia returns utopiagpu.Builder", "utopia", utopiagpu.Builder{}), // sbin_claude_utopia
+		// sbin_claude_hpt: HPT deliberately uses the r9nano builder (it swaps
+		// only a GMMU walk mode, not a factory or a topology), so this entry
+		// documents the selector rather than discriminating it. That the HPT
+		// settings actually reach the GMMU is proven in hpt_gmmu_test.go.
+		Entry("hpt returns r9nano.Builder", "hpt", r9nano.Builder{}),
 		Entry("unknown selector falls back to r9nano.Builder", "not-a-gpu", r9nano.Builder{}),
 	)
 })

@@ -27,6 +27,13 @@ type Builder struct {
 	rpcacheBytesPerChip uint64
 	uvmServiceProvider  sim.RemotePort // sbin_codex: UVM fault service provider.
 	// accessCounterThresh uint64 // sbin_codex
+
+	// sbin_claude_hpt: hashed-page-table (FS-HPT, PACT'24) walk mode. When
+	// enabled the walk costs hptAccessesPerWalk memory references instead of
+	// one per radix level, and the page-walk cache is not built at all
+	// because a hashed table has no intermediate levels to cache.
+	hptEnabled         bool
+	hptAccessesPerWalk int
 }
 
 // MakeBuilder creates a new builder
@@ -36,6 +43,7 @@ func MakeBuilder() Builder {
 		log2PageSize:       12,
 		maxNumReqInFlight:  16,
 		pageWalkingLatency: 100, // sbin_codex: latency of each uncached page-table level.
+		hptAccessesPerWalk: 1,   // sbin_claude_hpt: ideal HPT resolves in one access.
 	}
 }
 
@@ -108,6 +116,23 @@ func (b Builder) WithUVMServiceProvider(provider sim.RemotePort) Builder {
 	return b
 }
 
+// WithHashedPageTable selects the FS-HPT walk mode. A hashed page table is
+// indexed directly by hash(VPN), so a walk is one memory reference rather than
+// one per radix level. // sbin_claude_hpt
+func (b Builder) WithHashedPageTable(enabled bool) Builder {
+	b.hptEnabled = enabled
+	return b
+}
+
+// WithHPTAccessesPerWalk sets how many memory references one hashed-page-table
+// walk costs. Ideal HPT (no hash collision) is 1; larger values model
+// collision chains. Only meaningful with WithHashedPageTable(true).
+// sbin_claude_hpt
+func (b Builder) WithHPTAccessesPerWalk(n int) Builder {
+	b.hptAccessesPerWalk = n
+	return b
+}
+
 // func (b Builder) WithAccessCounterThreshold(thresh uint64) Builder { // sbin_codex
 // 	b.accessCounterThresh = thresh
 // 	return b
@@ -119,13 +144,26 @@ func (b Builder) Build(name string) *Comp {
 		panic("GMMU page-walking latency must not be negative")
 	}
 
+	// sbin_claude_hpt: a walk must cost at least one memory reference.
+	if b.hptEnabled && b.hptAccessesPerWalk < 1 {
+		panic("GMMU HPT accesses per walk must be at least 1")
+	}
+
 	gmmu := new(Comp)
 	gmmu.TickingComponent = *sim.NewTickingComponent(
 		name, b.engine, b.freq, gmmu)
 
 	b.createPorts(name, gmmu)
 	b.createPageTable(gmmu)
-	b.createPageWalkCache(name, gmmu)
+	// Pre-edit code (commented per AGENTS.md convention):
+	// b.createPageWalkCache(name, gmmu)
+	//
+	// sbin_claude_hpt: a hashed page table has no intermediate levels, so no
+	// page-walk cache is built in HPT mode. The middleware guards the nil
+	// port.
+	if !b.hptEnabled {
+		b.createPageWalkCache(name, gmmu)
+	}
 	b.configureInternalStates(gmmu)
 
 	ctrlMiddleware := &ctrlMiddleware{Comp: gmmu}
@@ -145,6 +183,8 @@ func (b Builder) configureInternalStates(c *Comp) {
 	c.memoryPerChiplet = b.memoryPerChiplet       // sbin_codex
 	c.log2PageSize = b.log2PageSize               // sbin_codex
 	c.state = gmmuStateEnable                     // sbin_codex
+	c.hptEnabled = b.hptEnabled                   // sbin_claude_hpt
+	c.hptAccessesPerWalk = b.hptAccessesPerWalk   // sbin_claude_hpt
 	c.canceledReqs = make(map[string]struct{})    // sbin_claude_avatar
 	c.addressToPortMapper = b.addressToPortMapper // sbin_gmmu
 	c.UVMServiceProvider = b.uvmServiceProvider   // sbin_codex

@@ -9,7 +9,8 @@ configs=(uvm uvm-ideal)
 # configs=(uvm-oversub-150)
 # configs=(virtual-caching)
 configs=(utopia) # sbin_claude_utopia: active selection (last assignment wins)
-# configs=(avatar) # sbin_claude_avatar: speculative translation config
+configs=(avatar) # sbin_claude_avatar: speculative translation config
+# configs=(hpt) # sbin_claude_hpt: FS-HPT hashed page table config
 
 benchmarks=(
     'bfs'
@@ -27,9 +28,9 @@ benchmarks=(
     'vectoradd'
 )
 
-benchmarks=(
-    'nbody'
-)
+# benchmarks=(
+#     'nbody'
+# )
 
 for config in ${configs[@]};
 do

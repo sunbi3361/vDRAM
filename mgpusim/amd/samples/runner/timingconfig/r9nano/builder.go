@@ -52,6 +52,7 @@ type Builder struct {
 	memoryTopology                 MemoryTopology      // sbin_codex
 	translationTopology            TranslationTopology // sbin_claude_utopia: walker chain below the L2 TLB.
 	speculationTopology            SpeculationTopology // sbin_claude_avatar: interposer above the L2 TLB.
+	hptSettings                    HPTSettings         // sbin_claude_hpt: hashed-page-table walk mode.
 
 	gpu                  *sim.Domain
 	cp                   *cp.CommandProcessor
@@ -263,6 +264,27 @@ func (b Builder) WithTranslationTopology(topology TranslationTopology) Builder {
 // (baseline direct L2 TLB, or the Avatar ASU). // sbin_claude_avatar
 func (b Builder) WithSpeculationTopology(topology SpeculationTopology) Builder {
 	b.speculationTopology = topology
+	return b
+}
+
+// HPTSettings selects the FS-HPT (PACT'24) walk mode in the GMMU. Unlike
+// Utopia and Avatar, HPT needs no extra component and no rewiring: a hashed
+// page table changes only how many memory references one walk costs and
+// removes the intermediate levels a page-walk cache would hold, so it is a
+// mode of the existing GPU-side walker. // sbin_claude_hpt
+type HPTSettings struct {
+	// Enabled turns the hashed walk on. When false the GMMU walks the radix
+	// page table exactly as before.
+	Enabled bool
+	// AccessesPerWalk is how many memory references one walk costs. Ideal
+	// HPT (no hash collision) is 1.
+	AccessesPerWalk int
+}
+
+// WithHPTSettings selects the hashed-page-table walk mode for this GPU's
+// GMMU. // sbin_claude_hpt
+func (b Builder) WithHPTSettings(settings HPTSettings) Builder {
+	b.hptSettings = settings
 	return b
 }
 
@@ -787,6 +809,14 @@ func (b *Builder) buildGMMU() {
 		WithDeviceID(b.gpuID).
 		WithMemAddrOffset(b.memAddrOffset).
 		WithMemoryPerChiplet(b.dramSize)
+
+	// sbin_claude_hpt: FS-HPT resolves a walk in one memory reference and has
+	// no intermediate levels, so the GMMU skips the page-walk cache.
+	if b.hptSettings.Enabled {
+		gmmuBuilder = gmmuBuilder.
+			WithHashedPageTable(true).
+			WithHPTAccessesPerWalk(b.hptSettings.AccessesPerWalk)
+	}
 
 	if b.uvmServiceProvider != "" { // sbin_codex
 		// Pre-edit code (commented per AGENTS.md convention). The GMMU used to

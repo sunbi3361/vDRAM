@@ -7,14 +7,15 @@ import (
 	// "sync" // sbin_codex: removed - instructionCountTracer no longer exists.
 
 	"github.com/sarchlab/akita/v4/datarecording"
+	"github.com/sarchlab/akita/v4/mem/vm/gmmu" // sbin_claude_hpt
 	"github.com/sarchlab/akita/v4/sim"
 	"github.com/sarchlab/akita/v4/simulation"
 	"github.com/sarchlab/akita/v4/tracing"
 	"github.com/sarchlab/mgpusim/v4/amd/driver"               // sbin_codex: integrated from extendedreport.go.
 	"github.com/sarchlab/mgpusim/v4/amd/timing/accesscounter" // sbin_codex
+	"github.com/sarchlab/mgpusim/v4/amd/timing/avatar/asu"    // sbin_claude_avatar
 	"github.com/sarchlab/mgpusim/v4/amd/timing/cu"
 	"github.com/sarchlab/mgpusim/v4/amd/timing/rdma"
-	"github.com/sarchlab/mgpusim/v4/amd/timing/avatar/asu" // sbin_claude_avatar
 	"github.com/sarchlab/mgpusim/v4/amd/timing/utopia/rsw" // sbin_claude_utopia
 )
 
@@ -111,6 +112,10 @@ type reporter struct {
 	// avatarUnits are the per-GPU Avatar Speculation Units (ASU). They own
 	// the speculation/CAVA/EAF statistics. // sbin_claude_avatar
 	avatarUnits []*asu.Comp
+
+	// hptGMMUs are the per-GPU page-table walkers running in FS-HPT mode.
+	// They own the hashed-walk counters. // sbin_claude_hpt
+	hptGMMUs []*gmmu.Comp
 }
 
 func newReporter(s *simulation.Simulation) *reporter {
@@ -130,8 +135,34 @@ func newReporter(s *simulation.Simulation) *reporter {
 	r.collectAccessCounters(s) // sbin_codex
 	r.collectUtopiaUnits(s)    // sbin_claude_utopia
 	r.collectAvatarUnits(s)    // sbin_claude_avatar
+	r.collectHPTGMMUs(s)       // sbin_claude_hpt
 
 	return r
+}
+
+// collectHPTGMMUs finds every GPU-side page-table walker running in FS-HPT
+// mode. Walkers on the radix path are skipped, so the hpt_* metrics appear
+// only in an -gpu=hpt run. // sbin_claude_hpt
+func (r *reporter) collectHPTGMMUs(s *simulation.Simulation) {
+	for i := 1; ; i++ {
+		name := fmt.Sprintf("GPU[%d].GMMU", i)
+
+		c := s.GetComponentByName(name)
+		if c == nil {
+			return
+		}
+
+		walker, ok := c.(*gmmu.Comp)
+		if !ok || walker.Name() != name {
+			return
+		}
+
+		if !walker.HashedPageTableEnabled() {
+			return
+		}
+
+		r.hptGMMUs = append(r.hptGMMUs, walker)
+	}
 }
 
 // collectAvatarUnits finds every GPU-side Avatar Speculation Unit.
@@ -505,6 +536,33 @@ func (r *reporter) report() {
 	r.reportUVM()        // sbin_codex: UVM demand-paging statistics.
 	r.reportUtopia()     // sbin_claude_utopia: RestSeg walk statistics.
 	r.reportAvatar()     // sbin_claude_avatar: speculation statistics.
+	r.reportHPT()        // sbin_claude_hpt: hashed-walk statistics.
+}
+
+// reportHPT emits the hashed-page-table walk counters of every GMMU running
+// in FS-HPT mode (hpt-plan.md 2.4). // sbin_claude_hpt
+func (r *reporter) reportHPT() {
+	for i, walker := range r.hptGMMUs {
+		stats := walker.HPTStats()
+		location := fmt.Sprintf("GPU[%d].GMMU", i+1)
+
+		rows := []struct {
+			what string
+			val  float64
+		}{
+			{"hpt_walk_count", float64(stats.Walks)},
+			{"hpt_memory_access_count", float64(stats.MemoryAccesses)},
+		}
+
+		for _, row := range rows {
+			r.dataRecorder.InsertData(tableName, metric{
+				Location: location,
+				What:     row.what,
+				Value:    row.val,
+				Unit:     "",
+			})
+		}
+	}
 }
 
 // reportAvatar emits the speculation, CAVA-validation, and EAF counters of

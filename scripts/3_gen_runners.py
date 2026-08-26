@@ -22,6 +22,10 @@ configs = [
     # validation latency 200, 2MB-region fragmentation on). Compress-ratio
     # sweep entries go into avatar_compress_ratios below.
     'avatar',
+    # sbin_claude_hpt: FS-HPT hashed page table (-gpu=hpt). 'hpt' uses the
+    # runner default (1 memory access per walk = ideal HPT). Access-count
+    # sweep entries go into hpt_accesses_per_walk below.
+    'hpt',
     ]
 
 # sbin_claude_utopia: RestSeg ratio per utopia sweep config, mirroring the
@@ -49,6 +53,17 @@ avatar_compress_ratios = {
     # 'avatar-cr-100': 1.0,
     }
 configs += list(avatar_compress_ratios)  # sbin_claude_avatar
+
+# sbin_claude_hpt: memory references per hashed-page-table walk. 1 is ideal
+# HPT (no hash collision); larger values model collision chains, and 5 is the
+# sanity check that reproduces a full radix walk without the page-walk cache.
+# Each key is generated as its own config directory/runner. Uncomment (or add)
+# entries to sweep; the plain 'hpt' config keeps the runner default.
+hpt_accesses_per_walk = {
+    # 'hpt-acc-2': 2,
+    # 'hpt-acc-5': 5,
+}
+configs += list(hpt_accesses_per_walk)  # sbin_claude_hpt
 
 # sbin_codex: oversubscription ratio per config (uvm-manager.md 20).
 #
@@ -203,6 +218,14 @@ for config in configs:
             submit_file.write("-avatar-frag=false ")
             submit_file.write("-avatar-compress-ratio="
                               + str(avatar_compress_ratios[config]) + " ")
+        # sbin_claude_hpt: hpt configs. The plain config relies on the runner
+        # default (1 access per walk); sweep configs pin the access count.
+        elif config == 'hpt':
+            submit_file.write("-gpu=hpt ")
+        elif config in hpt_accesses_per_walk:
+            submit_file.write("-gpu=hpt ")
+            submit_file.write("-hpt-accesses-per-walk="
+                              + str(hpt_accesses_per_walk[config]) + " ")
         else:
             raise ValueError("unknown config " + config)
         submit_file.write("\\\n\t")
