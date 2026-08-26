@@ -625,20 +625,7 @@ func (b *Builder) createGPUBuilder(
 			WithLog2PageSize(b.log2PageSize).
 			WithGlobalStorage(b.globalStorage)
 	case "latpc": // sbin_claude_latpc: LATPC (MICRO'25) GPU config.
-		// Like HPT, LATPC swaps neither a component factory nor a topology -
-		// the Regularity Detector, the LATC MSHR, and LATP batching are all
-		// builder values on the baseline path - so the r9nano builder is
-		// returned directly instead of through a wrapper package.
-		return r9nano.MakeBuilder().
-			WithLATPCSettings(r9nano.LATPCSettings{
-				Enabled:         true,
-				L4RowHitLatency: b.latpcCfg.L4RowHitLatency,
-			}).
-			WithL1TLBMSHREntries(b.latpcCfg.L1TLBMSHREntries).
-			WithSimulation(b.simulation).
-			WithMMU(mmuComponent).
-			WithLog2PageSize(b.log2PageSize).
-			WithGlobalStorage(b.globalStorage)
+		return b.makeLATPCGPUBuilder(mmuComponent)
 	case "utopia": // sbin_claude_utopia: hybrid RestSeg/FlexSeg GPU config.
 		// Build() creates the registry before the driver; direct selector use
 		// (tests) creates it here so the topology constructor never sees nil.
@@ -665,6 +652,26 @@ func (b *Builder) createGPUBuilder(
 			WithLog2PageSize(b.log2PageSize).
 			WithGlobalStorage(b.globalStorage)
 	}
+}
+
+// makeLATPCGPUBuilder returns the -gpu=latpc GPU builder. Like HPT, LATPC
+// swaps neither a component factory nor a topology - the Regularity
+// Detector, the LATC MSHR, and LATP batching are all builder values on the
+// baseline path - so the r9nano builder is returned directly instead of
+// through a wrapper package. // sbin_claude_latpc
+func (b *Builder) makeLATPCGPUBuilder(
+	mmuComponent *mmu.Comp,
+) gpubuilder.GPUBuilder {
+	return r9nano.MakeBuilder().
+		WithLATPCSettings(r9nano.LATPCSettings{
+			Enabled:         true,
+			L4RowHitLatency: b.latpcCfg.L4RowHitLatency,
+		}).
+		WithL1TLBMSHREntries(b.latpcCfg.L1TLBMSHREntries).
+		WithSimulation(b.simulation).
+		WithMMU(mmuComponent).
+		WithLog2PageSize(b.log2PageSize).
+		WithGlobalStorage(b.globalStorage)
 }
 
 func (b *Builder) createGPUs(

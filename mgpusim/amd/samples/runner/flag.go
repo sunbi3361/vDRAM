@@ -267,6 +267,7 @@ func metricFileNameFlagIsSet() bool {
 // parseFlag applies the runner flag to runner object
 func (r *Runner) parseFlag() *Runner {
 	r.parseSimulationFlags()
+	r.parseLATPCFlags() // sbin_claude_latpc
 	r.parseGPUFlag()
 
 	// sbin_claude_utopia: needs r.GPUType and r.GPUIDs, so it runs after both
@@ -337,12 +338,14 @@ func (r *Runner) parseSimulationFlags() {
 	// sbin_claude_hpt: HPT flags.
 	r.HPTAccessesPerWalk = *hptAccessesPerWalkFlag
 
-	// sbin_claude_latpc: LATPC flags.
-	r.LATPCL4RowHitLatency = *latpcL4RowHitLatencyFlag
-	r.L1TLBMSHREntries = *l1TLBMSHRFlag
-
 	r.ArchType = parseArchFlag()
 	r.GPUType = parseGPUTypeFlag()
+}
+
+// parseLATPCFlags applies the LATPC flags to the runner. // sbin_claude_latpc
+func (r *Runner) parseLATPCFlags() {
+	r.LATPCL4RowHitLatency = *latpcL4RowHitLatencyFlag
+	r.L1TLBMSHREntries = *l1TLBMSHRFlag
 }
 
 // validateAvatarFlags rejects invalid Avatar flag combinations (v1 scope).

@@ -652,6 +652,12 @@ func (r *reporter) report() {
 // batched-walk counters (when batching is enabled).
 // refs/latpc-plan.md 2.7. // sbin_claude_latpc
 func (r *reporter) reportLATPC() {
+	r.reportLATC()
+	r.reportLATP()
+}
+
+// reportLATC emits the per-GPU L1V TLB MSHR counters. // sbin_claude_latpc
+func (r *reporter) reportLATC() {
 	for gpu, tlbs := range r.l1vTLBs {
 		var failures, groups, coalesced uint64
 		compressed := false
@@ -692,7 +698,10 @@ func (r *reporter) reportLATPC() {
 			})
 		}
 	}
+}
 
+// reportLATP emits the per-GMMU batched-walk counters. // sbin_claude_latpc
+func (r *reporter) reportLATP() {
 	for i, walker := range r.latpGMMUs {
 		stats := walker.LATPStats()
 		location := fmt.Sprintf("GPU[%d].GMMU", i+1)
