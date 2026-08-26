@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/sarchlab/akita/v4/mem/mem"
+	"github.com/sarchlab/akita/v4/sim" // sbin_claude_vc
 	"github.com/sarchlab/akita/v4/sim/directconnection"
 	"github.com/sarchlab/mgpusim/v4/amd/samples/runner/timingconfig/shaderarray"
 )
@@ -15,6 +16,17 @@ type DataPathTopology interface {
 	connectL1ToL2(*Builder)
 	connectTranslation(*Builder)
 	connectCP(*Builder)
+	// plugSAToL2 plugs one shader array's bottom ports into the L1-to-L2
+	// network. The baseline also plugs the L1 translators' remote-memory
+	// egress; the virtual topology has no L1 data translators, so its egress
+	// lives at the L2 boundary instead.
+	//
+	// The whole per-array group is plugged by the topology, rather than just
+	// the differing ports, because directconnection arbitrates in plug-in
+	// order - appending the baseline's egress ports after the loop instead of
+	// inside it changes arbitration and therefore baseline timing.
+	// sbin_claude_vc
+	plugSAToL2(*Builder, *directconnection.Comp, *sim.Domain)
 }
 
 type (
@@ -51,11 +63,19 @@ func (virtualDataPathTopology) configureShaderArray(
 	b *Builder,
 	saBuilder shaderarray.Builder,
 ) shaderarray.Builder {
+	// Pre-edit code (commented per project convention). The shader array was
+	// told how to route remote pages and to keep virtual addresses on the
+	// local path, both of which only ever configured the L1 vector/scalar
+	// address translators:
+	//
+	//	WithRemoteMemoryProviderMapper(b.remoteMemoryProvider).
+	//	WithVirtualAddressForLocalMemory().
+	//
+	// sbin_claude_vc: those translators are gone, so the settings would be
+	// dead configuration. Remote pages are recognised at the L2 boundary now.
 	return saBuilder.
 		WithL1AddressMapper(b.l1DataAddressMapper).
 		WithL1IAddressMapper(b.l1AddressMapper).
-		WithRemoteMemoryProviderMapper(b.remoteMemoryProvider).        // sbin_codex
-		WithVirtualAddressForLocalMemory().                            // sbin_codex
 		WithDataPathTopology(shaderarray.NewVirtualDataPathTopology()) // sbin_codex: L1I remains baseline.
 }
 
@@ -98,22 +118,30 @@ func (baselineDataPathTopology) connectTranslation(b *Builder) {
 	b.memoryTopology.connectTranslationClients(b, conn) // sbin_codex
 }
 
+// connectTranslation wires the only remaining L1-side translation client, the
+// instruction TLB. Vector and scalar data accesses reach the L2 with their
+// virtual address and are translated at the L2 miss instead.
+//
+// Pre-edit code (commented per project convention). The vector and scalar L1
+// TLBs were plugged in here too:
+//
+//	for i := range b.numCUPerShaderArray {
+//		conn.PlugIn(sa.GetPortByName(fmt.Sprintf("L1VTLBBottom[%d]", i)))
+//	}
+//	conn.PlugIn(sa.GetPortByName("L1STLBBottom"))
+//
+// sbin_claude_vc
 func (virtualDataPathTopology) connectTranslation(b *Builder) {
 	conn := directconnection.MakeBuilder().WithEngine(b.simulation.GetEngine()).
 		WithFreq(b.freq).Build(b.name + ".TranslationToL2TLB")
 	b.simulation.RegisterComponent(conn)
-	// Pre-edit code (commented per project convention):
-	// conn.PlugIn(b.l2TLBs[0].GetPortByName("Top"))
-	//
 	// sbin_claude_avatar: route through the speculation topology provider.
 	conn.PlugIn(b.speculationTopology.l1TranslationProviderPort(b))
+
 	for _, sa := range b.sas {
-		for i := range b.numCUPerShaderArray {
-			conn.PlugIn(sa.GetPortByName(fmt.Sprintf("L1VTLBBottom[%d]", i))) // sbin_codex
-		}
-		conn.PlugIn(sa.GetPortByName("L1STLBBottom")) // sbin_codex
 		conn.PlugIn(sa.GetPortByName("L1ITLBBottom"))
 	}
+
 	b.memoryTopology.connectTranslationClients(b, conn) // sbin_codex
 }
 
@@ -131,14 +159,23 @@ func (baselineDataPathTopology) connectCP(b *Builder) {
 	b.addSharedL2TLBs() // sbin_codex
 }
 
+// connectCP registers the control ports that exist on the virtual data path.
+// The vector and scalar L1 translators and TLBs are gone, so the command
+// processor has nothing to flush or invalidate there; the shared L2 TLB and
+// the per-slice L2 translators carry that duty now.
+//
+// Pre-edit code (commented per project convention):
+//
+//	baselineDataPathTopology{}.connectCP(b)
+//
+// sbin_claude_vc
 func (virtualDataPathTopology) connectCP(b *Builder) {
-	// Pre-edit code (commented per AGENTS.md convention):
-	// for _, sa := range b.sas {
-	// 	b.addPreCacheTranslator(sa.GetPortByName("L1IAddrTransCtrl"))
-	// 	b.addTLB(sa.GetPortByName("L1ITLBCtrl"))
-	// }
-	// b.addSharedL2TLBs()
-	baselineDataPathTopology{}.connectCP(b) // sbin_codex
+	for _, sa := range b.sas {
+		b.addPreCacheTranslator(sa.GetPortByName("L1IAddrTransCtrl"))
+		b.addTLB(sa.GetPortByName("L1ITLBCtrl"))
+	}
+
+	b.addSharedL2TLBs()
 }
 
 func (b *Builder) plugL1ToL2(conn *directconnection.Comp) { // sbin_codex
@@ -157,13 +194,58 @@ func (b *Builder) plugL1ToL2(conn *directconnection.Comp) { // sbin_codex
 	for _, l2 := range b.l2Caches {
 		conn.PlugIn(l2.GetPortByName("Top"))
 	}
+	// Pre-edit code (commented per project convention). The per-array ports
+	// were plugged in here directly, the L1 translators' remote egress
+	// included:
+	//
+	//	for _, sa := range b.sas {
+	//		for i := range b.numCUPerShaderArray {
+	//			conn.PlugIn(sa.GetPortByName(fmt.Sprintf("L1VCacheBottom[%d]", i)))
+	//			conn.PlugIn(sa.GetPortByName(fmt.Sprintf("L1VAddrTransRemoteBottom[%d]", i)))
+	//		}
+	//		conn.PlugIn(sa.GetPortByName("L1SCacheBottom"))
+	//		conn.PlugIn(sa.GetPortByName("L1SAddrTransRemoteBottom"))
+	//		conn.PlugIn(sa.GetPortByName("L1ICacheBottom"))
+	//	}
+	//
+	// sbin_claude_vc: which side owns the remote egress is a topology
+	// decision now - the virtual data path has no L1 translators to own it.
 	for _, sa := range b.sas {
-		for i := range b.numCUPerShaderArray {
-			conn.PlugIn(sa.GetPortByName(fmt.Sprintf("L1VCacheBottom[%d]", i)))
-			conn.PlugIn(sa.GetPortByName(fmt.Sprintf("L1VAddrTransRemoteBottom[%d]", i))) // sbin_codex
-		}
-		conn.PlugIn(sa.GetPortByName("L1SCacheBottom"))
-		conn.PlugIn(sa.GetPortByName("L1SAddrTransRemoteBottom")) // sbin_codex
-		conn.PlugIn(sa.GetPortByName("L1ICacheBottom"))
+		b.dataPathTopology.plugSAToL2(b, conn, sa)
 	}
+
+	b.memoryTopology.connectRemoteEgress(b, conn)
+}
+
+// plugSAToL2 keeps the original plug-in order, cache port then egress port,
+// so baseline arbitration is unchanged. // sbin_claude_vc
+func (baselineDataPathTopology) plugSAToL2(
+	b *Builder,
+	conn *directconnection.Comp,
+	sa *sim.Domain,
+) {
+	for i := range b.numCUPerShaderArray {
+		conn.PlugIn(sa.GetPortByName(fmt.Sprintf("L1VCacheBottom[%d]", i)))
+		conn.PlugIn(sa.GetPortByName(
+			fmt.Sprintf("L1VAddrTransRemoteBottom[%d]", i)))
+	}
+
+	conn.PlugIn(sa.GetPortByName("L1SCacheBottom"))
+	conn.PlugIn(sa.GetPortByName("L1SAddrTransRemoteBottom"))
+	conn.PlugIn(sa.GetPortByName("L1ICacheBottom"))
+}
+
+// plugSAToL2 plugs only the caches: remotely accessible pages are recognised
+// at the L2 boundary on this topology. // sbin_claude_vc
+func (virtualDataPathTopology) plugSAToL2(
+	b *Builder,
+	conn *directconnection.Comp,
+	sa *sim.Domain,
+) {
+	for i := range b.numCUPerShaderArray {
+		conn.PlugIn(sa.GetPortByName(fmt.Sprintf("L1VCacheBottom[%d]", i)))
+	}
+
+	conn.PlugIn(sa.GetPortByName("L1SCacheBottom"))
+	conn.PlugIn(sa.GetPortByName("L1ICacheBottom"))
 }

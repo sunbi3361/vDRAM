@@ -14,6 +14,12 @@ type MemoryTopology interface {
 	connectL2AndDRAM(*Builder)
 	connectTranslationClients(*Builder, *directconnection.Comp)
 	connectCP(*Builder)
+	// connectRemoteEgress plugs the memory-side egress for remotely
+	// accessible (host-resident managed) pages into the L1-to-L2 network,
+	// where the UVM access counter and the RDMA ingress live. Only the
+	// virtual topology uses it: with no L1 translators, the L2 translators
+	// are the first component that learns a page is remote. // sbin_claude_vc
+	connectRemoteEgress(*Builder, *directconnection.Comp)
 	// l2TLBTopChannels reports how many independent top-side request classes
 	// the shared L2 TLB must expose. // sbin_claude_vc
 	l2TLBTopChannels() int
@@ -55,9 +61,13 @@ func NewVirtualMemoryTopology() MemoryTopology { return virtualMemoryTopology{} 
 func (baselineMemoryTopology) buildBoundary(*Builder) {} // sbin_codex
 
 func (virtualMemoryTopology) buildBoundary(b *Builder) {
+	// sbin_claude_vc: the L2 translators are now the first place a remotely
+	// accessible page is recognised, so they carry the remote egress that the
+	// L1 translators used to carry.
 	base := addresstranslator.MakeBuilder().WithEngine(b.simulation.GetEngine()).
 		WithFreq(b.freq).WithDeviceID(b.gpuID).WithLog2PageSize(b.log2PageSize).
-		WithNumReqPerCycle(16).WithPhysicalAddressPassthrough()
+		WithNumReqPerCycle(16).WithPhysicalAddressPassthrough().
+		WithRemoteMemoryProviderMapper(b.remoteMemoryProvider)
 	for i, dram := range b.drams {
 		translator := base.WithMemoryProviderMapper(&mem.SinglePortMapper{
 			Port: dram.GetPortByName("Top").AsRemote(),
@@ -137,6 +147,26 @@ func (virtualMemoryTopology) connectTranslationClients(
 }
 
 func (baselineMemoryTopology) connectCP(*Builder) {} // sbin_codex
+
+// connectRemoteEgress is a no-op: on the baseline the L1 translators own the
+// remote egress. // sbin_claude_vc
+func (baselineMemoryTopology) connectRemoteEgress(
+	*Builder,
+	*directconnection.Comp,
+) {
+}
+
+// connectRemoteEgress plugs every L2 translator's remote egress into the
+// network that carries the UVM access counter and the RDMA ingress.
+// sbin_claude_vc
+func (virtualMemoryTopology) connectRemoteEgress(
+	b *Builder,
+	conn *directconnection.Comp,
+) {
+	for _, translator := range b.l2AddressTranslators {
+		conn.PlugIn(translator.GetPortByName("RemoteBottom"))
+	}
+}
 
 func (virtualMemoryTopology) connectCP(b *Builder) {
 	for _, translator := range b.l2AddressTranslators {

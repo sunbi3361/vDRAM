@@ -130,9 +130,8 @@ var _ = Describe("R9 Nano builder", func() {
 		// 	"GPU.L2AddrTrans[0]",
 		// 	"GPU.L2AddrTrans[1]",
 		// ))
+		// sbin_claude_vc: only the instruction path keeps an L1 translator.
 		Expect(componentNames.addressTranslators).To(ConsistOf(
-			"GPU.SA[0].L1VAddrTrans[0]", // sbin_codex
-			"GPU.SA[0].L1SAddrTrans",    // sbin_codex
 			"GPU.SA[0].L1IAddrTrans",
 			"GPU.L2AddrTrans[0]",
 			"GPU.L2AddrTrans[1]",
@@ -142,9 +141,8 @@ var _ = Describe("R9 Nano builder", func() {
 		// 	"GPU.SA[0].L1ITLB",
 		// 	"GPU.L2TLB",
 		// ))
+		// sbin_claude_vc: and only the instruction path keeps an L1 TLB.
 		Expect(componentNames.tlbs).To(ConsistOf(
-			"GPU.SA[0].L1VTLB[0]", // sbin_codex
-			"GPU.SA[0].L1STLB",    // sbin_codex
 			"GPU.SA[0].L1ITLB",
 			"GPU.L2TLB",
 		))
@@ -168,22 +166,16 @@ var _ = Describe("R9 Nano builder", func() {
 		// Expect(componentNamesForPorts(commandProcessor.PreCacheTranslators.Ports)).To(
 		// 	ConsistOf("GPU.SA[0].L1IAddrTrans"))
 		Expect(componentNamesForPorts(commandProcessor.PreCacheTranslators.Ports)).To(
-			ConsistOf(
-				"GPU.SA[0].L1VAddrTrans[0]",
-				"GPU.SA[0].L1SAddrTrans",
-				"GPU.SA[0].L1IAddrTrans",
-			)) // sbin_codex
+			ConsistOf("GPU.SA[0].L1IAddrTrans")) // sbin_claude_vc
 		Expect(componentNamesForPorts(commandProcessor.PostCacheTranslators.Ports)).To(
 			ConsistOf(
 				"GPU.L2AddrTrans[0]",
 				"GPU.L2AddrTrans[1]",
 			)) // sbin_codex: every per-slice L2 AT is tracked separately.
 		Expect(componentNamesForPorts(commandProcessor.TLBs)).To(ConsistOf(
-			"GPU.SA[0].L1VTLB[0]", // sbin_codex
-			"GPU.SA[0].L1STLB",    // sbin_codex
 			"GPU.SA[0].L1ITLB",
 			"GPU.L2TLB",
-		))
+		)) // sbin_claude_vc
 		Expect(commandProcessor.L1VCaches).To(HaveLen(1))
 		Expect(commandProcessor.L1SCaches).To(HaveLen(1))
 		Expect(commandProcessor.L1ICaches).To(HaveLen(1))
@@ -208,11 +200,8 @@ var _ = Describe("R9 Nano builder", func() {
 			physicalPage: 3 * mem.GB,
 		}) // sbin_codex: L1I retains physical-range/RDMA mapping in virtual mode.
 
+		// sbin_claude_vc: the instruction TLB is the only L1 client left.
 		sharedTranslationPorts := []sim.Port{
-			testSimulation.GetComponentByName(
-				"GPU.SA[0].L1VTLB[0]").GetPortByName("Bottom"), // sbin_codex
-			testSimulation.GetComponentByName(
-				"GPU.SA[0].L1STLB").GetPortByName("Bottom"), // sbin_codex
 			testSimulation.GetComponentByName(
 				"GPU.SA[0].L1ITLB").GetPortByName("Bottom"),
 			testSimulation.GetComponentByName(
