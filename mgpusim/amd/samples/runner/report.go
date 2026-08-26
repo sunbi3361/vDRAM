@@ -814,6 +814,8 @@ func (r *reporter) reportUVM() {
 			float64(stats.AccessCounterSuppressed), ""},
 		{"uvm_num_access_counter_resets", float64(stats.AccessCounterResets), ""},
 
+		{"uvm_num_lazy_remote_maps",
+			float64(stats.LazyRemoteMaps), ""}, // sbin_claude_uvm
 		{"uvm_num_remote_pte_installs", float64(stats.RemotePTEInstalls), ""},
 		{"uvm_num_local_pte_installs", float64(stats.LocalPTEInstalls), ""},
 		{"uvm_num_uvm_tlb_range_invalidations",

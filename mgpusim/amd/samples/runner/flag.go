@@ -158,6 +158,17 @@ var uvmAccessCounterFlag = flag.Bool("uvm-access-counter", true,
 // be 64. The specification fixes it at 8. // sbin_codex
 var uvmAccessCounterThresholdFlag = flag.Uint64("uvm-access-counter-threshold", 8,
 	"Access Counter threshold that triggers a 64KB CPU->GPU migration (UVM).")
+
+// sbin_claude_uvm: with access counters on, the eager path publishes a REMOTE
+// PTE for every managed page at allocation time, so a cold page never faults.
+// This defers that publication to the first access.
+var uvmLazyRemotePTEFlag = flag.Bool("uvm-lazy-remote-pte", false,
+	"Publish the CPU-remote mapping of a managed page on its first GPU "+
+		"access instead of at allocation time. The first touch of a 64KB "+
+		"region is then a page fault whose only effect is to turn that "+
+		"region's PTEs from INVALID to REMOTE; nothing migrates, and "+
+		"migration stays the access counter's decision. "+
+		"Requires -uvm-access-counter=true.")
 var uvmDisablePrefetchFlag = flag.Bool("uvm-disable-prefetch", false,
 	"Restrict every UVM fault service to its own 64KB leaf (no TBN expansion).")
 var uvmDisableEvictionFlag = flag.Bool("uvm-disable-eviction", false,
@@ -280,26 +291,9 @@ func (r *Runner) parseSimulationFlags() {
 		r.UseUnifiedMemory = true
 	}
 
-	// sbin_codex: UVM demand-paging flags.
-	if *uvmFlag {
-		r.UVM = true
-	}
-	if *idealUVMFlag {
-		r.IdealUVM = true
-	}
-	r.UVMFaultLatencyUS = *uvmFaultLatencyUSFlag
-	r.UVMAccessCounter = *uvmAccessCounterFlag // sbin_codex
-	r.UVMACThreshold = *uvmAccessCounterThresholdFlag
-	r.UVMExpandRatio = *uvmTBNExpandRatioFlag
-	r.UVMmaxFetchSize = *uvmTBNMaxFetchSizeFlag
-	r.UVMNoPrefetch = *uvmDisablePrefetchFlag          // sbin_codex
-	r.UVMNoEviction = *uvmDisableEvictionFlag          // sbin_codex
-	r.UVMGPUCapacityBytes = *uvmGPUCapacityFlag        // sbin_codex
-	r.UVMGPUCapacityRatio = *uvmGPUCapacityRatioFlag   // sbin_codex
-	r.UVMOversubRatio = *uvmOversubRatioFlag           // sbin_codex
-	r.UVMMaxOutstanding = *uvmMaxOutstandingRemoteFlag // sbin_claude
-
-	r.validateUVMFlags()
+	// sbin_claude_uvm: the UVM block lives in its own function so that adding
+	// a knob to it does not push parseSimulationFlags over the funlen cap.
+	r.parseUVMFlags()
 
 	// sbin_claude_utopia: Utopia flags.
 	r.UtopiaRestSegRatio = *utopiaRestSegRatioFlag
@@ -407,6 +401,33 @@ func (r *Runner) validateUtopiaFlags() {
 	}
 }
 
+// parseUVMFlags reads the UVM demand-paging flags into the runner and
+// validates the combination. // sbin_codex, split out by sbin_claude_uvm
+func (r *Runner) parseUVMFlags() {
+	if *uvmFlag {
+		r.UVM = true
+	}
+
+	if *idealUVMFlag {
+		r.IdealUVM = true
+	}
+
+	r.UVMFaultLatencyUS = *uvmFaultLatencyUSFlag
+	r.UVMAccessCounter = *uvmAccessCounterFlag // sbin_codex
+	r.UVMACThreshold = *uvmAccessCounterThresholdFlag
+	r.UVMLazyRemotePTE = *uvmLazyRemotePTEFlag // sbin_claude_uvm
+	r.UVMExpandRatio = *uvmTBNExpandRatioFlag
+	r.UVMmaxFetchSize = *uvmTBNMaxFetchSizeFlag
+	r.UVMNoPrefetch = *uvmDisablePrefetchFlag          // sbin_codex
+	r.UVMNoEviction = *uvmDisableEvictionFlag          // sbin_codex
+	r.UVMGPUCapacityBytes = *uvmGPUCapacityFlag        // sbin_codex
+	r.UVMGPUCapacityRatio = *uvmGPUCapacityRatioFlag   // sbin_codex
+	r.UVMOversubRatio = *uvmOversubRatioFlag           // sbin_codex
+	r.UVMMaxOutstanding = *uvmMaxOutstandingRemoteFlag // sbin_claude
+
+	r.validateUVMFlags()
+}
+
 // validateUVMFlags rejects invalid UVM flag combinations per the UVM spec
 // mode table. // sbin_codex
 func (r *Runner) validateUVMFlags() {
@@ -427,6 +448,14 @@ func (r *Runner) validateUVMFlags() {
 	}
 	if r.UVM && r.UVMACThreshold == 0 { // sbin_codex
 		log.Panic("-uvm-access-counter-threshold must be at least 1")
+	}
+	if r.UVMLazyRemotePTE && !r.UVM { // sbin_claude_uvm
+		log.Panic("-uvm-lazy-remote-pte requires -uvm=true")
+	}
+	if r.UVMLazyRemotePTE && !r.UVMAccessCounter { // sbin_claude_uvm
+		// Without access counters a cold page is already INVALID and its
+		// first-access fault migrates the region. There is nothing to defer.
+		log.Panic("-uvm-lazy-remote-pte requires -uvm-access-counter=true")
 	}
 	if r.UVMOversubRatio < 0 { // sbin_codex
 		log.Panic("-uvm-oversubscription-ratio must not be negative")

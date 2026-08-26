@@ -44,6 +44,7 @@ type Runner struct {
 	UVMFaultLatencyUS   float64
 	UVMAccessCounter    bool
 	UVMACThreshold      uint64
+	UVMLazyRemotePTE    bool // sbin_claude_uvm
 	UVMExpandRatio      float64
 	UVMmaxFetchSize     uint64
 	UVMNoPrefetch       bool
@@ -153,6 +154,7 @@ func (r *Runner) buildTimingPlatform() {
 			FaultLatencyUS:         r.UVMFaultLatencyUS,
 			AccessCounterEnabled:   r.UVMAccessCounter,
 			AccessCounterThreshold: r.UVMACThreshold,
+			LazyRemotePTE:          r.UVMLazyRemotePTE, // sbin_claude_uvm
 			TBNExpandRatio:         r.UVMExpandRatio,
 			TBNMaxFetchSize:        r.UVMmaxFetchSize,
 			PrefetchDisabled:       r.UVMNoPrefetch,

@@ -66,6 +66,11 @@ type UVMStats struct {
 	AccessCounterSuppressed uint64
 
 	// Mapping control.
+	// LazyRemoteMaps counts the INVALID -> REMOTE region installs performed on
+	// a first-access fault under LazyRemotePTE. It is a mapping publication,
+	// not a residency service, so it is counted apart from
+	// UniqueFaultServices and never charged a migration. // sbin_claude_uvm
+	LazyRemoteMaps        uint64
 	RemotePTEInstalls     uint64
 	LocalPTEInstalls      uint64
 	TLBRangeInvalidations uint64

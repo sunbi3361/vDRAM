@@ -29,6 +29,17 @@ type UVMConfig struct {
 	// AccessCounterThreshold is the number of remote accesses to one 64KB
 	// region that triggers a CPU->GPU migration.
 	AccessCounterThreshold uint64
+	// LazyRemotePTE defers the CPU-remote mapping to the first GPU access.
+	//
+	// With access counters on, the eager path publishes a REMOTE PTE for every
+	// managed page at allocation time, so a cold page is never INVALID and the
+	// first access is a counted remote access rather than a fault. This makes
+	// the page start INVALID instead: the first access to a 64KB region is a
+	// page fault whose only effect is to turn that region's PTEs from INVALID
+	// to REMOTE. Nothing migrates - migration stays the access counter's
+	// decision at AccessCounterThreshold. Requires AccessCounterEnabled.
+	// sbin_claude_uvm
+	LazyRemotePTE bool
 
 	// TBNExpandRatio is the occupancy percentage an ancestor node must exceed
 	// for TBN to expand into it. The comparison is strictly greater than.

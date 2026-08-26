@@ -108,7 +108,14 @@ func (m *UVMManager) registerManagedPage(
 
 	region.Pages = append(region.Pages, pageKey)
 
-	if m.config.AccessCounterEnabled {
+	// Pre-edit code (commented per project convention):
+	// if m.config.AccessCounterEnabled {
+	// 	m.installRemotePTE(managedPage)
+	// }
+	//
+	// sbin_claude_uvm: lazy mode leaves the page INVALID so that the first GPU
+	// access faults, and lets that fault publish the REMOTE mapping.
+	if m.config.AccessCounterEnabled && !m.config.LazyRemotePTE {
 		m.installRemotePTE(managedPage)
 	}
 }
@@ -130,6 +137,125 @@ func (m *UVMManager) installRemotePTE(managedPage *ManagedPage) {
 		RemoteAccessible: true,
 	})
 	m.stats.RemotePTEInstalls++
+}
+
+// tryLazyRemoteMapLocked answers a cold-region fault by publishing the
+// region's REMOTE mappings instead of opening a migration service.
+//
+// With LazyRemotePTE a managed page starts INVALID rather than REMOTE, so the
+// first access to a 64KB region faults. That fault is not a demand for
+// residency: the driver only publishes the CPU-remote mapping the eager path
+// would have published at allocation time, and the access counter keeps sole
+// responsibility for deciding when the region migrates (spec 7.1, 15). The
+// fixed software latency is charged once, the same way a fault service is.
+//
+// The install is region-scoped because the fault-service granularity is, and
+// because the replay that releases the stalled translations names a 64KB range
+// (spec 8.3): mapping only the faulting 4KB page would leave the other fifteen
+// to re-fault behind that same replay.
+//
+// It reports whether it took ownership of the fault. // sbin_claude_uvm
+func (m *UVMManager) tryLazyRemoteMapLocked(key RegionKey) bool {
+	if !m.config.AccessCounterEnabled || !m.config.LazyRemotePTE {
+		return false
+	}
+
+	region := m.regions[key]
+	if region == nil {
+		return false
+	}
+
+	// A region a fault service or a migration already owns is on its way to
+	// the GPU. Publishing a REMOTE mapping now would race the local one, so
+	// the fault takes the ordinary path and joins that work instead.
+	if region.busy() || region.MigrationID != "" || region.FaultID != "" {
+		return false
+	}
+
+	if m.pendingRemoteMaps[key] {
+		// The install is already scheduled; this fault rides its replay.
+		m.stats.CoalescedFaults++
+
+		return true
+	}
+
+	if !m.regionNeedsRemoteMapLocked(region) {
+		return false
+	}
+
+	m.pendingRemoteMaps[key] = true
+
+	now := m.d.TickScheduler.CurrentTime()
+	readyAt := now
+
+	if cycles := m.config.faultHandlingCycles(); cycles > 0 {
+		readyAt = m.config.GPUCoreFrequency.NCyclesLater(cycles, now)
+		m.stats.FaultHandlingTime += readyAt - now
+	}
+
+	m.d.Engine.Schedule(newRemoteMapCompleteEvent(readyAt, m.d, key))
+
+	return true
+}
+
+// regionNeedsRemoteMapLocked reports whether any page of the region is still a
+// cold CPU-resident page with no mapping published. // sbin_claude_uvm
+func (m *UVMManager) regionNeedsRemoteMapLocked(region *RegionState) bool {
+	for _, pk := range region.Pages {
+		managedPage := m.pages[pk]
+		if managedPage == nil {
+			continue
+		}
+
+		if managedPage.State == CPUResident && !managedPage.RemoteMapped {
+			return true
+		}
+	}
+
+	return false
+}
+
+// completeRemoteMap publishes the REMOTE mappings of one region and replays the
+// translations that were stalled on it.
+//
+// The region keeps its RegionIdle phase throughout: nothing was reserved, no
+// frame was taken, and no service slot was held, so there is nothing to
+// release. // sbin_claude_uvm
+func (m *UVMManager) completeRemoteMap(key RegionKey) {
+	m.stateMu.Lock()
+	defer m.stateMu.Unlock()
+
+	if !m.pendingRemoteMaps[key] {
+		return
+	}
+
+	delete(m.pendingRemoteMaps, key)
+
+	region := m.regions[key]
+	if region == nil {
+		m.sendFaultReplayLocked(key)
+
+		return
+	}
+
+	for _, pk := range region.Pages {
+		managedPage := m.pages[pk]
+		if managedPage == nil {
+			continue
+		}
+
+		// A page that became GPU-resident while the install was in flight
+		// already holds the better mapping; REMOTE must not overwrite it.
+		if managedPage.State != CPUResident || managedPage.RemoteMapped {
+			continue
+		}
+
+		m.installRemotePTE(managedPage)
+	}
+
+	m.stats.LazyRemoteMaps++
+
+	m.sendFaultReplayLocked(key)
 }
 
 // onPageFault ingests one 4KB fault request from a GPU GMMU.
@@ -161,6 +287,12 @@ func (m *UVMManager) onPageFault(
 		txn.demandVAddrs[pageBase] = true
 		m.stats.CoalescedFaults++
 
+		return
+	}
+
+	// sbin_claude_uvm: under LazyRemotePTE the first access to a cold region
+	// is answered by publishing its REMOTE mappings, not by migrating it.
+	if m.tryLazyRemoteMapLocked(key) {
 		return
 	}
 
