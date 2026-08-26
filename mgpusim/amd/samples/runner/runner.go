@@ -52,6 +52,22 @@ type Runner struct {
 	UVMGPUCapacityRatio float64
 	UVMOversubRatio     float64
 
+	// sbin_claude_utopia: Utopia hybrid RestSeg/FlexSeg configuration.
+	UtopiaRestSegRatio     float64
+	UtopiaRestSegBytes     uint64
+	UtopiaRestSegAssoc     int
+	UtopiaTARCacheBytes    uint64
+	UtopiaSFCacheBytes     uint64
+	UtopiaTARSFHitLatency  int
+	UtopiaTARSFMissLatency int
+
+	// sbin_claude_avatar: Avatar speculative-translation configuration.
+	AvatarCompressRatio       float64
+	AvatarValidationLatency   int
+	AvatarModEntries          int
+	AvatarConfidenceThreshold int
+	AvatarFrag                bool
+
 	GPUIDs     []int
 	benchmarks []benchmarks.Benchmark
 
@@ -137,6 +153,32 @@ func (r *Runner) buildTimingPlatform() {
 			GPUCapacityBytes:       r.UVMGPUCapacityBytes,
 			GPUCapacityRatio:       r.UVMGPUCapacityRatio,
 			OversubscriptionRatio:  r.UVMOversubRatio,
+		})
+	}
+
+	// sbin_claude_utopia: hand the Utopia knobs to the platform builder. They
+	// only take effect with -gpu=utopia.
+	if r.GPUType == "utopia" {
+		b = b.WithUtopia(timingconfig.UtopiaPlatformConfig{
+			RestSegRatio:  r.UtopiaRestSegRatio,
+			RestSegBytes:  r.UtopiaRestSegBytes,
+			Associativity: r.UtopiaRestSegAssoc,
+			TARCacheBytes: r.UtopiaTARCacheBytes,
+			SFCacheBytes:  r.UtopiaSFCacheBytes,
+			HitLatency:    r.UtopiaTARSFHitLatency,
+			MissLatency:   r.UtopiaTARSFMissLatency,
+		})
+	}
+
+	// sbin_claude_avatar: hand the Avatar knobs to the platform builder.
+	// They only take effect with -gpu=avatar.
+	if r.GPUType == "avatar" {
+		b = b.WithAvatar(timingconfig.AvatarPlatformConfig{
+			CompressRatio:       r.AvatarCompressRatio,
+			ValidationLatency:   r.AvatarValidationLatency,
+			ModEntries:          r.AvatarModEntries,
+			ConfidenceThreshold: r.AvatarConfidenceThreshold,
+			FragDisabled:        !r.AvatarFrag,
 		})
 	}
 

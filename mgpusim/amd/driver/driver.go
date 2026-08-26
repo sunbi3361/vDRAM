@@ -73,6 +73,14 @@ type Driver struct {
 
 	RemotePMCPorts []sim.Port
 
+	// sbin_claude_utopia: Utopia RestSeg policy configuration. Zero value
+	// (Enabled=false) leaves the baseline allocation path untouched.
+	utopiaConfig UtopiaConfig
+
+	// sbin_claude_avatar: Avatar policy configuration. Zero value
+	// (Enabled=false) leaves the baseline allocation path untouched.
+	avatarConfig AvatarConfig
+
 	uvm *UVMManager // sbin_codex: UVM demand-paging manager (nil when disabled).
 	// uvmGPUPorts holds the Command Processor UVM endpoint of every GPU, in
 	// device order. Device 1 is index 0. // sbin_codex
@@ -219,6 +227,25 @@ func (d *Driver) RegisterGPU(
 	}
 	gpuDevice.SetTotalMemSize(properties.DRAMSize)
 	d.memAllocator.RegisterDevice(gpuDevice)
+
+	// sbin_claude_utopia: carve the RestSeg out of the fresh frame pool before
+	// any allocation can touch the device (utopia.md 4.2). The reservation
+	// registers the segment layout in the shared registry that the GPU-side
+	// RestSeg walker reads.
+	if d.utopiaConfig.Enabled {
+		d.memAllocator.ReserveRestSeg(
+			gpuDevice.ID,
+			d.utopiaConfig.RestSegBytes,
+			d.utopiaConfig.Associativity)
+	}
+
+	// sbin_claude_avatar: with the fragmentation model on, the whole fresh
+	// frame pool is handed to the 2MB-region allocator before any
+	// allocation can touch the device, so region placement and the default
+	// sequential pool can never hand out the same frame twice.
+	if d.avatarConfig.Enabled && d.avatarConfig.FragEnabled {
+		d.memAllocator.ReserveAvatarRegions(gpuDevice.ID)
+	}
 
 	d.devices = append(d.devices, gpuDevice)
 }

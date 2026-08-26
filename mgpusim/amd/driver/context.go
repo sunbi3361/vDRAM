@@ -30,6 +30,12 @@ type Context struct {
 	buffers []*buffer
 }
 
+// PID returns the process ID of the context. // sbin_claude_utopia: exported
+// so tests and reporters can address translations for a driver context.
+func (c *Context) PID() vm.PID {
+	return c.pid
+}
+
 func (c *Context) markAllBuffersDirty() {
 	for _, b := range c.buffers {
 		b.l2Dirty = true

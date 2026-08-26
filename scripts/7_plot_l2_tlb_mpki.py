@@ -34,6 +34,7 @@ configs = [
     'ideal-l1tlb',
     'uvm',
     'uvm-ideal',
+    'utopia',  # sbin_claude_utopia
     ]
 
 benchmarks=[

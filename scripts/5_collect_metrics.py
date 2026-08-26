@@ -25,6 +25,17 @@ configs = [
     'uvm',
     'uvm-oversub-150',
     'uvm-ideal',
+    'utopia',  # sbin_claude_utopia
+    # sbin_claude_utopia: RestSeg ratio sweep configs, matching
+    # utopia_restseg_ratios in 3_gen_runners.py.
+    # 'utopia-rs-6',
+    # 'utopia-rs-25',
+    # 'utopia-rs-50',
+    'avatar',  # sbin_claude_avatar
+    # sbin_claude_avatar: compress ratio sweep configs, matching
+    # avatar_compress_ratios in 3_gen_runners.py.
+    # 'avatar-cr-50',
+    # 'avatar-cr-100',
     ]
 
 benchmarks=[
@@ -75,6 +86,16 @@ MEMORY_WHATS = (
 MIGRATION_WHATS = (
     "page_migration_count", "page_migration_pages",
     "page_migration_bytes", "page_migration_avg_latency",
+)
+# sbin_claude_utopia: RestSeg-walk counters emitted per UTU by the runner's
+# reportUtopia (report.go). Summed over GPUs like the L2 TLB miss counter.
+UTOPIA_WHATS = (
+    "utopia_rsw_hit_count", "utopia_rsw_miss_count",
+    "utopia_sf_filtered_count",
+    "utopia_sf_cache_hit_count", "utopia_sf_cache_miss_count",
+    "utopia_tar_cache_hit_count", "utopia_tar_cache_miss_count",
+    "utopia_flexseg_walk_count", "utopia_passthrough_count",
+    "utopia_restseg_occupied_frames",
 )
 
 TIMESTAMP_RE = re.compile(r"^\d{6}_\d{4}$")
@@ -157,6 +178,10 @@ def extract_metrics(sqlite_path):
         elif what == "miss" and loc.endswith(".L2TLB"):
             out.setdefault("l2_tlb_miss", 0.0)
             out["l2_tlb_miss"] += float(value)
+        # sbin_claude_utopia: sum RestSeg-walk counters over every UTU.
+        elif what in UTOPIA_WHATS and loc.endswith(".UTU"):
+            out.setdefault(what, 0.0)
+            out[what] += float(value)
     return out
 
 
@@ -191,7 +216,10 @@ def main():
         "page_migration_count", "page_migration_pages",
         "page_migration_bytes", "page_migration_avg_latency",
         "pcie_page_migration_payload_bytes",
-        "l2_tlb_mpki", "l2_tlb_miss", "error",
+        "l2_tlb_mpki", "l2_tlb_miss",
+        # sbin_claude_utopia: RestSeg-walk summary columns.
+        *UTOPIA_WHATS,
+        "error",
     ]
 
     os.makedirs(os.path.dirname(args.output), exist_ok=True)

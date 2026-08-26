@@ -38,6 +38,8 @@ configs = [
     'uvm',
     'uvm-ideal',
     'uvm-oversub-150',
+    'utopia',  # sbin_claude_utopia
+    'avatar',  # sbin_claude_avatar
     ]
 
 benchmarks=[
@@ -80,6 +82,8 @@ COLORS = {
     "unified-infinite-l1tlb": "#DD8452",
     "unified-infinite-l2tlb": "#8172B2",
     "baseline": "#7F7F7F",
+    "utopia": "#CCB974",  # sbin_claude_utopia
+    "avatar": "#64B5CD",  # sbin_claude_avatar
 }
 
 

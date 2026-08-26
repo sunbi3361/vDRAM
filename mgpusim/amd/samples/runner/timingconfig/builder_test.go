@@ -11,6 +11,7 @@ import (
 	"github.com/sarchlab/mgpusim/v4/amd/samples/runner/timingconfig/gpubuilder"
 	ideall1tlb "github.com/sarchlab/mgpusim/v4/amd/samples/runner/timingconfig/ideal-l1tlb"
 	"github.com/sarchlab/mgpusim/v4/amd/samples/runner/timingconfig/r9nano"
+	utopiagpu "github.com/sarchlab/mgpusim/v4/amd/samples/runner/timingconfig/utopia"               // sbin_claude_utopia: utopia selector coverage.
 	virtualcaching "github.com/sarchlab/mgpusim/v4/amd/samples/runner/timingconfig/virtual-caching" // sbin_codex: virtual-caching selector coverage.
 )
 
@@ -63,6 +64,7 @@ var _ = Describe("GPU builder selector", func() {
 		// Entry("virtual-caching returns virtualcaching.Builder", "virtual-caching", virtualcaching.Builder{}),
 		// sbin_codex: selector target.
 		Entry("virtual-caching returns virtualcaching.Builder", "virtual-caching", virtualcaching.Builder{}),
+		Entry("utopia returns utopiagpu.Builder", "utopia", utopiagpu.Builder{}), // sbin_claude_utopia
 		Entry("unknown selector falls back to r9nano.Builder", "not-a-gpu", r9nano.Builder{}),
 	)
 })

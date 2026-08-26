@@ -13,7 +13,42 @@ configs = [
     # each benchmark's own AllocateManaged footprint, so every benchmark is
     # oversubscribed by the same ratio regardless of how much it allocates.
     'uvm-oversub-150',
+    # sbin_claude_utopia: hybrid RestSeg/FlexSeg translation (-gpu=utopia).
+    # 'utopia' uses the runner defaults (RestSeg ratio 0.125, 16 ways).
+    # RestSeg-ratio sweep entries go into utopia_restseg_ratios below.
+    'utopia',
+    # sbin_claude_avatar: speculative translation with rapid validation
+    # (-gpu=avatar). 'avatar' uses the runner defaults (compress ratio 0.8,
+    # validation latency 200, 2MB-region fragmentation on). Compress-ratio
+    # sweep entries go into avatar_compress_ratios below.
+    'avatar',
     ]
+
+# sbin_claude_utopia: RestSeg ratio per utopia sweep config, mirroring the
+# oversubscription_ratios pattern:
+#
+#   ratio = RestSeg bytes / GPU memory (FlexSeg keeps the remainder)
+#
+# Each key is generated as its own config directory/runner. Uncomment (or
+# add) entries to sweep the ratio; the plain 'utopia' config keeps the
+# default 0.125.
+utopia_restseg_ratios = {
+    # 'utopia-rs-6':  0.0625,
+    # 'utopia-rs-25': 0.25,
+    # 'utopia-rs-50': 0.5,
+    }
+configs += list(utopia_restseg_ratios)  # sbin_claude_utopia
+
+# sbin_claude_avatar: compress ratio per avatar sweep config (fraction of
+# frames whose sectors embed page information for CAVA rapid validation).
+# Each key is generated as its own config directory/runner. Uncomment (or
+# add) entries to sweep the ratio; the plain 'avatar' config keeps the
+# default 0.8.
+avatar_compress_ratios = {
+    # 'avatar-cr-50':  0.5,
+    # 'avatar-cr-100': 1.0,
+    }
+configs += list(avatar_compress_ratios)  # sbin_claude_avatar
 
 # sbin_codex: oversubscription ratio per config (uvm-manager.md 20).
 #
@@ -105,6 +140,9 @@ for config in configs:
         slurm_node = (slurm_node + 1) % 4
         # slurm_node = 3
         print(config, benchmark)
+        # sbin_claude_utopia: sweep configs (utopia_restseg_ratios keys) have
+        # no directory from 2_copy_benchmarks.sh, so create it here.
+        os.makedirs(script_path + config, exist_ok=True)
         submit_file_name = script_path + config + "/" + benchmark + ".sh"
         submit_file = open(submit_file_name, "w")
         submit_file.write("#!/bin/bash\n")
@@ -146,6 +184,23 @@ for config in configs:
                 missing_working_set.add(benchmark)
                 submit_file.write("-uvm-oversubscription-ratio="
                                   + str(ratio) + " ")
+        # sbin_claude_utopia: utopia configs. The plain config relies on the
+        # runner defaults; sweep configs pin the RestSeg ratio explicitly.
+        elif config == 'utopia':
+            submit_file.write("-gpu=utopia ")
+            submit_file.write("-utopia-restseg-ratio=0.8 ")
+        elif config in utopia_restseg_ratios:
+            submit_file.write("-gpu=utopia ")
+            submit_file.write("-utopia-restseg-ratio="
+                              + str(utopia_restseg_ratios[config]) + " ")
+        # sbin_claude_avatar: avatar configs. The plain config relies on the
+        # runner defaults; sweep configs pin the compress ratio explicitly.
+        elif config == 'avatar':
+            submit_file.write("-gpu=avatar ")
+        elif config in avatar_compress_ratios:
+            submit_file.write("-gpu=avatar ")
+            submit_file.write("-avatar-compress-ratio="
+                              + str(avatar_compress_ratios[config]) + " ")
         else:
             raise ValueError("unknown config " + config)
         submit_file.write("\\\n\t")
@@ -173,8 +228,8 @@ for config in configs:
             submit_file.write("-max-inst=10000000 ") # 10M
         elif benchmark == 'rodinia_backprop':
             submit_file.write("-max-inst=30000000 ") # 30M
-        elif benchmark == 'nbody':
-            submit_file.write("-max-inst=10000000 ") # 10M
+        # elif benchmark == 'nbody':
+        #     submit_file.write("-max-inst=10000000 ") # 10M
         elif benchmark == 'pagerank':
             submit_file.write("-max-inst=10000000 ") # 10M
         else:

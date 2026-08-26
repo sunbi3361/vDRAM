@@ -4,7 +4,7 @@
 새롭게 파일 수정 시
 
 수정 전 코드는 주석 처리
-수정된 코드에는 sbin_codex 표기
+수정된 코드에는 sbin_claude 표기
 
 필수 사용 flag: -timing -parallel -gpu=r9nano -arch=gcn3 -report-all  <!-- sbin_codex -->
 

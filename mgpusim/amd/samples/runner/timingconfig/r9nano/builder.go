@@ -20,9 +20,11 @@ import (
 	"github.com/sarchlab/mgpusim/v4/amd/samples/runner/timingconfig/gpubuilder"
 	"github.com/sarchlab/mgpusim/v4/amd/samples/runner/timingconfig/shaderarray"
 	"github.com/sarchlab/mgpusim/v4/amd/timing/accesscounter" // sbin_codex
+	"github.com/sarchlab/mgpusim/v4/amd/timing/avatar/asu"    // sbin_claude_avatar: speculation unit component.
 	"github.com/sarchlab/mgpusim/v4/amd/timing/cp"
 	"github.com/sarchlab/mgpusim/v4/amd/timing/pagemigrationcontroller"
 	"github.com/sarchlab/mgpusim/v4/amd/timing/rdma"
+	"github.com/sarchlab/mgpusim/v4/amd/timing/utopia/rsw" // sbin_claude_utopia: RestSeg walker component.
 )
 
 // Builder builds a hardware platform for timing simulation.
@@ -46,8 +48,10 @@ type Builder struct {
 	gmmu                           *gmmu.Comp   // sbin_codex: GPU-side translation endpoint.
 	pageTable                      vm.PageTable // sbin_codex: this GPU's private page table.
 	rdmaAddressMapper              mem.AddressToPortMapper
-	dataPathTopology               DataPathTopology // sbin_codex
-	memoryTopology                 MemoryTopology   // sbin_codex
+	dataPathTopology               DataPathTopology    // sbin_codex
+	memoryTopology                 MemoryTopology      // sbin_codex
+	translationTopology            TranslationTopology // sbin_claude_utopia: walker chain below the L2 TLB.
+	speculationTopology            SpeculationTopology // sbin_claude_avatar: interposer above the L2 TLB.
 
 	gpu                  *sim.Domain
 	cp                   *cp.CommandProcessor
@@ -73,6 +77,8 @@ type Builder struct {
 	tlbCtrlPorts         []sim.RemotePort    // sbin_codex: UVM range-invalidation targets.
 	accessCounter        *accesscounter.Comp // sbin_codex: GPU-side UVM counter.
 	accessCounterThresh  uint64              // sbin_codex
+	utu                  *rsw.Comp           // sbin_claude_utopia: RestSeg walker (nil on baseline).
+	asu                  *asu.Comp           // sbin_claude_avatar: speculation unit (nil on baseline).
 }
 
 // MakeBuilder creates a new builder.
@@ -88,8 +94,10 @@ func MakeBuilder() Builder {
 		log2MemoryBankInterleavingSize: 7,
 		memAddrOffset:                  0,
 		dramSize:                       4 * mem.GB,
-		dataPathTopology:               NewBaselineDataPathTopology(), // sbin_codex: baseline is the nil-free default.
-		memoryTopology:                 NewBaselineMemoryTopology(),   // sbin_codex: baseline is the nil-free default.
+		dataPathTopology:               NewBaselineDataPathTopology(),    // sbin_codex: baseline is the nil-free default.
+		memoryTopology:                 NewBaselineMemoryTopology(),      // sbin_codex: baseline is the nil-free default.
+		translationTopology:            NewBaselineTranslationTopology(), // sbin_claude_utopia: nil-free default.
+		speculationTopology:            NewBaselineSpeculationTopology(), // sbin_claude_avatar: nil-free default.
 	}
 }
 
@@ -244,6 +252,20 @@ func (b Builder) WithMemoryTopology(topology MemoryTopology) Builder {
 	return b
 }
 
+// WithTranslationTopology sets the walker chain below the shared L2 TLB
+// (baseline GMMU-only, or Utopia UTU+GMMU). // sbin_claude_utopia
+func (b Builder) WithTranslationTopology(topology TranslationTopology) Builder {
+	b.translationTopology = topology
+	return b
+}
+
+// WithSpeculationTopology sets what serves the L1 TLB bottom ports
+// (baseline direct L2 TLB, or the Avatar ASU). // sbin_claude_avatar
+func (b Builder) WithSpeculationTopology(topology SpeculationTopology) Builder {
+	b.speculationTopology = topology
+	return b
+}
+
 // Build builds the hardware platform.
 func (b Builder) Build(name string) *sim.Domain {
 	b.validateTopologyPair() // sbin_codex: reject invalid composition before domain or mapper construction.
@@ -266,7 +288,13 @@ func (b Builder) Build(name string) *sim.Domain {
 	b.buildL2Caches()
 	b.buildCP()
 	b.buildGMMU() // sbin_codex: the L2 TLB must target the GPU-side walker.
+	// sbin_claude_utopia: extra walkers (the Utopia UTU) are built between the
+	// GMMU and the L2 TLB so the L2 TLB can target them as its provider.
+	b.translationTopology.buildWalkers(&b)
 	b.buildL2TLB()
+	// sbin_claude_avatar: the ASU is built after the L2 TLB so it can
+	// retarget the l1TLBAddressMapper and forward to the L2 TLB top.
+	b.speculationTopology.buildSpeculationUnit(&b)
 	// b.buildL2AddressTranslators()
 	b.memoryTopology.buildBoundary(&b) // sbin_codex: boundary construction follows the shared L2 TLB.
 
@@ -274,7 +302,15 @@ func (b Builder) Build(name string) *sim.Domain {
 	b.connectL2AndDRAM()
 	b.connectL1ToL2()
 	b.connectL1TLBToL2TLB()
-	b.connectL2TLBToGMMU() // sbin_codex: complete the GPU translation path.
+	// Pre-edit code (commented per project convention):
+	// b.connectL2TLBToGMMU() // sbin_codex: complete the GPU translation path.
+	//
+	// sbin_claude_utopia: the translation topology owns the L2TLB-to-walker
+	// wiring; the baseline delegates back to connectL2TLBToGMMU.
+	b.translationTopology.connectWalkers(&b)
+	// sbin_claude_avatar: wire the ASU bottom to the L2 TLB top (no-op on
+	// the baseline).
+	b.speculationTopology.connectSpeculation(&b)
 
 	b.populateExternalPorts()
 
@@ -801,8 +837,15 @@ func (b *Builder) buildL2TLB() {
 		WithNumReqPerCycle(1024).
 		WithLog2PageSize(b.log2PageSize).
 		// WithLowModule(b.gmmu.GetPortByName("Top").AsRemote()). // sbin_codex: route L2 misses through GMMU.
+		// Pre-edit code (commented per project convention):
+		// WithTranslationProviderMapper(&mem.SinglePortMapper{
+		// 	Port: b.gmmu.GetPortByName("Top").AsRemote(), // sbin_codex
+		// })
+		//
+		// sbin_claude_utopia: the translation topology decides whether L2 TLB
+		// misses go to the GMMU (baseline) or the UTU RestSeg walker (utopia).
 		WithTranslationProviderMapper(&mem.SinglePortMapper{
-			Port: b.gmmu.GetPortByName("Top").AsRemote(), // sbin_codex
+			Port: b.translationTopology.l2TLBTranslationProvider(b),
 		})
 
 	l2TLB := builder.Build(fmt.Sprintf("%s.L2TLB", b.name))

@@ -14,6 +14,8 @@ import (
 	"github.com/sarchlab/mgpusim/v4/amd/timing/accesscounter" // sbin_codex
 	"github.com/sarchlab/mgpusim/v4/amd/timing/cu"
 	"github.com/sarchlab/mgpusim/v4/amd/timing/rdma"
+	"github.com/sarchlab/mgpusim/v4/amd/timing/avatar/asu" // sbin_claude_avatar
+	"github.com/sarchlab/mgpusim/v4/amd/timing/utopia/rsw" // sbin_claude_utopia
 )
 
 const (
@@ -101,6 +103,14 @@ type reporter struct {
 	// accessCounters are the GPU-side UVM remote-access counters. They own the
 	// remote-access and write-stall statistics. // sbin_codex
 	accessCounters []*accesscounter.Comp
+
+	// utopiaUnits are the per-GPU Utopia RestSeg walkers (UTU). They own the
+	// RSW hit/miss and TAR/SF cache statistics. // sbin_claude_utopia
+	utopiaUnits []*rsw.Comp
+
+	// avatarUnits are the per-GPU Avatar Speculation Units (ASU). They own
+	// the speculation/CAVA/EAF statistics. // sbin_claude_avatar
+	avatarUnits []*asu.Comp
 }
 
 func newReporter(s *simulation.Simulation) *reporter {
@@ -118,8 +128,50 @@ func newReporter(s *simulation.Simulation) *reporter {
 	}
 
 	r.collectAccessCounters(s) // sbin_codex
+	r.collectUtopiaUnits(s)    // sbin_claude_utopia
+	r.collectAvatarUnits(s)    // sbin_claude_avatar
 
 	return r
+}
+
+// collectAvatarUnits finds every GPU-side Avatar Speculation Unit.
+// sbin_claude_avatar
+func (r *reporter) collectAvatarUnits(s *simulation.Simulation) {
+	for i := 1; ; i++ {
+		name := fmt.Sprintf("GPU[%d].ASU", i)
+
+		c := s.GetComponentByName(name)
+		if c == nil {
+			return
+		}
+
+		unit, ok := c.(*asu.Comp)
+		if !ok {
+			return
+		}
+
+		r.avatarUnits = append(r.avatarUnits, unit)
+	}
+}
+
+// collectUtopiaUnits finds every GPU-side Utopia RestSeg walker.
+// sbin_claude_utopia
+func (r *reporter) collectUtopiaUnits(s *simulation.Simulation) {
+	for i := 1; ; i++ {
+		name := fmt.Sprintf("GPU[%d].UTU", i)
+
+		c := s.GetComponentByName(name)
+		if c == nil {
+			return
+		}
+
+		unit, ok := c.(*rsw.Comp)
+		if !ok {
+			return
+		}
+
+		r.utopiaUnits = append(r.utopiaUnits, unit)
+	}
 }
 
 // collectAccessCounters finds every GPU-side UVM access counter. // sbin_codex
@@ -451,6 +503,106 @@ func (r *reporter) report() {
 	r.extended.report(r) // sbin_codex: emit summary metrics without page-fault detail rows.
 	r.reportL2TLBMPKI()  // sbin_codex: L2 TLB MPKI from the shared tracers.
 	r.reportUVM()        // sbin_codex: UVM demand-paging statistics.
+	r.reportUtopia()     // sbin_claude_utopia: RestSeg walk statistics.
+	r.reportAvatar()     // sbin_claude_avatar: speculation statistics.
+}
+
+// reportAvatar emits the speculation, CAVA-validation, and EAF counters of
+// every ASU, plus the registry-side metadata/region counters
+// (refs/avatar.md 5.13 statistics row). // sbin_claude_avatar
+func (r *reporter) reportAvatar() {
+	for i, unit := range r.avatarUnits {
+		stats := unit.Stats()
+		location := fmt.Sprintf("GPU[%d].ASU", i+1)
+
+		rows := []struct {
+			what string
+			val  float64
+		}{
+			{"avatar_l1_miss_forwarded_count", float64(stats.Forwarded)},
+			{"avatar_speculation_count", float64(stats.Speculations)},
+			{"avatar_cava_pass_count", float64(stats.CAVAPass)},
+			{"avatar_cava_mismatch_count", float64(stats.CAVAMismatch)},
+			{"avatar_cava_incompressible_count",
+				float64(stats.CAVAIncompressible)},
+			{"avatar_cava_no_metadata_count", float64(stats.CAVANoMetadata)},
+			{"avatar_early_completion_count",
+				float64(stats.EarlyCompletions)},
+			{"avatar_real_response_first_count",
+				float64(stats.RealResponseFirst)},
+			{"avatar_swallowed_rsp_count", float64(stats.SwallowedRsps)},
+			{"avatar_page_table_veto_count", float64(stats.PageTableVetoes)},
+		}
+
+		if r.driver != nil && r.driver.AvatarRegistry() != nil {
+			regStats := r.driver.AvatarRegistry().Stats()
+			bound, free := r.driver.AvatarRegistry().Occupancy(i + 1)
+			rows = append(rows, []struct {
+				what string
+				val  float64
+			}{
+				{"avatar_frame_install_count",
+					float64(regStats.FrameInstalls)},
+				{"avatar_frame_invalidate_count",
+					float64(regStats.FrameInvalidates)},
+				{"avatar_region_bound_count", float64(bound)},
+				{"avatar_region_free_count", float64(free)},
+			}...)
+		}
+
+		for _, row := range rows {
+			r.dataRecorder.InsertData(tableName, metric{
+				Location: location,
+				What:     row.what,
+				Value:    row.val,
+				Unit:     "",
+			})
+		}
+	}
+}
+
+// reportUtopia emits the RestSeg walk and TAR/SF cache counters of every UTU,
+// plus the RestSeg occupancy from the driver-owned registry (utopia.md 4.14).
+// sbin_claude_utopia
+func (r *reporter) reportUtopia() {
+	for i, unit := range r.utopiaUnits {
+		stats := unit.Stats()
+		location := fmt.Sprintf("GPU[%d].UTU", i+1)
+
+		rows := []struct {
+			what string
+			val  float64
+		}{
+			{"utopia_rsw_hit_count", float64(stats.RSWHits)},
+			{"utopia_rsw_miss_count", float64(stats.RSWMisses)},
+			{"utopia_sf_filtered_count", float64(stats.SFFiltered)},
+			{"utopia_sf_cache_hit_count", float64(stats.SFCacheHits)},
+			{"utopia_sf_cache_miss_count", float64(stats.SFCacheMisses)},
+			{"utopia_tar_cache_hit_count", float64(stats.TARCacheHits)},
+			{"utopia_tar_cache_miss_count", float64(stats.TARCacheMisses)},
+			{"utopia_flexseg_walk_count", float64(stats.FlexSegWalks)},
+			{"utopia_passthrough_count", float64(stats.Passthrough)},
+		}
+
+		if r.driver != nil && r.driver.UtopiaRegistry() != nil {
+			rows = append(rows, struct {
+				what string
+				val  float64
+			}{
+				"utopia_restseg_occupied_frames",
+				float64(r.driver.UtopiaRegistry().OccupiedFrames(i + 1)),
+			})
+		}
+
+		for _, row := range rows {
+			r.dataRecorder.InsertData(tableName, metric{
+				Location: location,
+				What:     row.what,
+				Value:    row.val,
+				Unit:     "",
+			})
+		}
+	}
 }
 
 // reportUVM emits the UVM counter set required by spec 27. Every counter has

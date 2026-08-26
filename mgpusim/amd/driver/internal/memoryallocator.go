@@ -5,6 +5,8 @@ import (
 	"sync"
 
 	"github.com/sarchlab/akita/v4/mem/vm"
+	"github.com/sarchlab/mgpusim/v4/amd/timing/avatar/meta"    // sbin_claude_avatar: shared Avatar metadata/placement state.
+	"github.com/sarchlab/mgpusim/v4/amd/timing/utopia/restseg" // sbin_claude_utopia: shared RestSeg layout/state.
 )
 
 // A MemoryAllocator can allocate memory on the CPU and GPUs
@@ -33,6 +35,27 @@ type MemoryAllocator interface {
 	TryAllocatePhysicalPage(deviceID int) (uint64, bool)
 	// FreePhysicalPage returns a physical frame to a device.
 	FreePhysicalPage(deviceID int, pAddr uint64)
+
+	// sbin_claude_utopia: Utopia RestSeg allocator APIs.
+	// SetUtopiaRegistry attaches the shared authoritative RestSeg state. When
+	// set, allocations on devices that own a RestSeg try the hashed set first
+	// and fall back to FlexSeg (utopia.md 4.8).
+	SetUtopiaRegistry(registry *restseg.Registry)
+	// ReserveRestSeg carves a contiguous RestSeg region out of a device's
+	// frame pool so the normal allocator can never hand out RestSeg frames
+	// (RestSeg XOR FlexSeg invariant, utopia.md 4.9).
+	ReserveRestSeg(deviceID int, bytes uint64, associativity int) restseg.Config
+
+	// sbin_claude_avatar: Avatar metadata/placement allocator APIs.
+	// SetAvatarRegistry attaches the shared authoritative Avatar state.
+	// When set, page mutations install/invalidate embedded page metadata;
+	// with fragEnabled, GPU frame placement additionally goes through the
+	// 2MB-region randomized allocator (avatar-plan.md 1.3, 1.4).
+	SetAvatarRegistry(registry *meta.Registry, fragEnabled bool)
+	// ReserveAvatarRegions hands a device's whole fresh frame pool to the
+	// 2MB-region allocator so the default sequential pool can never hand
+	// out the same frame again.
+	ReserveAvatarRegions(deviceID int)
 }
 
 // NewMemoryAllocator creates a new memory allocator.
@@ -83,6 +106,162 @@ type memoryAllocatorImpl struct {
 	livePageCount        uint64 // sbin_codex: physical footprint tracer state.
 	peakPageCount        uint64 // sbin_codex: physical footprint tracer state.
 	totalPageCount       uint64 // sbin_codex: physical footprint tracer state.
+
+	// sbin_claude_utopia: authoritative RestSeg state shared with the GPU-side
+	// RestSeg walker. Nil when Utopia is disabled.
+	utopiaRegistry *restseg.Registry
+
+	// sbin_claude_avatar: authoritative Avatar metadata/placement state
+	// shared with the GPU-side ASU. Nil when Avatar is disabled.
+	avatarRegistry    *meta.Registry
+	avatarFragEnabled bool
+}
+
+// SetAvatarRegistry attaches the shared Avatar state. // sbin_claude_avatar
+func (a *memoryAllocatorImpl) SetAvatarRegistry(
+	registry *meta.Registry,
+	fragEnabled bool,
+) {
+	a.Lock()
+	defer a.Unlock()
+
+	a.avatarRegistry = registry
+	a.avatarFragEnabled = fragEnabled
+}
+
+// ReserveAvatarRegions drains a device's fresh frame pool into the Avatar
+// 2MB-region allocator. It must run right after RegisterDevice, before any
+// allocation on the device, so region placement and the default sequential
+// pool can never hand out the same frame twice. // sbin_claude_avatar
+func (a *memoryAllocatorImpl) ReserveAvatarRegions(deviceID int) {
+	a.Lock()
+	defer a.Unlock()
+
+	if a.avatarRegistry == nil {
+		panic("avatar: ReserveAvatarRegions requires a registry")
+	}
+	if MemoryAllocatorType != AllocatorTypeDefault {
+		panic("avatar: region reservation supports the default allocator only")
+	}
+
+	device, found := a.devices[deviceID]
+	if !found {
+		panic("avatar: device not registered")
+	}
+
+	pageSize := uint64(1) << a.log2PageSize
+	base := device.MemState.getInitialAddress()
+	size := device.MemState.getStorageSize()
+
+	for !device.MemState.noAvailablePAddrs() {
+		device.MemState.popNextAvailablePAddrs()
+	}
+
+	a.avatarRegistry.RegisterDevice(deviceID, base, size, pageSize)
+}
+
+// tryAvatarAllocate places a page through the 2MB-region randomized
+// allocator when the Avatar fragmentation model owns the device's frames.
+// sbin_claude_avatar
+func (a *memoryAllocatorImpl) tryAvatarAllocate(
+	deviceID int,
+	pid vm.PID,
+	vAddr uint64,
+) (pAddr uint64, ok bool) {
+	if a.avatarRegistry == nil || !a.avatarFragEnabled {
+		return 0, false
+	}
+	if !a.avatarRegistry.HasDevice(deviceID) {
+		return 0, false
+	}
+
+	pAddr, ok = a.avatarRegistry.AllocateFrame(deviceID, pid, vAddr)
+	if !ok {
+		panic("avatar: 2MB region pool exhausted; " +
+			"disable -avatar-frag or shrink the working set")
+	}
+
+	return pAddr, true
+}
+
+// avatarInstall records embedded page metadata for a fresh mapping.
+// sbin_claude_avatar
+func (a *memoryAllocatorImpl) avatarInstall(page vm.Page) {
+	if a.avatarRegistry == nil {
+		return
+	}
+
+	a.avatarRegistry.Install(page.PAddr, page.PID, page.VAddr)
+}
+
+// avatarOnUpdate keeps embedded page metadata coherent across a mapping
+// update: the old physical location of a moved page must never validate a
+// future mis-speculation (refs/avatar.md 5.11). // sbin_claude_avatar
+func (a *memoryAllocatorImpl) avatarOnUpdate(
+	old vm.Page,
+	hadOld bool,
+	page vm.Page,
+) {
+	if a.avatarRegistry == nil {
+		return
+	}
+
+	if hadOld && old.PAddr != page.PAddr {
+		a.avatarRegistry.Invalidate(old.PAddr)
+	}
+
+	if page.Valid {
+		a.avatarRegistry.Install(page.PAddr, page.PID, page.VAddr)
+	} else {
+		a.avatarRegistry.Invalidate(page.PAddr)
+	}
+}
+
+// SetUtopiaRegistry attaches the shared RestSeg registry. // sbin_claude_utopia
+func (a *memoryAllocatorImpl) SetUtopiaRegistry(registry *restseg.Registry) {
+	a.Lock()
+	defer a.Unlock()
+
+	a.utopiaRegistry = registry
+}
+
+// ReserveRestSeg pops the leading contiguous frames of a device out of the
+// normal frame pool and registers them as a RestSeg. It must run right after
+// RegisterDevice, before any allocation on the device. // sbin_claude_utopia
+func (a *memoryAllocatorImpl) ReserveRestSeg(
+	deviceID int,
+	bytes uint64,
+	associativity int,
+) restseg.Config {
+	a.Lock()
+	defer a.Unlock()
+
+	if a.utopiaRegistry == nil {
+		panic("utopia: ReserveRestSeg requires a registry (SetUtopiaRegistry)")
+	}
+	if MemoryAllocatorType != AllocatorTypeDefault {
+		panic("utopia: RestSeg reservation supports the default allocator only")
+	}
+
+	device, found := a.devices[deviceID]
+	if !found {
+		panic("utopia: device not registered")
+	}
+
+	pageSize := uint64(1) << a.log2PageSize
+	base := device.MemState.getInitialAddress()
+	cfg := restseg.MakeConfig(deviceID, base, bytes, pageSize, associativity)
+
+	for i := 0; i < cfg.NumFrames(); i++ {
+		pAddr := device.MemState.popNextAvailablePAddrs()
+		if pAddr != base+uint64(i)*pageSize {
+			panic("utopia: RestSeg reservation requires contiguous leading frames")
+		}
+	}
+
+	a.utopiaRegistry.AddSegment(cfg)
+
+	return cfg
 }
 
 func (a *memoryAllocatorImpl) RegisterDevice(device *Device) {
@@ -114,6 +293,14 @@ func (a *memoryAllocatorImpl) RegisterPageTable(
 // sbin_codex
 func (a *memoryAllocatorImpl) insertPage(page vm.Page) {
 	a.pageTable.Insert(page)
+	a.avatarInstall(page) // sbin_claude_avatar: embed page metadata.
+	// sbin_claude_utopia: RestSeg pages are mapped by the TAR only. They must
+	// never enter a GPU page table, or the FlexSeg walk would resolve them and
+	// break the RestSeg XOR FlexSeg invariant (utopia.md 4.9). The CPU table
+	// keeps the mapping for driver-functional paths (memcopy, CPU MMU).
+	if a.isRestSegFrame(page.PAddr) {
+		return
+	}
 	for _, gpuPageTable := range a.gpuPageTables {
 		gpuPageTable.Insert(page)
 	}
@@ -122,9 +309,41 @@ func (a *memoryAllocatorImpl) insertPage(page vm.Page) {
 // updatePage updates the same mapping in the CPU table and every GPU table.
 // sbin_codex
 func (a *memoryAllocatorImpl) updatePage(page vm.Page) {
+	// Pre-edit code (commented per project convention):
+	// a.pageTable.Update(page)
+	// for _, gpuPageTable := range a.gpuPageTables {
+	// 	gpuPageTable.Update(page)
+	// }
+	//
+	// sbin_claude_utopia: a page may change mapping domain on update. The GPU
+	// tables only ever hold FlexSeg mappings, so domain transitions insert or
+	// remove the GPU-side entry while the CPU table is always updated.
 	a.pageTable.Update(page)
-	for _, gpuPageTable := range a.gpuPageTables {
-		gpuPageTable.Update(page)
+
+	wasRestSeg := a.utopiaRegistry != nil &&
+		a.utopiaRegistry.IsResident(page.PID, page.VAddr)
+	isRestSeg := a.isRestSegFrame(page.PAddr)
+
+	switch {
+	case wasRestSeg && isRestSeg:
+		// Stays TAR-mapped; GPU tables never held it.
+	case wasRestSeg && !isRestSeg:
+		// RestSeg -> FlexSeg: release the TAR way and surface the mapping to
+		// the GPU tables for the first time.
+		a.utopiaRegistry.Release(page.PID, page.VAddr)
+		for _, gpuPageTable := range a.gpuPageTables {
+			gpuPageTable.Insert(page)
+		}
+	case !wasRestSeg && isRestSeg:
+		// FlexSeg -> RestSeg (explicit migration): the GPU tables must forget
+		// the FlexSeg mapping. The caller updates the TAR via the registry.
+		for _, gpuPageTable := range a.gpuPageTables {
+			gpuPageTable.Remove(page.PID, page.VAddr)
+		}
+	default:
+		for _, gpuPageTable := range a.gpuPageTables {
+			gpuPageTable.Update(page)
+		}
 	}
 }
 
@@ -132,9 +351,19 @@ func (a *memoryAllocatorImpl) updatePage(page vm.Page) {
 // sbin_codex
 func (a *memoryAllocatorImpl) removePageFromTables(page vm.Page) {
 	a.pageTable.Remove(page.PID, page.VAddr)
+	// sbin_claude_utopia: RestSeg pages never entered the GPU tables.
+	if a.isRestSegFrame(page.PAddr) {
+		return
+	}
 	for _, gpuPageTable := range a.gpuPageTables {
 		gpuPageTable.Remove(page.PID, page.VAddr)
 	}
+}
+
+// isRestSegFrame reports whether a physical address belongs to a reserved
+// RestSeg region. // sbin_claude_utopia
+func (a *memoryAllocatorImpl) isRestSegFrame(pAddr uint64) bool {
+	return a.utopiaRegistry != nil && a.utopiaRegistry.Contains(pAddr)
 }
 
 func (a *memoryAllocatorImpl) GetDeviceIDByPAddr(pAddr uint64) int {
@@ -216,8 +445,28 @@ func (a *memoryAllocatorImpl) allocatePages(
 	nextVAddr := pState.nextVAddr
 
 	for i := 0; i < numPages; i++ {
-		pAddr := device.allocatePage()
 		vAddr := nextVAddr + uint64(i)*pageSize
+
+		// Pre-edit code (commented per project convention):
+		// pAddr := device.allocatePage()
+		//
+		// sbin_claude_utopia: try the RestSeg first. The hashed set may have a
+		// free way (allocation-time placement plays the role of the paper's
+		// fault-based Mode A); a full set falls back to FlexSeg (utopia.md 4.8).
+		pAddr, inRestSeg := a.tryRestSegAllocate(deviceID, pid, vAddr)
+		if !inRestSeg {
+			// Pre-edit code (commented per project convention):
+			// pAddr = device.allocatePage()
+			//
+			// sbin_claude_avatar: with the fragmentation model on, GPU
+			// frames come from the 2MB-region randomized allocator.
+			if avatarPAddr, ok := a.tryAvatarAllocate(
+				deviceID, pid, vAddr); ok {
+				pAddr = avatarPAddr
+			} else {
+				pAddr = device.allocatePage()
+			}
+		}
 
 		page := vm.Page{
 			PID:      pid,
@@ -267,6 +516,20 @@ func (a *memoryAllocatorImpl) RemovePage(vAddr uint64) {
 	a.removePage(vAddr)
 }
 
+// tryRestSegAllocate places a page into the device's RestSeg when Utopia is
+// enabled and the hashed set has a free way. // sbin_claude_utopia
+func (a *memoryAllocatorImpl) tryRestSegAllocate(
+	deviceID int,
+	pid vm.PID,
+	vAddr uint64,
+) (pAddr uint64, ok bool) {
+	if a.utopiaRegistry == nil {
+		return 0, false
+	}
+
+	return a.utopiaRegistry.Allocate(deviceID, pid, vAddr)
+}
+
 func (a *memoryAllocatorImpl) removePage(vAddr uint64) {
 	page, ok := a.vAddrToPageMapping[vAddr]
 
@@ -274,9 +537,32 @@ func (a *memoryAllocatorImpl) removePage(vAddr uint64) {
 		panic("page not found")
 	}
 
-	deviceID := a.deviceIDByPAddr(page.PAddr)
-	dState := a.devices[deviceID].MemState
-	dState.addSinglePAddr(page.PAddr)
+	// Pre-edit code (commented per project convention):
+	// deviceID := a.deviceIDByPAddr(page.PAddr)
+	// dState := a.devices[deviceID].MemState
+	// dState.addSinglePAddr(page.PAddr)
+	//
+	// sbin_claude_utopia: a freed RestSeg frame goes back to the TAR/SF state,
+	// never to the FlexSeg frame pool; freed FlexSeg frames behave as before.
+	//
+	// sbin_claude_avatar: a region-owned frame returns to its 2MB region
+	// (the region rejoins the pool when its last page leaves); its embedded
+	// metadata is dropped so the stale location can never validate a future
+	// mis-speculation (refs/avatar.md 5.11).
+	if a.avatarRegistry != nil {
+		a.avatarRegistry.Invalidate(page.PAddr)
+	}
+	switch {
+	case a.isRestSegFrame(page.PAddr):
+		a.utopiaRegistry.Release(page.PID, page.VAddr)
+	case a.avatarRegistry != nil &&
+		a.avatarRegistry.FreeFrame(a.deviceIDByPAddr(page.PAddr), page.PAddr):
+		// Returned to the Avatar region pool.
+	default:
+		deviceID := a.deviceIDByPAddr(page.PAddr)
+		dState := a.devices[deviceID].MemState
+		dState.addSinglePAddr(page.PAddr)
+	}
 	a.recordFree()                      // sbin_codex: update physical footprint counters.
 	delete(a.vAddrToPageMapping, vAddr) // sbin_codex: keep live-page accounting accurate.
 
@@ -289,8 +575,14 @@ func (a *memoryAllocatorImpl) UpdatePage(page vm.Page) {
 	a.Lock()
 	defer a.Unlock()
 
+	// sbin_claude_avatar: capture the old mapping before it is overwritten
+	// so metadata on the old physical location can be invalidated.
+	old, hadOld := a.vAddrToPageMapping[page.VAddr]
+
 	a.vAddrToPageMapping[page.VAddr] = page
 	a.updatePage(page)
+
+	a.avatarOnUpdate(old, hadOld, page) // sbin_claude_avatar
 }
 
 func (a *memoryAllocatorImpl) AllocatePageWithGivenVAddr(
@@ -314,7 +606,14 @@ func (a *memoryAllocatorImpl) allocatePageWithGivenVAddr(
 	pageSize := uint64(1 << a.log2PageSize)
 
 	device := a.devices[deviceID]
-	pAddr := device.allocatePage()
+	// Pre-edit code (commented per project convention):
+	// pAddr := device.allocatePage()
+	//
+	// sbin_claude_avatar: route through the region allocator when active.
+	pAddr, inAvatar := a.tryAvatarAllocate(deviceID, pid, vAddr)
+	if !inAvatar {
+		pAddr = device.allocatePage()
+	}
 
 	page := vm.Page{
 		PID:      pid,
@@ -325,9 +624,11 @@ func (a *memoryAllocatorImpl) allocatePageWithGivenVAddr(
 		DeviceID: uint64(deviceID),
 		Unified:  isUnified,
 	}
+	old, hadOld := a.vAddrToPageMapping[page.VAddr] // sbin_claude_avatar
 	a.vAddrToPageMapping[page.VAddr] = page
-	a.updatePage(page)    // sbin_codex
-	a.recordAllocation(1) // sbin_codex: migration allocation contributes to footprint.
+	a.updatePage(page)                  // sbin_codex
+	a.avatarOnUpdate(old, hadOld, page) // sbin_claude_avatar
+	a.recordAllocation(1)               // sbin_codex: migration allocation contributes to footprint.
 
 	return page
 }
@@ -341,7 +642,19 @@ func (a *memoryAllocatorImpl) allocateMultiplePagesWithGivenVAddrs(
 	pageSize := uint64(1 << a.log2PageSize)
 
 	device := a.devices[deviceID]
-	pAddrs := device.allocateMultiplePages(len(vAddrs))
+	// Pre-edit code (commented per project convention):
+	// pAddrs := device.allocateMultiplePages(len(vAddrs))
+	//
+	// sbin_claude_avatar: allocate per-vAddr so the region allocator can
+	// keep each page at its position inside its 2MB region.
+	pAddrs := make([]uint64, 0, len(vAddrs))
+	for _, vAddr := range vAddrs {
+		if pAddr, ok := a.tryAvatarAllocate(deviceID, pid, vAddr); ok {
+			pAddrs = append(pAddrs, pAddr)
+		} else {
+			pAddrs = append(pAddrs, device.allocatePage())
+		}
+	}
 
 	for i, vAddr := range vAddrs {
 		page := vm.Page{
@@ -353,8 +666,10 @@ func (a *memoryAllocatorImpl) allocateMultiplePagesWithGivenVAddrs(
 			DeviceID: uint64(deviceID),
 			Unified:  isUnified,
 		}
+		old, hadOld := a.vAddrToPageMapping[page.VAddr] // sbin_claude_avatar
 		a.vAddrToPageMapping[page.VAddr] = page
-		a.updatePage(page) // sbin_codex
+		a.updatePage(page)                  // sbin_codex
+		a.avatarOnUpdate(old, hadOld, page) // sbin_claude_avatar
 		pages = append(pages, page)
 	}
 	a.recordAllocation(len(vAddrs)) // sbin_codex: remap allocations contribute to footprint.

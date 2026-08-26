@@ -22,6 +22,12 @@ type Builder struct {
 
 	// sbin_codex: UVM demand-paging configuration.
 	uvmConfig UVMConfig
+
+	// sbin_claude_utopia: Utopia RestSeg configuration.
+	utopiaConfig UtopiaConfig
+
+	// sbin_claude_avatar: Avatar metadata/placement configuration.
+	avatarConfig AvatarConfig
 }
 
 // MakeBuilder creates a driver builder with some default configuration
@@ -91,6 +97,21 @@ func (b Builder) WithUVM(config UVMConfig) Builder {
 	return b
 }
 
+// WithUtopia enables Utopia RestSeg reservation and RestSeg-first allocation
+// on the built driver. // sbin_claude_utopia
+func (b Builder) WithUtopia(config UtopiaConfig) Builder {
+	b.utopiaConfig = config
+	return b
+}
+
+// WithAvatar enables Avatar embedded-metadata bookkeeping and (optionally)
+// 2MB-region randomized physical placement on the built driver.
+// sbin_claude_avatar
+func (b Builder) WithAvatar(config AvatarConfig) Builder {
+	b.avatarConfig = config
+	return b
+}
+
 // Build creates a driver.
 func (b Builder) Build(name string) *Driver {
 	driver := new(Driver)
@@ -99,13 +120,20 @@ func (b Builder) Build(name string) *Driver {
 
 	driver.Log2PageSize = b.log2PageSize
 
-	memAllocatorImpl := internal.NewMemoryAllocator(b.pageTable, b.log2PageSize)
-	for i, pageTable := range b.gpuPageTables { // sbin_codex: GPU IDs are 1-based.
-		memAllocatorImpl.RegisterPageTable(i+1, pageTable)
-	}
-	driver.memAllocator = memAllocatorImpl
+	// Pre-edit code (commented per project convention):
+	// memAllocatorImpl := internal.NewMemoryAllocator(b.pageTable, b.log2PageSize)
+	// for i, pageTable := range b.gpuPageTables { // sbin_codex: GPU IDs are 1-based.
+	// 	memAllocatorImpl.RegisterPageTable(i+1, pageTable)
+	// }
+	// driver.memAllocator = memAllocatorImpl
+	//
+	// sbin_claude_utopia: allocator construction moved into a helper so the
+	// Utopia registry hookup lives next to the page-table registration.
+	b.createMemAllocator(driver)
 
-	distributorImpl := newDistributorImpl(memAllocatorImpl)
+	// Pre-edit code (commented per project convention):
+	// distributorImpl := newDistributorImpl(memAllocatorImpl)
+	distributorImpl := newDistributorImpl(driver.memAllocator) // sbin_claude_utopia
 	distributorImpl.pageSizeAsPowerOf2 = b.log2PageSize
 	driver.distributor = distributorImpl
 
@@ -158,6 +186,41 @@ func (b Builder) Build(name string) *Driver {
 	b.createCPU(driver)
 
 	return driver
+}
+
+// createMemAllocator builds the driver allocator, registers every GPU page
+// table, and attaches the shared RestSeg state when Utopia is enabled so
+// allocations can try the RestSeg first; RegisterGPU performs the per-GPU
+// reservation. // sbin_claude_utopia
+func (b Builder) createMemAllocator(driver *Driver) {
+	memAllocatorImpl := internal.NewMemoryAllocator(b.pageTable, b.log2PageSize)
+	for i, pageTable := range b.gpuPageTables { // sbin_codex: GPU IDs are 1-based.
+		memAllocatorImpl.RegisterPageTable(i+1, pageTable)
+	}
+	driver.memAllocator = memAllocatorImpl
+
+	// sbin_claude_avatar: attach the shared Avatar metadata registry so the
+	// allocator installs/invalidates embedded page metadata and (with the
+	// fragmentation model) places frames at 2MB-region granularity.
+	if b.avatarConfig.Enabled {
+		if b.avatarConfig.Registry == nil {
+			panic("avatar: driver requires a metadata registry")
+		}
+
+		driver.avatarConfig = b.avatarConfig
+		memAllocatorImpl.SetAvatarRegistry(
+			b.avatarConfig.Registry, b.avatarConfig.FragEnabled)
+	}
+
+	if !b.utopiaConfig.Enabled {
+		return
+	}
+	if b.utopiaConfig.Registry == nil {
+		panic("utopia: driver requires a RestSeg registry")
+	}
+
+	driver.utopiaConfig = b.utopiaConfig
+	memAllocatorImpl.SetUtopiaRegistry(b.utopiaConfig.Registry)
 }
 
 func (b *Builder) createCPU(d *Driver) {

@@ -23,8 +23,50 @@ var archFlag = flag.String("arch", "gcn3", "GPU architecture: gcn3 or cdna3.")
 // var gpuTypeFlag = flag.String("gpu", "r9nano",
 //
 //	"GPU model for timing simulation: r9nano or mi300a.")
+//
+// Pre-edit code (commented per project convention):
+// var gpuTypeFlag = flag.String("gpu", "r9nano",
+//
+//	"GPU model for timing simulation: r9nano, mi300a, ideal-l1tlb, or virtual-caching.") // sbin_codex
+// Pre-edit code (commented per project convention):
+// var gpuTypeFlag = flag.String("gpu", "r9nano",
+// 	"GPU model for timing simulation: r9nano, mi300a, ideal-l1tlb, virtual-caching, or utopia.") // sbin_claude_utopia
 var gpuTypeFlag = flag.String("gpu", "r9nano",
-	"GPU model for timing simulation: r9nano, mi300a, ideal-l1tlb, or virtual-caching.") // sbin_codex
+	"GPU model for timing simulation: r9nano, mi300a, ideal-l1tlb, "+
+		"virtual-caching, utopia, or avatar.") // sbin_claude_avatar
+
+// sbin_claude_avatar: Avatar (speculative translation with rapid
+// validation) flags.
+var avatarCompressRatioFlag = flag.Float64("avatar-compress-ratio", 0.8,
+	"Fraction of frames whose sectors compress well enough to embed page "+
+		"information (CAVA rapid validation). Only meaningful with -gpu=avatar.")
+var avatarValidationLatencyFlag = flag.Int("avatar-validation-latency", 200,
+	"Modeled speculative-fetch + CAVA validation latency in cycles.")
+var avatarModEntriesFlag = flag.Int("avatar-mod-entries", 32,
+	"Entries per per-CU MOD (Mapping Offset Detection) table.")
+var avatarConfidenceThresholdFlag = flag.Int("avatar-confidence-threshold", 2,
+	"MOD confidence needed before speculating.")
+var avatarFragFlag = flag.Bool("avatar-frag", true,
+	"Model memory fragmentation with 2MB-region randomized physical "+
+		"placement. Disabling it makes PPN-VPN globally constant and the MOD "+
+		"near-perfect.")
+
+// sbin_claude_utopia: Utopia (hybrid RestSeg/FlexSeg translation) flags.
+var utopiaRestSegRatioFlag = flag.Float64("utopia-restseg-ratio", 0.125,
+	"Fraction of GPU memory reserved as the RestSeg; the rest stays FlexSeg. "+
+		"Only meaningful with -gpu=utopia.")
+var utopiaRestSegSizeFlag = flag.Uint64("utopia-restseg-size", 0,
+	"RestSeg size in bytes per GPU. Overrides -utopia-restseg-ratio when set.")
+var utopiaRestSegAssocFlag = flag.Int("utopia-restseg-assoc", 16,
+	"Number of ways per RestSeg set.")
+var utopiaTARCacheBytesFlag = flag.Uint64("utopia-tar-cache-bytes", 2048,
+	"Capacity of the GMMU-side TAR metadata cache in bytes.")
+var utopiaSFCacheBytesFlag = flag.Uint64("utopia-sf-cache-bytes", 2048,
+	"Capacity of the GMMU-side Set Filter metadata cache in bytes.")
+var utopiaTARSFHitLatencyFlag = flag.Int("utopia-tarsf-hit-latency", 2,
+	"TAR/SF cache hit latency in cycles.")
+var utopiaTARSFMissLatencyFlag = flag.Int("utopia-tarsf-miss-latency", 100,
+	"Modeled memory-fetch latency charged when TAR/SF metadata misses its cache.")
 
 var verifyFlag = flag.Bool("verify", false, "Verify the emulation result.")
 var memTracing = flag.Bool("trace-mem", false, "Generate memory trace")
@@ -154,6 +196,11 @@ func (r *Runner) parseFlag() *Runner {
 	r.parseSimulationFlags()
 	r.parseGPUFlag()
 
+	// sbin_claude_utopia: needs r.GPUType and r.GPUIDs, so it runs after both
+	// parse steps.
+	r.validateUtopiaFlags()
+	r.validateAvatarFlags() // sbin_claude_avatar
+
 	return r
 }
 
@@ -194,8 +241,80 @@ func (r *Runner) parseSimulationFlags() {
 
 	r.validateUVMFlags()
 
+	// sbin_claude_utopia: Utopia flags.
+	r.UtopiaRestSegRatio = *utopiaRestSegRatioFlag
+	r.UtopiaRestSegBytes = *utopiaRestSegSizeFlag
+	r.UtopiaRestSegAssoc = *utopiaRestSegAssocFlag
+	r.UtopiaTARCacheBytes = *utopiaTARCacheBytesFlag
+	r.UtopiaSFCacheBytes = *utopiaSFCacheBytesFlag
+	r.UtopiaTARSFHitLatency = *utopiaTARSFHitLatencyFlag
+	r.UtopiaTARSFMissLatency = *utopiaTARSFMissLatencyFlag
+
+	// sbin_claude_avatar: Avatar flags.
+	r.AvatarCompressRatio = *avatarCompressRatioFlag
+	r.AvatarValidationLatency = *avatarValidationLatencyFlag
+	r.AvatarModEntries = *avatarModEntriesFlag
+	r.AvatarConfidenceThreshold = *avatarConfidenceThresholdFlag
+	r.AvatarFrag = *avatarFragFlag
+
 	r.ArchType = parseArchFlag()
 	r.GPUType = parseGPUTypeFlag()
+}
+
+// validateAvatarFlags rejects invalid Avatar flag combinations (v1 scope).
+// sbin_claude_avatar
+func (r *Runner) validateAvatarFlags() {
+	if r.GPUType != "avatar" {
+		return
+	}
+	if !r.Timing {
+		log.Panic("-gpu=avatar requires -timing")
+	}
+	if r.UVM {
+		log.Panic("-gpu=avatar cannot be combined with -uvm yet")
+	}
+	if len(r.GPUIDs) > 1 {
+		log.Panic("-gpu=avatar currently supports a single GPU")
+	}
+	if r.AvatarCompressRatio < 0 || r.AvatarCompressRatio > 1 {
+		log.Panic("-avatar-compress-ratio must be within [0, 1]")
+	}
+	if r.AvatarValidationLatency <= 0 {
+		log.Panic("-avatar-validation-latency must be positive")
+	}
+	if r.AvatarModEntries <= 0 {
+		log.Panic("-avatar-mod-entries must be positive")
+	}
+	if r.AvatarConfidenceThreshold <= 0 {
+		log.Panic("-avatar-confidence-threshold must be positive")
+	}
+}
+
+// validateUtopiaFlags rejects invalid Utopia flag combinations (v1 scope).
+// sbin_claude_utopia
+func (r *Runner) validateUtopiaFlags() {
+	if r.GPUType != "utopia" {
+		return
+	}
+	if !r.Timing {
+		log.Panic("-gpu=utopia requires -timing")
+	}
+	if r.UVM {
+		log.Panic("-gpu=utopia cannot be combined with -uvm yet")
+	}
+	if len(r.GPUIDs) > 1 {
+		log.Panic("-gpu=utopia currently supports a single GPU")
+	}
+	if r.UtopiaRestSegRatio <= 0 && r.UtopiaRestSegBytes == 0 {
+		log.Panic("-utopia-restseg-ratio must be positive " +
+			"(or set -utopia-restseg-size)")
+	}
+	if r.UtopiaRestSegRatio >= 1 {
+		log.Panic("-utopia-restseg-ratio must be below 1")
+	}
+	if r.UtopiaRestSegAssoc <= 0 {
+		log.Panic("-utopia-restseg-assoc must be positive")
+	}
 }
 
 // validateUVMFlags rejects invalid UVM flag combinations per the UVM spec

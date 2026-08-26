@@ -82,7 +82,12 @@ func (baselineDataPathTopology) connectTranslation(b *Builder) {
 	conn := directconnection.MakeBuilder().WithEngine(b.simulation.GetEngine()).
 		WithFreq(b.freq).Build(b.name + ".L1TLBToL2TLB")
 	b.simulation.RegisterComponent(conn) // sbin_codex
-	conn.PlugIn(b.l2TLBs[0].GetPortByName("Top"))
+	// Pre-edit code (commented per project convention):
+	// conn.PlugIn(b.l2TLBs[0].GetPortByName("Top"))
+	//
+	// sbin_claude_avatar: the speculation topology decides whether the L1
+	// TLB misses reach the L2 TLB directly (baseline) or the ASU (avatar).
+	conn.PlugIn(b.speculationTopology.l1TranslationProviderPort(b))
 	for _, sa := range b.sas {
 		for i := range b.numCUPerShaderArray {
 			conn.PlugIn(sa.GetPortByName(fmt.Sprintf("L1VTLBBottom[%d]", i)))
@@ -97,7 +102,11 @@ func (virtualDataPathTopology) connectTranslation(b *Builder) {
 	conn := directconnection.MakeBuilder().WithEngine(b.simulation.GetEngine()).
 		WithFreq(b.freq).Build(b.name + ".TranslationToL2TLB")
 	b.simulation.RegisterComponent(conn)
-	conn.PlugIn(b.l2TLBs[0].GetPortByName("Top"))
+	// Pre-edit code (commented per project convention):
+	// conn.PlugIn(b.l2TLBs[0].GetPortByName("Top"))
+	//
+	// sbin_claude_avatar: route through the speculation topology provider.
+	conn.PlugIn(b.speculationTopology.l1TranslationProviderPort(b))
 	for _, sa := range b.sas {
 		for i := range b.numCUPerShaderArray {
 			conn.PlugIn(sa.GetPortByName(fmt.Sprintf("L1VTLBBottom[%d]", i))) // sbin_codex

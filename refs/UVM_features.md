@@ -1,7 +1,7 @@
 # MGPUSim v4 UVM 구현 정리
 
 > branch: main | 기반 스펙: `uvm-manager.md` (Draft v0.10)
-> 모든 수정 코드는 AGENTS.md 관례에 따라 `sbin_codex` 마커 사용
+> 모든 수정 코드는 AGENTS.md 관례에 따라 `sbin_claude` 마커 사용
 >
 > **v3 (uvm-manager.md v0.10 대응)** — 제어 평면 전면 재구성:
 > 1. UVM 마이그레이션/퇴출에서 **GPU 전역 quiesce 제거**
