@@ -212,7 +212,7 @@ for config in configs:
             submit_file.write("-gpu=virtual-caching ")
         elif config == 'virtual-caching-nofbt':
             submit_file.write("-gpu=virtual-caching ")
-            submit_file.write("-gpu=virtual-caching")
+            submit_file.write("-fbt-entries=0 ")
         elif config == 'uvm':
             submit_file.write("-uvm ")
         elif config == 'uvm-ideal':
@@ -274,6 +274,10 @@ for config in configs:
         # limit super long benchmarks
         if benchmark == 'fastwalshtransform':
             submit_file.write("-max-inst=50000000 ") # 50M
+        elif benchmark == 'atax':
+            submit_file.write("-max-inst=1000000 ") # 1M
+        elif benchmark == 'bicg':
+            submit_file.write("-max-inst=1000000 ") # 1M
         elif benchmark == 'fir':
             submit_file.write("-max-inst=100000000 ") # 100M
         elif benchmark == 'floydwarshall':
@@ -380,7 +384,7 @@ for config in configs:
         if benchmark == 'simpleconvolution':
             submit_file.write("-width=2048 -height=2048 -mask-size=7")
         if benchmark == 'spmv':
-            submit_file.write("-dim=16384 -sparsity=0.05 ")
+            submit_file.write("-dim=1048576 -sparsity=0.000005 ")
         if benchmark == 'stencil2d':
             submit_file.write("-row=4096 -col=4096 -iter=1 ")
         if benchmark == 'tango_blackscholes':

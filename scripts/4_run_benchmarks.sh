@@ -14,9 +14,12 @@ configs=(baseline ideal-l1tlb virtual-caching utopia avatar hpt softwalker latpc
 # configs=(softwalker) # sbin_claude_softwalker: software page-walk config
 # configs=(baseline)
 # configs=(softwalker latpc)
-configs=(virtual-caching-nofbt)
+configs=(baseline ideal-l1tlb virtual-caching virtual-caching-nofbt utopia avatar hpt softwalker)
+configs=(latpc)
 
 benchmarks=(
+    'atax'
+    'bicg'
     'bfs'
     'fft'
     'kmeans'
@@ -26,19 +29,14 @@ benchmarks=(
     'nw'
     'pagerank'
     'relu'
-    'simpleconvolution'
     'spmv'
     'stencil2d'
     'vectoradd'
 )
 
 # benchmarks=(
-#     # 'bfs'
-#     # 'kmeans'
-#     'matrixtranspose'
-#     # 'nw'
-#     # 'vectoradd'
-#     # 'spmv'
+#     'atax'
+#     'bicg'
 # )
 
 for config in ${configs[@]};
