@@ -76,6 +76,53 @@ var _ = Describe("LATPC Regularity Detector", func() {
 		Expect([]interface{}{s33, i33}).To(Equal([]interface{}{int64(1), 1}))
 	})
 
+	It("should count what the detector produced, per instruction", func() {
+		c := &latpcCoalescer{log2PageSize: 12}
+
+		read := func(addr uint64) VectorMemAccessInfo {
+			return VectorMemAccessInfo{
+				Read: mem.ReadReqBuilder{}.
+					WithAddress(addr).
+					WithByteSize(64).
+					Build(),
+			}
+		}
+
+		// A fully coalesced instruction: four cache lines, one page. This
+		// is the streaming-kernel case, and it must yield exactly one
+		// unique VPN and no prefetch - LATC and LATP have nothing to
+		// compress here.
+		c.annotate([]VectorMemAccessInfo{
+			read(0x1000_000), read(0x1000_040),
+			read(0x1000_080), read(0x1000_0c0),
+		})
+
+		Expect(c.stats).To(Equal(RDStats{
+			Instructions:  1,
+			MultiVPNInsts: 0,
+			UniqueVPNs:    1,
+			PrefetchVPNs:  0,
+		}))
+
+		// A page-spanning instruction: three unique VPNs at stride 1, so
+		// the second and third are prefetches of the first's group.
+		c.annotate([]VectorMemAccessInfo{
+			read(0x1000_000), read(0x1001_000), read(0x1002_000),
+		})
+
+		Expect(c.stats).To(Equal(RDStats{
+			Instructions:  2,
+			MultiVPNInsts: 1,
+			UniqueVPNs:    4,
+			PrefetchVPNs:  2,
+		}))
+
+		// An instruction the coalescer emptied leaves the counters alone.
+		c.annotate(nil)
+
+		Expect(c.stats.Instructions).To(Equal(uint64(2)))
+	})
+
 	It("should stamp every transaction of a page with the page's triple",
 		func() {
 			c := &latpcCoalescer{log2PageSize: 12}

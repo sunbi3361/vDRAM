@@ -133,6 +133,9 @@ type reporter struct {
 	// the MSHR reservation-failure counter (all configurations) and the LATC
 	// compression counters (-gpu=latpc). // sbin_claude_latpc
 	l1vTLBs map[int][]*tlb.Comp
+	// latpcCUs are every CU running the LATPC Regularity Detector, keyed by
+	// GPU index. They own the rd_* metrics. // sbin_claude_latpc
+	latpcCUs map[int][]*cu.ComputeUnit
 	// latpGMMUs are the per-GPU walkers with LATP batching enabled. They own
 	// the batched-walk counters. // sbin_claude_latpc
 	latpGMMUs []*gmmu.Comp
@@ -162,6 +165,7 @@ func newReporter(s *simulation.Simulation) *reporter {
 	r.collectSoftWalkerUnits(s)
 	r.collectFBTUnits(s)  // sbin_claude_fbt
 	r.collectL1VTLBs(s)   // sbin_claude_latpc
+	r.collectLATPCCUs(s)  // sbin_claude_latpc
 	r.collectLATPGMMUs(s) // sbin_claude_latpc
 
 	return r
@@ -236,6 +240,51 @@ func (r *reporter) collectL1VTLBs(s *simulation.Simulation) {
 				}
 
 				r.l1vTLBs[gpu] = append(r.l1vTLBs[gpu], comp)
+				found = true
+			}
+
+			if saDone {
+				break
+			}
+		}
+
+		if !found {
+			return
+		}
+	}
+}
+
+// collectLATPCCUs finds every CU whose coalescer carries the LATPC
+// Regularity Detector, so the rd_* metrics appear only in an -gpu=latpc run.
+// The name re-check and the loop shape are collectL1VTLBs'. // sbin_claude_latpc
+func (r *reporter) collectLATPCCUs(s *simulation.Simulation) {
+	r.latpcCUs = make(map[int][]*cu.ComputeUnit)
+
+	for gpu := 1; ; gpu++ {
+		found := false
+
+		for sa := 0; ; sa++ {
+			saDone := false
+
+			for cuID := 0; ; cuID++ {
+				name := fmt.Sprintf("GPU[%d].SA[%d].CU[%d]", gpu, sa, cuID)
+
+				c := s.GetComponentByName(name)
+				if c == nil || c.Name() != name {
+					saDone = cuID == 0
+					break
+				}
+
+				comp, ok := c.(*cu.ComputeUnit)
+				if !ok {
+					return
+				}
+
+				if _, hasRD := comp.RDStats(); !hasRD {
+					return
+				}
+
+				r.latpcCUs[gpu] = append(r.latpcCUs[gpu], comp)
 				found = true
 			}
 
@@ -754,8 +803,51 @@ func (r *reporter) reportSoftWalker() {
 // batched-walk counters (when batching is enabled).
 // refs/latpc-plan.md 2.7. // sbin_claude_latpc
 func (r *reporter) reportLATPC() {
+	r.reportRD()
 	r.reportLATC()
 	r.reportLATP()
+}
+
+// reportRD emits the per-GPU Regularity Detector counters. They answer, per
+// workload, whether the paper's premise holds here at all: rd_unique_vpn_count
+// / rd_inst_count is Figure 8's average, and rd_prefetch_vpn_count is how many
+// translations LATC and LATP had any chance to compress. // sbin_claude_latpc
+func (r *reporter) reportRD() {
+	for gpu, cus := range r.latpcCUs {
+		var stats cu.RDStats
+
+		for _, comp := range cus {
+			s, ok := comp.RDStats()
+			if !ok {
+				continue
+			}
+
+			stats.Instructions += s.Instructions
+			stats.MultiVPNInsts += s.MultiVPNInsts
+			stats.UniqueVPNs += s.UniqueVPNs
+			stats.PrefetchVPNs += s.PrefetchVPNs
+		}
+
+		location := fmt.Sprintf("GPU[%d]", gpu)
+
+		rows := []struct {
+			what string
+			val  float64
+		}{
+			{"rd_inst_count", float64(stats.Instructions)},
+			{"rd_multi_vpn_inst_count", float64(stats.MultiVPNInsts)},
+			{"rd_unique_vpn_count", float64(stats.UniqueVPNs)},
+			{"rd_prefetch_vpn_count", float64(stats.PrefetchVPNs)},
+		}
+		for _, row := range rows {
+			r.dataRecorder.InsertData(tableName, metric{
+				Location: location,
+				What:     row.what,
+				Value:    row.val,
+				Unit:     "",
+			})
+		}
+	}
 }
 
 // reportLATC emits the per-GPU L1V TLB MSHR counters. // sbin_claude_latpc

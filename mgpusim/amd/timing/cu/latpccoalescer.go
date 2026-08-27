@@ -34,6 +34,40 @@ const (
 type latpcCoalescer struct {
 	inner        coalescer
 	log2PageSize uint64
+
+	// sbin_claude_latpc: the paper's whole premise (Fig. 8, Fig. 9) is that
+	// one warp instruction carries SEVERAL unique VPNs. On a 64-lane GCN3
+	// wavefront that is a property of the workload, not a given, so it has
+	// to be measurable instead of assumed.
+	stats RDStats
+}
+
+// RDStats counts what the Regularity Detector produced over a run. One
+// demand starts one group, so Demands = UniqueVPNs - PrefetchVPNs;
+// UniqueVPNs/Instructions is the paper's Figure-8 quantity, and
+// PrefetchVPNs/UniqueVPNs is the fraction of translations LATC and LATP can
+// compress at all. // sbin_claude_latpc
+type RDStats struct {
+	Instructions  uint64
+	MultiVPNInsts uint64
+	UniqueVPNs    uint64
+	PrefetchVPNs  uint64
+}
+
+// RDStats reports this CU's Regularity Detector counters. The second result
+// is false when the CU does not run the LATPC coalescer. // sbin_claude_latpc
+func (cu *ComputeUnit) RDStats() (RDStats, bool) {
+	vmu, ok := cu.VectorMemUnit.(*VectorMemoryUnit)
+	if !ok {
+		return RDStats{}, false
+	}
+
+	rd, ok := vmu.coalescer.(*latpcCoalescer)
+	if !ok {
+		return RDStats{}, false
+	}
+
+	return rd.stats, true
 }
 
 func (c *latpcCoalescer) generateMemTransactions(
@@ -65,8 +99,35 @@ func (c *latpcCoalescer) annotate(transactions []VectorMemAccessInfo) {
 		hintByVPN[vpn] = hints[k]
 	}
 
+	c.recordStats(uniqueVPNs, hints) // sbin_claude_latpc
+
 	for i := range transactions {
 		c.stamp(&transactions[i], hintByVPN[c.vpnOf(&transactions[i])])
+	}
+}
+
+// recordStats accumulates the Regularity Detector's output for one warp
+// instruction. Only this CU's goroutine ever touches these counters, so they
+// need no synchronization even under -parallel. // sbin_claude_latpc
+func (c *latpcCoalescer) recordStats(
+	uniqueVPNs []uint64,
+	hints []*vm.TranslationGroupHint,
+) {
+	if len(uniqueVPNs) == 0 {
+		return
+	}
+
+	c.stats.Instructions++
+	c.stats.UniqueVPNs += uint64(len(uniqueVPNs))
+
+	if len(uniqueVPNs) > 1 {
+		c.stats.MultiVPNInsts++
+	}
+
+	for _, hint := range hints {
+		if hint.StridePages != 0 {
+			c.stats.PrefetchVPNs++
+		}
 	}
 }
 
