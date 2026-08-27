@@ -59,6 +59,28 @@ func MakeBuilder() Builder {
 			r9nano.FBTSettings{}))}
 }
 
+// WithFBTSettings resizes and retimes the Forward-Backward Table. A zero
+// field keeps the fbt package's default, so passing an empty struct is the
+// same as not calling this at all. // sbin_claude_fbt
+func (b Builder) WithFBTSettings(settings r9nano.FBTSettings) Builder {
+	b.Builder = b.Builder.WithTranslationTopology(
+		r9nano.NewFBTTranslationTopology(settings))
+	return b
+}
+
+// WithoutFBT removes the Forward-Backward Table, sending L2 TLB misses
+// straight to the page walker.
+//
+// This is the paper's "VC W/O OPT": a virtual cache hierarchy filtering
+// translation bandwidth with nothing behind the shared TLB to absorb the page
+// walks that filtering exposes. It is the configuration "VC With OPT" is
+// measured against, so it has to be buildable. // sbin_claude_fbt
+func (b Builder) WithoutFBT() Builder {
+	b.Builder = b.Builder.WithTranslationTopology(
+		r9nano.NewBaselineTranslationTopology())
+	return b
+}
+
 // The four chain setters MUST return Builder (the wrapper type) so the fluent
 // chain keeps the wrapper alive. They shadow the promoted r9nano methods; the
 // rest of the builder surface is promoted via embedding. // sbin_codex

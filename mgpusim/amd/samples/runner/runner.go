@@ -63,6 +63,11 @@ type Runner struct {
 	UtopiaTARSFHitLatency  int
 	UtopiaTARSFMissLatency int
 
+	// sbin_claude_fbt: Forward-Backward Table configuration.
+	FBTEntries       int
+	FBTWays          int
+	FBTLookupLatency int
+
 	// sbin_claude_avatar: Avatar speculative-translation configuration.
 	AvatarCompressRatio       float64
 	AvatarValidationLatency   int
@@ -190,6 +195,16 @@ func (r *Runner) buildTimingPlatform() {
 			SFCacheBytes:  r.UtopiaSFCacheBytes,
 			HitLatency:    r.UtopiaTARSFHitLatency,
 			MissLatency:   r.UtopiaTARSFMissLatency,
+		})
+	}
+
+	// sbin_claude_fbt: hand the Forward-Backward Table knobs to the platform
+	// builder. They only take effect with -gpu=virtual-caching.
+	if r.GPUType == "virtual-caching" {
+		b = b.WithFBT(timingconfig.FBTPlatformConfig{
+			NumEntries:    r.FBTEntries,
+			NumWays:       r.FBTWays,
+			LookupLatency: r.FBTLookupLatency,
 		})
 	}
 

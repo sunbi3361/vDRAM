@@ -168,6 +168,21 @@ var utopiaTARSFHitLatencyFlag = flag.Int("utopia-tarsf-hit-latency", 2,
 var utopiaTARSFMissLatencyFlag = flag.Int("utopia-tarsf-miss-latency", 100,
 	"Modeled memory-fetch latency charged when TAR/SF metadata misses its cache.")
 
+// sbin_claude_fbt: Forward-Backward Table flags (ASPLOS'18 virtual caching).
+// The defaults are the structure the paper models: 16K entries, a reach of
+// 64MB at 4KB pages, sized to cover a unique page for every L2 cache entry.
+// Only meaningful with -gpu=virtual-caching.
+var fbtEntriesFlag = flag.Int("fbt-entries", 16384,
+	"Number of page mappings the Forward-Backward Table holds. 0 removes "+
+		"the table, sending L2 TLB misses straight to the page walker "+
+		"(the paper's VC W/O OPT). Only meaningful with "+
+		"-gpu=virtual-caching.")
+var fbtWaysFlag = flag.Int("fbt-ways", 16,
+	"Associativity of the Forward-Backward Table. Set it equal to "+
+		"-fbt-entries for a fully associative table.")
+var fbtLookupLatencyFlag = flag.Int("fbt-lookup-latency", 5,
+	"Forward-Backward Table access latency in cycles.")
+
 var verifyFlag = flag.Bool("verify", false, "Verify the emulation result.")
 var memTracing = flag.Bool("trace-mem", false, "Generate memory trace")
 var instCountReportFlag = flag.Bool("report-inst-count", false,
@@ -363,6 +378,10 @@ func (r *Runner) parseSimulationFlags() {
 	r.UtopiaSFCacheBytes = *utopiaSFCacheBytesFlag
 	r.UtopiaTARSFHitLatency = *utopiaTARSFHitLatencyFlag
 	r.UtopiaTARSFMissLatency = *utopiaTARSFMissLatencyFlag
+	// sbin_claude_fbt
+	r.FBTEntries = *fbtEntriesFlag
+	r.FBTWays = *fbtWaysFlag
+	r.FBTLookupLatency = *fbtLookupLatencyFlag
 
 	// sbin_claude_avatar: Avatar flags.
 	r.AvatarCompressRatio = *avatarCompressRatioFlag

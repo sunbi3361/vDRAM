@@ -62,6 +62,7 @@ type Builder struct {
 
 	// sbin_claude_utopia: Utopia hybrid RestSeg/FlexSeg configuration.
 	utopiaCfg      UtopiaPlatformConfig
+	fbtCfg         FBTPlatformConfig // sbin_claude_fbt
 	utopiaRegistry *restseg.Registry
 
 	// sbin_claude_avatar: Avatar speculative-translation configuration.
@@ -438,6 +439,46 @@ type UtopiaPlatformConfig struct {
 	MissLatency int
 }
 
+// FBTPlatformConfig sizes and times the Forward-Backward Table of the virtual
+// cache hierarchy. A zero field keeps the fbt package's default (16K entries,
+// 16 ways, 5-cycle lookup - the paper's modelled structure).
+// sbin_claude_fbt
+type FBTPlatformConfig struct {
+	// NumEntries is how many page mappings the table holds.
+	NumEntries int
+	// NumWays is the associativity.
+	NumWays int
+	// LookupLatency is the table access latency in cycles.
+	LookupLatency int
+}
+
+// WithFBT sets the Forward-Backward Table configuration. It only matters with
+// -gpu=virtual-caching. // sbin_claude_fbt
+func (b Builder) WithFBT(config FBTPlatformConfig) Builder {
+	b.fbtCfg = config
+	return b
+}
+
+// virtualCachingGPUBuilder builds the virtual-caching GPU, with or without
+// the Forward-Backward Table.
+//
+// NumEntries == 0 means no table: a table of no entries would answer nothing
+// while still charging its lookup latency on the way to the walker, which is
+// not a configuration anyone wants to measure. Removing it gives the paper's
+// "VC W/O OPT" instead. // sbin_claude_fbt
+func (b *Builder) virtualCachingGPUBuilder() virtualcaching.Builder {
+	if b.fbtCfg.NumEntries == 0 {
+		return virtualcaching.MakeBuilder().WithoutFBT()
+	}
+
+	return virtualcaching.MakeBuilder().
+		WithFBTSettings(r9nano.FBTSettings{
+			NumEntries:    b.fbtCfg.NumEntries,
+			NumWays:       b.fbtCfg.NumWays,
+			LookupLatency: b.fbtCfg.LookupLatency,
+		})
+}
+
 // utopiaRestSegBytes resolves the per-GPU RestSeg size. An explicit byte
 // count wins over the ratio; with neither, 1/8 of the GPU memory is used.
 // sbin_claude_utopia
@@ -693,7 +734,7 @@ func (b *Builder) createGPUBuilder(
 			WithLog2PageSize(b.log2PageSize).
 			WithGlobalStorage(b.globalStorage)
 	case "virtual-caching": // sbin_codex: virtual-caching GPU config.
-		return virtualcaching.MakeBuilder().
+		return b.virtualCachingGPUBuilder().
 			WithSimulation(b.simulation).
 			WithMMU(mmuComponent).
 			WithLog2PageSize(b.log2PageSize).
