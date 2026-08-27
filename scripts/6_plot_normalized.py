@@ -39,6 +39,7 @@ configs = [
     # 'uvm-ideal',
     # 'uvm-oversub-150',
     'virtual-caching',
+    'virtual-caching-nofbt',
     'utopia',  # sbin_claude_utopia
     'avatar',  # sbin_claude_avatar
     'hpt',  # sbin_claude_hpt
@@ -101,6 +102,7 @@ COLORS = {
     "ideal-l1tlb": "#000000",        # sbin_claude: black
     "uvm-ideal": "#56B4E9",          # sbin_claude: sky blue
     "virtual-caching": "#E69F00",    # sbin_claude: orange
+    "virtual-caching-nofbt": "#F0E442",  # sbin_claude: yellow (distinct from inactive #8C564B)
     "utopia": "#009E73",             # sbin_claude_utopia, sbin_claude: bluish green
     "avatar": "#CC79A7",             # sbin_claude_avatar, sbin_claude: reddish purple
     "hpt": "#D55E00",                # sbin_claude_hpt, sbin_claude: vermillion

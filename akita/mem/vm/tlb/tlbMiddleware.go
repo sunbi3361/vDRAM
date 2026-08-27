@@ -297,8 +297,19 @@ func (m *tlbMiddleware) processCancels() bool {
 			panic("TLB cancel port can only receive TranslationCancelReq")
 		}
 
+		// Pre-edit code (commented per project convention): the cancel was
+		// always consumed, because a plain cancel can never fail.
+		// m.cancelPort.RetrieveIncoming()
+		// m.handleTranslationCancel(cancel)
+		//
+		// sbin_claude_avatar: an Early-TLB-Fill cancel also answers the
+		// other waiters, so it can be held off by the response register and
+		// must stay on the port until it lands.
+		if !m.handleTranslationCancel(cancel) {
+			break
+		}
+
 		m.cancelPort.RetrieveIncoming()
-		m.handleTranslationCancel(cancel)
 		madeProgress = true
 	}
 
@@ -313,12 +324,20 @@ func (m *tlbMiddleware) processCancels() bool {
 // pipeline. // sbin_claude_avatar
 func (m *tlbMiddleware) handleTranslationCancel(
 	cancel *vm.TranslationCancelReq,
-) {
+) bool {
 	entry := m.mshr.GetEntry(cancel.PID, cancel.VAddr)
 	if entry != nil {
 		for i, waiting := range entry.Requests {
 			if waiting.ID != cancel.CancelID {
 				continue
+			}
+
+			// sbin_claude_avatar: an Early TLB Fill carries the validated
+			// translation, and refs/avatar.md 5.9 steps 5-7 require filling
+			// the shared TLB with it and forwarding it to the other CUs
+			// waiting on the same VPN - not throwing it away.
+			if cancel.Page.Valid {
+				return m.fillFromEarlyTLBFill(entry, i, cancel)
 			}
 
 			entry.Requests = append(
@@ -337,7 +356,7 @@ func (m *tlbMiddleware) handleTranslationCancel(
 				}
 			}
 
-			return
+			return true
 		}
 	}
 
@@ -345,6 +364,63 @@ func (m *tlbMiddleware) handleTranslationCancel(
 	// the cancel: both travel the same connection in order), or it already
 	// completed; in the latter case this entry stays unused.
 	m.pendingCancels[cancel.CancelID] = struct{}{}
+
+	return true
+}
+
+// fillFromEarlyTLBFill applies an Avatar Early TLB Fill (refs/avatar.md 5.9
+// steps 5-7): the validated page is installed in the shared TLB and handed
+// to every other requester coalesced on the same VPN, and only then is the
+// now-redundant walk retired. Without this, an EAF discarded the translation
+// and each of those CUs had to walk the page table again.
+//
+// idx names the canceling requester's slot; it was already answered by the
+// EAF and must not be answered twice. Returns false when the fill cannot be
+// committed this cycle, leaving the cancel on the port to be retried.
+// sbin_claude_avatar
+func (m *tlbMiddleware) fillFromEarlyTLBFill(
+	entry *mshrEntry,
+	idx int,
+	cancel *vm.TranslationCancelReq,
+) bool {
+	// Everyone but the canceling requester still needs an answer; it was
+	// already served by the EAF and must not be answered twice.
+	others := len(entry.Requests) - 1
+
+	// Answering them spends the same commit budget a page-walk response
+	// would: one fill per cycle, and the single-channel path has only one
+	// response register. Checked before anything is mutated, so a refusal
+	// simply leaves the cancel on the port for the next cycle.
+	if others > 0 {
+		if m.isMultiChannel() {
+			if m.bottomCommitsThisCycle > 0 {
+				return false
+			}
+		} else if m.respondingMSHREntry != nil {
+			return false
+		}
+	}
+
+	entry.Requests = append(entry.Requests[:idx], entry.Requests[idx+1:]...)
+
+	m.installFilledPage(entry, cancel.Page)
+
+	if others > 0 {
+		if m.isMultiChannel() {
+			m.queueChannelResponses(entry, cancel.Page)
+			m.bottomCommitsThisCycle++
+		} else {
+			m.respondingMSHREntry = entry
+			entry.page = cancel.Page
+		}
+	}
+
+	// The walk this entry was waiting on is now redundant for every one of
+	// its requesters.
+	m.queueBottomCancel(entry)
+	m.mshr.Remove(cancel.PID, cancel.VAddr)
+
+	return true
 }
 
 // queueBottomCancel arranges for the downstream walker to abandon the walk
@@ -726,26 +802,9 @@ func (m *tlbMiddleware) parseBottom() bool {
 	// the fill lands there instead of evicting a second way. A dedicated
 	// entry whose set has every way reserved skips installation: the waiters
 	// are still answered and the next access re-walks.
-	if mshrEntry.inTLB {
-		m.fillInTLBEntry(mshrEntry, page)
-	} else if m.pageAdmissionPredicate(page) && !mshrEntry.staleOnFill { // sbin_codex: admission affects storage only.
-		setID := m.vAddrToSetID(page.VAddr)
-		set := m.sets[setID]
-		wayID, ok := set.Evict()
-		// Pre-edit code (commented per project convention):
-		// if !ok {
-		// 	panic("failed to evict")
-		// }
-		// set.Update(wayID, page)
-		// set.Visit(wayID)
-		if !ok && m.inTLBMSHRMax == 0 { // sbin_claude_softwalker
-			panic("failed to evict")
-		}
-		if ok {
-			set.Update(wayID, page)
-			set.Visit(wayID)
-		}
-	}
+	// sbin_claude_avatar: the install block moved into installFilledPage so
+	// the Early-TLB-Fill cancel path installs on exactly the same terms.
+	m.installFilledPage(mshrEntry, page)
 
 	// Pre-edit code (commented per project convention):
 	// m.respondingMSHREntry = mshrEntry
@@ -768,6 +827,36 @@ func (m *tlbMiddleware) parseBottom() bool {
 func (m *tlbMiddleware) visit(setID, wayID int) {
 	set := m.sets[setID]
 	set.Visit(wayID)
+}
+
+// installFilledPage installs a returned translation into the TLB storage. It
+// carries the pre-existing parseBottom rules: an In-TLB entry fills its own
+// reserved way, a range invalidation that raced the lookup (staleOnFill) or
+// a page the admission predicate rejects is answered but never stored, and a
+// set with no evictable way is only fatal when In-TLB MSHRs are disabled.
+// sbin_claude_avatar
+func (m *tlbMiddleware) installFilledPage(entry *mshrEntry, page vm.Page) {
+	if entry.inTLB {
+		m.fillInTLBEntry(entry, page)
+		return
+	}
+
+	if !m.pageAdmissionPredicate(page) || entry.staleOnFill { // sbin_codex: admission affects storage only.
+		return
+	}
+
+	setID := m.vAddrToSetID(page.VAddr)
+	set := m.sets[setID]
+
+	wayID, ok := set.Evict()
+	if !ok && m.inTLBMSHRMax == 0 { // sbin_claude_softwalker
+		panic("failed to evict")
+	}
+
+	if ok {
+		set.Update(wayID, page)
+		set.Visit(wayID)
+	}
 }
 
 // fillInTLBEntry returns an In-TLB entry's reserved way to the replacement

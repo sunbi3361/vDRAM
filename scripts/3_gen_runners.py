@@ -275,9 +275,9 @@ for config in configs:
         if benchmark == 'fastwalshtransform':
             submit_file.write("-max-inst=50000000 ") # 50M
         elif benchmark == 'atax':
-            submit_file.write("-max-inst=1000000 ") # 1M
+            submit_file.write("-max-inst=10000000 ") # 10M
         elif benchmark == 'bicg':
-            submit_file.write("-max-inst=1000000 ") # 1M
+            submit_file.write("-max-inst=10000000 ") # 10M
         elif benchmark == 'fir':
             submit_file.write("-max-inst=100000000 ") # 100M
         elif benchmark == 'floydwarshall':
@@ -312,13 +312,13 @@ for config in configs:
         if benchmark == 'altis_cfd':
             submit_file.write("-size=524288 ")
         if benchmark == 'atax':
-            submit_file.write("-x=8192 -y=8192 ")
+            submit_file.write("-x=2048 -y=2048 ")
         if benchmark == 'babelstream':
             submit_file.write("-size=4194304 ")
         if benchmark == 'bfs':
             submit_file.write("-node=1048576 -degree=8 ")
         if benchmark == 'bicg':
-            submit_file.write("-x=8192 -y=8192 ")
+            submit_file.write("-x=2048 -y=2048 ")
         if benchmark == 'fastwalshtransform':
             submit_file.write("-length=16777216 ")
         if benchmark == 'fft':

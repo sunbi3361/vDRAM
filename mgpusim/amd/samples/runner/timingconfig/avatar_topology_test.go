@@ -241,7 +241,8 @@ var _ = Describe("Avatar speculation topology", func() {
 
 		stats := speculationUnit.Stats()
 		Expect(stats.Speculations).To(BeNumerically(">=", uint64(1)))
-		Expect(stats.ValidationReads).To(BeNumerically(">=", uint64(1)))
+		// sbin_claude_avatar v3: the ASU issues no sector fetch of its own;
+		// CAVA rides the requester's demand access (refs 5.3, 5.6).
 		Expect(stats.CAVAPass).To(BeNumerically(">=", uint64(1)))
 		Expect(stats.EarlyCompletions).To(BeNumerically(">=", uint64(1)))
 		// Each validated speculation retired its conventional walk: the

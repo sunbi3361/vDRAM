@@ -185,6 +185,14 @@ type TranslationCancelReq struct {
 	CancelID string
 	VAddr    uint64
 	PID      PID
+
+	// Page is the translation Avatar's Early TLB Fill already validated.
+	// When it is valid the receiver must not merely drop the walk: it fills
+	// the shared TLB with this page and hands it to every other requester
+	// coalesced on the same VPN before releasing the MSHR (refs/avatar.md
+	// 5.9 steps 5-7). An invalid Page means a plain cancel.
+	// sbin_claude_avatar
+	Page Page
 }
 
 // Meta returns the meta data associated with the message.
@@ -209,6 +217,7 @@ type TranslationCancelReqBuilder struct {
 	cancelID string
 	vAddr    uint64
 	pid      PID
+	page     Page // sbin_claude_avatar
 }
 
 // WithSrc sets the source of the request to build. // sbin_claude_avatar
@@ -252,6 +261,15 @@ func (b TranslationCancelReqBuilder) WithPID(
 	return b
 }
 
+// WithPage attaches the Early-TLB-Fill translation, turning a plain cancel
+// into a fill-and-cancel (refs/avatar.md 5.9 steps 5-7). // sbin_claude_avatar
+func (b TranslationCancelReqBuilder) WithPage(
+	page Page,
+) TranslationCancelReqBuilder {
+	b.page = page
+	return b
+}
+
 // Build creates a new TranslationCancelReq. // sbin_claude_avatar
 func (b TranslationCancelReqBuilder) Build() *TranslationCancelReq {
 	r := &TranslationCancelReq{}
@@ -261,6 +279,7 @@ func (b TranslationCancelReqBuilder) Build() *TranslationCancelReq {
 	r.CancelID = b.cancelID
 	r.VAddr = b.vAddr
 	r.PID = b.pid
+	r.Page = b.page // sbin_claude_avatar
 	r.TrafficClass = reflect.TypeOf(TranslationReq{}).String()
 
 	return r

@@ -21,6 +21,7 @@ from contextlib import closing  # sbin_gmmu_omo
 configs = [
     'baseline',
     'ideal-l1tlb',
+    'virtual-caching-nofbt',
     'virtual-caching',
     'uvm',
     'uvm-oversub-150',
@@ -120,10 +121,12 @@ AVATAR_WHATS = (
     "avatar_cava_incompressible_count", "avatar_cava_no_metadata_count",
     "avatar_early_completion_count", "avatar_real_response_first_count",
     "avatar_swallowed_rsp_count", "avatar_page_table_veto_count",
-    "avatar_validation_read_count", "avatar_validation_wait_cycle_sum",
+    # sbin_claude_avatar v3: avatar_validation_read_count,
+    # avatar_validation_wait_cycle_sum and avatar_stale_validation_rsp_count
+    # are gone - the ASU no longer issues a sector fetch of its own, because
+    # CAST's speculative access is the requester's demand access.
     "avatar_spec_out_of_range_count", "avatar_walk_cancel_sent_count",
     "avatar_forward_suppressed_count", "avatar_orphan_rsp_count",
-    "avatar_stale_validation_rsp_count",
     "avatar_frame_install_count", "avatar_frame_invalidate_count",
     "avatar_region_bound_count", "avatar_region_free_count",
 )

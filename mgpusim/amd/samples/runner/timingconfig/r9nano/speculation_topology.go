@@ -81,11 +81,16 @@ func (t avatarSpeculationTopology) buildSpeculationUnit(b *Builder) {
 		WithValidationLatency(s.ValidationLatency).
 		WithModNumEntries(s.ModNumEntries).
 		WithConfidenceThreshold(s.ConfidenceThreshold).
-		// sbin_claude_avatar v2: the speculative sector fetches ride the
-		// same interleaved L2-bank mapper the L1 caches use, bounded to
-		// this GPU's DRAM range (avatar-plan.md 5.1).
-		WithMemoryAccess(
-			b.l1AddressMapper,
+		// Pre-edit v2 code (commented per project convention): the ASU was
+		// handed the L1 caches' L2-bank mapper to route its own fetches.
+		//
+		// WithMemoryAccess(
+		// 	b.l1AddressMapper,
+		// 	b.memAddrOffset,
+		// 	b.memAddrOffset+b.dramSize).
+		//
+		// sbin_claude_avatar v3: only the DRAM bounds are needed now.
+		WithMemoryRange(
 			b.memAddrOffset,
 			b.memAddrOffset+b.dramSize).
 		Build(b.name + ".ASU")
@@ -122,9 +127,14 @@ func (avatarSpeculationTopology) connectSpeculation(b *Builder) {
 	// cancels into the L2 TLB's out-of-band Cancel ingress.
 	conn.PlugIn(b.l2TLBs[0].GetPortByName("Cancel"))
 
-	// sbin_claude_avatar v2: the speculative sector fetches enter the
-	// existing L1ToL2 data network (built earlier by connectL1ToL2), so
-	// they contend with real data traffic (avatar-plan.md 5.1).
-	l1ToL2 := b.simulation.GetComponentByName(b.name + ".L1ToL2").(*directconnection.Comp)
-	l1ToL2.PlugIn(b.asu.ValidationPort())
+	// Pre-edit v2 code (commented per project convention): the ASU's own
+	// sector fetches were plugged into the L1ToL2 data network.
+	//
+	// l1ToL2 := b.simulation.GetComponentByName(
+	// 	b.name + ".L1ToL2").(*directconnection.Comp)
+	// l1ToL2.PlugIn(b.asu.ValidationPort())
+	//
+	// sbin_claude_avatar v3: CAST's speculative access is the requester's
+	// own data access (refs 5.3, 5.6), which already rides this network as
+	// the demand request. The ASU adds no traffic of its own.
 }

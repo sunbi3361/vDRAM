@@ -2,7 +2,6 @@
 package asu
 
 import (
-	"github.com/sarchlab/akita/v4/mem/mem" // sbin_claude_avatar v2
 	"github.com/sarchlab/akita/v4/mem/vm"
 	"github.com/sarchlab/akita/v4/sim"
 	"github.com/sarchlab/mgpusim/v4/amd/timing/avatar/meta"
@@ -42,21 +41,26 @@ type Builder struct {
 	maxReqInFlight      int
 	numReqPerCycle      int
 
-	// sbin_claude_avatar v2: routing and bounds for the real sector
-	// fetches (avatar-plan.md 5.1).
-	memMapper mem.AddressToPortMapper
-	memLow    uint64
-	memHigh   uint64
+	// Pre-edit v2 field (commented per project convention): the ASU routed
+	// its own sector fetches, so it held an address-to-port mapper.
+	//   memMapper mem.AddressToPortMapper
+	//
+	// sbin_claude_avatar v3: only the bounds survive - they reject a wild
+	// prediction before it can be handed out as a translation.
+	memLow  uint64
+	memHigh uint64
 }
 
-// WithMemoryAccess wires the speculative sector fetches into the data
-// hierarchy: mapper routes a physical address to its L2 bank, and
-// [low, high) bounds the GPU DRAM range. // sbin_claude_avatar v2
-func (b Builder) WithMemoryAccess(
-	mapper mem.AddressToPortMapper,
-	low, high uint64,
-) Builder {
-	b.memMapper = mapper
+// Pre-edit v2 setter (commented per project convention):
+//
+//	func (b Builder) WithMemoryAccess(
+//		mapper mem.AddressToPortMapper, low, high uint64,
+//	) Builder { ... }
+//
+// WithMemoryRange bounds the GPU DRAM range, [low, high). A prediction that
+// falls outside it is dropped instead of being speculated on.
+// sbin_claude_avatar v3
+func (b Builder) WithMemoryRange(low, high uint64) Builder {
 	b.memLow = low
 	b.memHigh = high
 
@@ -154,9 +158,10 @@ func (b Builder) Build(name string) *Comp {
 	if b.pageTable == nil {
 		panic("ASU requires the GPU page table")
 	}
-	// sbin_claude_avatar v2: the sector fetch needs a route to memory.
-	if b.memMapper == nil || b.memHigh <= b.memLow {
-		panic("ASU requires memory access wiring (WithMemoryAccess)")
+	// sbin_claude_avatar v3: a speculated frame is only usable inside the
+	// device's own DRAM range.
+	if b.memHigh <= b.memLow {
+		panic("ASU requires a memory range (WithMemoryRange)")
 	}
 
 	c := new(Comp)
@@ -172,8 +177,7 @@ func (b Builder) Build(name string) *Comp {
 	c.maxReqInFlight = b.maxReqInFlight
 	c.numReqPerCycle = b.numReqPerCycle
 	c.mods = make(map[sim.RemotePort]*modTable)
-	// sbin_claude_avatar v2
-	c.memMapper = b.memMapper
+	// sbin_claude_avatar
 	c.memLow = b.memLow
 	c.memHigh = b.memHigh
 
@@ -181,9 +185,13 @@ func (b Builder) Build(name string) *Comp {
 	c.AddPort("Top", c.topPort)
 	c.bottomPort = sim.NewPort(c, 4096, 4096, name+".Bottom")
 	c.AddPort("Bottom", c.bottomPort)
-	// sbin_claude_avatar v2: the sector-fetch port into the L1ToL2 network.
-	c.validationPort = sim.NewPort(c, 4096, 4096, name+".Validation")
-	c.AddPort("Validation", c.validationPort)
+	// Pre-edit v2 code (commented per project convention): a third port fed
+	// the ASU's own sector fetches into the L1ToL2 network.
+	// c.validationPort = sim.NewPort(c, 4096, 4096, name+".Validation")
+	// c.AddPort("Validation", c.validationPort)
+	//
+	// sbin_claude_avatar v3: the speculative access is the requester's own
+	// demand access (refs 5.3, 5.6), so the ASU issues no memory traffic.
 
 	c.AddMiddleware(&middleware{Comp: c})
 

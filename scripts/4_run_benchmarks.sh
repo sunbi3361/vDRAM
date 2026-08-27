@@ -14,8 +14,9 @@ configs=(baseline ideal-l1tlb virtual-caching utopia avatar hpt softwalker latpc
 # configs=(softwalker) # sbin_claude_softwalker: software page-walk config
 # configs=(baseline)
 # configs=(softwalker latpc)
-configs=(baseline ideal-l1tlb virtual-caching virtual-caching-nofbt utopia avatar hpt softwalker)
-configs=(latpc)
+# configs=(baseline ideal-l1tlb virtual-caching virtual-caching-nofbt utopia avatar hpt softwalker latpc)
+# configs=(softwalker latpc)
+configs=(uvm-ideal)
 
 benchmarks=(
     'atax'

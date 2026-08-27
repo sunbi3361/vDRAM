@@ -5,16 +5,10 @@ import (
 	"log"
 	"reflect"
 
-	"github.com/sarchlab/akita/v4/mem/mem" // sbin_claude_avatar v2
 	"github.com/sarchlab/akita/v4/mem/vm"
 	"github.com/sarchlab/akita/v4/tracing"
 	"github.com/sarchlab/mgpusim/v4/amd/timing/avatar/meta"
 )
-
-// sectorFetchBytes is the speculative access granularity: one cache line
-// carrying the compressed sectors with embedded page information
-// (refs 5.4-5.5). // sbin_claude_avatar v2
-const sectorFetchBytes = 64
 
 type middleware struct {
 	*Comp
@@ -27,7 +21,8 @@ func (m *middleware) Tick() bool {
 	madeProgress := false
 
 	madeProgress = m.advanceTransactions() || madeProgress
-	madeProgress = m.parseFromValidation() || madeProgress // sbin_claude_avatar v2
+	// sbin_claude_avatar v3: no validation port to drain - the speculative
+	// access is the requester's own demand access (refs 5.3, 5.6).
 	madeProgress = m.parseFromBottom() || madeProgress
 	madeProgress = m.parseFromTop() || madeProgress
 
@@ -43,7 +38,6 @@ func (m *middleware) advanceTransactions() bool {
 	for i := 0; i < len(m.transactions); i++ {
 		trans := &m.transactions[i]
 
-		madeProgress = m.issueValidationRead(trans) || madeProgress // sbin_claude_avatar v2
 		madeProgress = m.advanceSpeculation(trans) || madeProgress
 		madeProgress = m.respondEarly(trans) || madeProgress
 		madeProgress = m.sendWalkCancel(trans) || madeProgress // sbin_claude_avatar v2
@@ -60,48 +54,28 @@ func (m *middleware) advanceTransactions() bool {
 	return madeProgress
 }
 
-// issueValidationRead sends the speculative sector fetch as a real 64B read
-// through the data hierarchy (refs 5.4; avatar-plan.md 5.1). Its latency -
-// and therefore the validation latency - emerges from the simulated
-// L2/DRAM state and contention. // sbin_claude_avatar v2
-func (m *middleware) issueValidationRead(trans *transaction) bool {
-	if !trans.specActive || !trans.specReadPending {
-		return false
-	}
+// Pre-edit v2 code (commented per project convention): issueValidationRead
+// sent a separate 64B mem.ReadReq at the speculated address through the
+// L1ToL2 network and the transaction waited for it. refs 5.3/5.6 give CAST
+// no such fetch - the speculative access is the data access the requester
+// was already making - so charging one made every speculation pay a second
+// full trip through L2/DRAM, and it also had to be aimed at a sector the ASU
+// cannot see (the translation request carries only the page ID), which put
+// every one of those reads on the single L2 bank that owns 4KB-aligned
+// addresses. Removed in v3. // sbin_claude_avatar
 
-	if !m.validationPort.CanSend() {
-		return false
-	}
-
-	read := mem.ReadReqBuilder{}.
-		WithSrc(m.validationPort.AsRemote()).
-		WithDst(m.memMapper.Find(trans.specPAddr)).
-		WithAddress(trans.specPAddr).
-		WithByteSize(sectorFetchBytes).
-		WithPID(trans.req.PID).
-		Build()
-
-	if err := m.validationPort.Send(read); err != nil {
-		return false
-	}
-
-	trans.specReadPending = false
-	trans.specReadID = read.ID
-	trans.specIssueCycle = m.Freq.Cycle(m.Engine.CurrentTime())
-	m.stats.ValidationReads++
-
-	return true
-}
-
-// advanceSpeculation counts down the post-fetch decompress-and-compare
-// overhead. When it completes, CAVA reads the authoritative metadata
-// (refs 5.6): only a compressible sector whose embedded (PID, VPN) matches
-// the request validates the speculation.
+// advanceSpeculation counts down CAVA's decompress-and-compare overhead.
+// When it completes, CAVA reads the authoritative metadata (refs 5.6): only
+// a compressible sector whose embedded (PID, VPN) matches the request
+// validates the speculation.
 //
-// Pre-edit v1 behavior (commented per project convention): the whole
-// speculative access was a flat -avatar-validation-latency countdown; the
-// countdown now runs only after the real sector fetch returns.
-// sbin_claude_avatar v2
+// Pre-edit v2 behavior (commented per project convention): the countdown ran
+// only after the ASU's own sector fetch returned. v3 starts it when the miss
+// is admitted, because the sector it rides on is the requester's demand
+// access - the CU issues that access off the speculated PPN without waiting
+// for anyone, so the only thing standing between the prediction and the
+// early fill is decompressing the sector and comparing its embedded VPN
+// (-avatar-validation-latency). // sbin_claude_avatar v3
 func (m *middleware) advanceSpeculation(trans *transaction) bool {
 	// if !trans.specActive {
 	// 	return false
@@ -213,12 +187,26 @@ func (m *middleware) sendWalkCancel(trans *transaction) bool {
 		return false
 	}
 
+	// Pre-edit code (commented per project convention): the cancel carried
+	// no translation, so the L2 TLB dropped the walk without learning the
+	// mapping and every other CU that wanted the page had to walk again.
+	// cancel := vm.TranslationCancelReqBuilder{}.
+	// 	WithSrc(m.bottomPort.AsRemote()).
+	// 	WithDst(m.l2TLBCancelPort).
+	// 	WithCancelID(trans.fwdID).
+	// 	WithVAddr(trans.req.VAddr).
+	// 	WithPID(trans.req.PID).
+	// 	Build()
+	//
+	// sbin_claude_avatar: refs 5.9 steps 5-7 - the EAF translation fills the
+	// shared TLB and is forwarded to the CUs waiting on the same VPN.
 	cancel := vm.TranslationCancelReqBuilder{}.
 		WithSrc(m.bottomPort.AsRemote()).
 		WithDst(m.l2TLBCancelPort).
 		WithCancelID(trans.fwdID).
 		WithVAddr(trans.req.VAddr).
 		WithPID(trans.req.PID).
+		WithPage(trans.earlyPage).
 		Build()
 
 	if err := m.bottomPort.Send(cancel); err != nil {
@@ -299,57 +287,6 @@ func (m *middleware) forwardToL2TLB(trans *transaction) bool {
 	return true
 }
 
-// parseFromValidation drains returned sector fetches. A fetch whose
-// transaction already closed (the real translation won the race, or the
-// request completed) is dropped as stale. // sbin_claude_avatar v2
-func (m *middleware) parseFromValidation() bool {
-	madeProgress := false
-
-	for i := 0; i < m.numReqPerCycle; i++ {
-		if !m.parseOneFromValidation() {
-			break
-		}
-		madeProgress = true
-	}
-
-	return madeProgress
-}
-
-// parseOneFromValidation matches one returned sector with its transaction
-// and starts the decompress-and-compare countdown. // sbin_claude_avatar v2
-func (m *middleware) parseOneFromValidation() bool {
-	item := m.validationPort.PeekIncoming()
-	if item == nil {
-		return false
-	}
-
-	rsp, ok := item.(*mem.DataReadyRsp)
-	if !ok {
-		log.Panicf("ASU cannot handle validation message of type %T", item)
-	}
-
-	m.validationPort.RetrieveIncoming()
-
-	for i := range m.transactions {
-		trans := &m.transactions[i]
-		if !trans.specActive || trans.specReadID != rsp.RespondTo {
-			continue
-		}
-
-		trans.specReadID = ""
-		trans.specCountdown = true
-		trans.specCycleLeft = m.validationLatency
-		m.stats.ValidationWaitCycles +=
-			m.Freq.Cycle(m.Engine.CurrentTime()) - trans.specIssueCycle
-
-		return true
-	}
-
-	m.stats.StaleValidationRsps++
-
-	return true
-}
-
 // parseFromBottom drains real translation responses, up to numReqPerCycle
 // per tick so the ASU does not throttle the baseline translation path.
 func (m *middleware) parseFromBottom() bool {
@@ -401,13 +338,11 @@ func (m *middleware) parseOneFromBottom() bool {
 			return true
 		}
 
-		// The real translation wins the race: cancel the speculation legs.
-		// An in-flight sector fetch keeps flying; its response is dropped
-		// as stale. // sbin_claude_avatar v2
+		// The real translation wins the race: cancel the speculation leg.
+		// sbin_claude_avatar
 		if trans.specActive || trans.earlyPending {
 			trans.specActive = false
-			trans.specReadPending = false
-			trans.specCountdown = false
+			trans.specCountdown = false // sbin_claude_avatar v3
 			trans.earlyPending = false
 			m.stats.RealResponseFirst++
 		}
@@ -497,8 +432,11 @@ func (m *middleware) parseOneFromTop() bool {
 			m.stats.SpecOutOfRange++
 		} else {
 			trans.specActive = true
-			trans.specReadPending = true
 			trans.specPAddr = specPAddr
+			// sbin_claude_avatar v3: the requester's demand access carries
+			// the sector, so only the decompress-and-compare is timed.
+			trans.specCountdown = true
+			trans.specCycleLeft = m.validationLatency
 			m.stats.Speculations++
 		}
 	}

@@ -335,6 +335,118 @@ var _ = Describe("TLB", func() {
 		})
 	})
 
+	// sbin_claude_avatar: refs/avatar.md 5.9 steps 5-7 - an Early TLB Fill
+	// must leave its validated translation behind in the shared TLB and hand
+	// it to the CUs coalesced on the same VPN, not just drop the walk.
+	Context("Avatar Early TLB Fill cancel", func() {
+		var (
+			cancelPort *MockPort
+			eafReq     *vm.TranslationReq
+			otherReq   *vm.TranslationReq
+			page       vm.Page
+			mshrEntry  *mshrEntry
+		)
+
+		BeforeEach(func() {
+			cancelPort = NewMockPort(mockCtrl)
+			cancelPort.EXPECT().
+				AsRemote().
+				Return(sim.RemotePort("CancelPort")).
+				AnyTimes()
+			cancelPort.EXPECT().Name().Return("CancelPort").AnyTimes()
+			tlb.cancelPort = cancelPort
+			tlb.walkCancelDst = sim.RemotePort("GMMUCancel")
+
+			eafReq = vm.TranslationReqBuilder{}.
+				WithPID(1).WithVAddr(0x100).WithDeviceID(1).Build()
+			otherReq = vm.TranslationReqBuilder{}.
+				WithPID(1).WithVAddr(0x100).WithDeviceID(2).Build()
+			page = vm.Page{PID: 1, VAddr: 0x100, PAddr: 0x200, Valid: true}
+
+			mshrEntry = tlb.mshr.Add(1, 0x100)
+			mshrEntry.Requests = append(
+				mshrEntry.Requests, eafReq, otherReq)
+			mshrEntry.reqToBottom = &vm.TranslationReq{}
+		})
+
+		cancelWithPage := func(p vm.Page) *vm.TranslationCancelReq {
+			return vm.TranslationCancelReqBuilder{}.
+				WithCancelID(eafReq.ID).
+				WithVAddr(0x100).
+				WithPID(1).
+				WithPage(p).
+				Build()
+		}
+
+		It("installs the validated page and answers the other waiter", func() {
+			cancel := cancelWithPage(page)
+			cancelPort.EXPECT().PeekIncoming().Return(cancel).Times(1)
+			cancelPort.EXPECT().PeekIncoming().Return(nil).AnyTimes()
+			cancelPort.EXPECT().RetrieveIncoming()
+
+			set.EXPECT().Evict().Return(1, true)
+			set.EXPECT().Update(1, page)
+			set.EXPECT().Visit(1)
+
+			Expect(tlbMW.processCancels()).To(BeTrue())
+
+			// The page is now in the TLB, the CU that did not trigger the
+			// EAF is queued for an answer, and the walk is retired.
+			Expect(tlb.respondingMSHREntry).To(Equal(mshrEntry))
+			Expect(mshrEntry.Requests).To(Equal(
+				[]*vm.TranslationReq{otherReq}))
+			Expect(tlb.mshr.IsEntryPresent(1, 0x100)).To(BeFalse())
+			Expect(tlb.pendingBottomCancels).To(HaveLen(1))
+		})
+
+		It("does not install anything on a plain cancel", func() {
+			cancel := cancelWithPage(vm.Page{})
+			cancelPort.EXPECT().PeekIncoming().Return(cancel).Times(1)
+			cancelPort.EXPECT().PeekIncoming().Return(nil).AnyTimes()
+			cancelPort.EXPECT().RetrieveIncoming()
+
+			Expect(tlbMW.processCancels()).To(BeTrue())
+
+			// The other waiter still needs its walk, so the entry stays.
+			Expect(mshrEntry.Requests).To(Equal(
+				[]*vm.TranslationReq{otherReq}))
+			Expect(tlb.mshr.IsEntryPresent(1, 0x100)).To(BeTrue())
+			Expect(tlb.pendingBottomCancels).To(BeEmpty())
+		})
+
+		It("retries while the response register is busy", func() {
+			tlb.respondingMSHREntry = tlb.mshr.Add(2, 0x300)
+
+			cancel := cancelWithPage(page)
+			cancelPort.EXPECT().PeekIncoming().Return(cancel).AnyTimes()
+
+			Expect(tlbMW.processCancels()).To(BeFalse())
+
+			// Nothing was consumed or mutated: the cancel is still pending.
+			Expect(mshrEntry.Requests).To(Equal(
+				[]*vm.TranslationReq{eafReq, otherReq}))
+			Expect(tlb.mshr.IsEntryPresent(1, 0x100)).To(BeTrue())
+		})
+
+		It("fills even when the EAF requester is the only waiter", func() {
+			mshrEntry.Requests = []*vm.TranslationReq{eafReq}
+			tlb.respondingMSHREntry = tlb.mshr.Add(2, 0x300)
+
+			cancel := cancelWithPage(page)
+			cancelPort.EXPECT().PeekIncoming().Return(cancel).Times(1)
+			cancelPort.EXPECT().PeekIncoming().Return(nil).AnyTimes()
+			cancelPort.EXPECT().RetrieveIncoming()
+
+			set.EXPECT().Evict().Return(1, true)
+			set.EXPECT().Update(1, page)
+			set.EXPECT().Visit(1)
+
+			// No answer is owed, so a busy response register cannot block it.
+			Expect(tlbMW.processCancels()).To(BeTrue())
+			Expect(tlb.mshr.IsEntryPresent(1, 0x100)).To(BeFalse())
+		})
+	})
+
 	Context("flush related handling", func() {
 		It("should do nothing if no req", func() {
 			controlPort.EXPECT().PeekIncoming().Return(nil)

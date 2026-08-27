@@ -279,3 +279,82 @@ over ASU locations like the utopia_* columns).
   GMMU Cancel port (harmless for baseline).
 - runner/flag.go: -avatar-validation-latency default 200 -> 2, new help text.
 - runner/report.go + scripts/5_collect_metrics.py: new counters/columns.
+
+---
+
+## 6. v3 Correction (2026-08-27): one memory access, and EAF really fills
+
+v2 diagnosis on the benchmark runs: two deviations from refs/avatar.md that
+happened to cancel each other out, so avatar looked right for the wrong
+reason.
+
+### 6.1 The speculative access is the demand access (refs 5.3, 5.6)
+
+refs 5.3 spells the speculative address out as
+
+```text
+SpeculatedPA = SpeculatedPPN || PageOffset
+```
+
+and calls what follows an "immediate speculative **data-cache** request";
+refs 5.6 Case A then has its return "make data visible to the requesting CU;
+complete the memory request". There is exactly one memory access per L1 TLB
+miss, and it is the load the CU was going to issue anyway. Avatar's win is
+that the access no longer waits behind a page walk - not that some extra
+fetch races the walk.
+
+v2 modeled it as a *separate* `mem.ReadReq` from the ASU (5.1). That charged
+every speculation a second full trip through L2/DRAM: 1.06M extra reads on
+atax 1024, 99.2% of them dropped as stale once the walk won the race, and
+L2 read misses inflated from 119K to 568K.
+
+The separate fetch was also aimed wrong. `TranslationReq.VAddr` is only the
+page ID, so the ASU could not append `PageOffset` and read the page base
+instead. Every 4KB-aligned address hashes to the same L2 bank under 128B
+interleaving, so **all** validation reads landed on `L2Cache[0]`/`DRAM[0]`:
+72.4% of atax 2048's DRAM reads on 1 of 16 banks, that bank's latency 148ns
+against 47-65ns elsewhere.
+
+v3 removes the fetch. The ASU issues no memory traffic; the requester's own
+demand access carries the sector, and `-avatar-validation-latency` now times
+only what refs 5.6 leaves: decompressing the returned sector and comparing
+its embedded VPN. Case B (incompressible) and mis-speculation still refuse
+to complete early, so v3 is conservative-or-equal against the paper
+everywhere: where real Avatar issues the access speculatively and lets the
+walk confirm it later, v3 simply waits for the walk.
+
+Dropped with it: the ASU `Validation` port and its L1ToL2 plug, the
+`memMapper` (the bounds survive as `WithMemoryRange`), and the
+ValidationReads / ValidationWaitCycles / StaleValidationRsps counters.
+
+### 6.2 EAF fills the shared TLB (refs 5.9 steps 5-7)
+
+refs 5.9 requires an Early TLB Fill to construct the entry, fill the local
+L1 TLB, **fill the shared/L2 TLB**, and forward the translation to other CUs
+waiting on the same VPN, and only then release the redundant resources. v2
+did the first two and step 6 (cancel), but never step 5 or 7: the validated
+translation was thrown away, so the L2 TLB never learned the mapping and the
+next CU to want the page walked it again. The cost is visible as an
+inversion - v2 avatar walked 90K times on atax 1024 where the walk-everything
+path walked 6.7K.
+
+`vm.TranslationCancelReq` gains a `Page`. When it is valid the L2 TLB
+installs it on exactly the terms a page-walk response would (parseBottom's
+rules are now shared as `installFilledPage`: In-TLB reserved way, admission
+predicate, `staleOnFill`), answers every requester coalesced on that VPN
+except the one the EAF already served, and only then queues the downstream
+cancel and releases the MSHR. Answering costs the same one-fill-per-cycle
+budget a walk response would, so a cancel that cannot commit stays on the
+port and retries.
+
+### 6.3 Files
+
+- akita/mem/vm/protocol.go: TranslationCancelReq gains Page (+ WithPage).
+- akita/mem/vm/tlb/tlbMiddleware.go: installFilledPage extracted from
+  parseBottom; fillFromEarlyTLBFill; processCancels can defer.
+- mgpusim/amd/timing/avatar/asu/{asu.go,builder.go,middleware.go}: sector
+  fetch removed, countdown armed at admission, EAF cancel carries the page.
+- mgpusim/amd/samples/runner/timingconfig/r9nano/speculation_topology.go:
+  no Validation plug; WithMemoryRange.
+- mgpusim/amd/samples/runner/report.go, scripts/5_collect_metrics.py: the
+  three fetch counters removed.

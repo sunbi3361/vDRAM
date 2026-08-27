@@ -7,12 +7,18 @@
 //
 // For every miss the ASU forwards the request to the conventional
 // L2-TLB/page-walk path unchanged. In parallel, it probes the per-requester
-// MOD table; a confident entry launches the speculative access as a real
-// 64B read through the GPU data hierarchy (the L1ToL2 network, so the
-// sector fetch contends with actual data traffic), and CAVA rapid
-// validation completes when the sector returns, plus a small
-// decompress-and-compare latency, checked against the authoritative avatar
-// metadata registry (functional truth). A validated speculation answers the
+// MOD table; a confident entry speculates, and CAVA rapid validation is
+// checked against the authoritative avatar metadata registry (functional
+// truth) after a decompress-and-compare latency.
+//
+// The ASU issues no memory traffic of its own. refs 5.3 and 5.6 are explicit
+// that CAST's speculative access IS the requester's data access - it is
+// issued to `SpeculatedPPN || PageOffset` and its return both carries the
+// data and validates the speculation - so the only cost Avatar adds over the
+// access the CU was going to make anyway is decompressing the returned
+// sector and comparing its embedded VPN. Modeling it as an extra fetch, as
+// this unit used to, charged every speculation a whole second trip through
+// L2/DRAM that no Avatar GPU ever makes. A validated speculation answers the
 // L1 TLB early - Early TLB Fill: the L1 TLB fills the entry and releases
 // its MSHR (refs 5.9) - and the now-redundant conventional translation is
 // canceled out of band: the L2 TLB releases the MSHR entry and a queued,
@@ -24,7 +30,6 @@
 package asu
 
 import (
-	"github.com/sarchlab/akita/v4/mem/mem"
 	"github.com/sarchlab/akita/v4/mem/vm"
 	"github.com/sarchlab/akita/v4/sim"
 	"github.com/sarchlab/mgpusim/v4/amd/timing/avatar/meta"
@@ -43,15 +48,18 @@ type Stats struct {
 	SwallowedRsps      uint64 // late real responses dropped after EAF
 	PageTableVetoes    uint64 // CAVA pass rejected by the page-table check
 
-	// sbin_claude_avatar v2 (avatar-plan.md 5.3): real-path validation and
-	// walk cancellation.
-	ValidationReads     uint64 // speculative sector fetches issued
-	ValidationWaitCycles uint64 // cycles spent waiting for sector fetches
-	SpecOutOfRange      uint64 // predicted PAddr outside GPU DRAM, dropped
-	WalkCancelsSent     uint64 // EAF cancels sent to the L2 TLB
-	ForwardsSuppressed  uint64 // EAF beat the forward; no walk ever existed
-	OrphanRsps          uint64 // responses whose transaction already closed
-	StaleValidationRsps uint64 // sector fetches that outlived their race
+	// sbin_claude_avatar v2 (avatar-plan.md 5.3): walk cancellation.
+	//
+	// Pre-edit v2 counters (commented per project convention). They belonged
+	// to the separate sector fetch v3 removed; the speculative access is the
+	// demand access now, so there is nothing extra to count:
+	//   ValidationReads     uint64
+	//   ValidationWaitCycles uint64
+	//   StaleValidationRsps uint64
+	SpecOutOfRange     uint64 // predicted PAddr outside GPU DRAM, dropped
+	WalkCancelsSent    uint64 // EAF cancels sent to the L2 TLB
+	ForwardsSuppressed uint64 // EAF beat the forward; no walk ever existed
+	OrphanRsps         uint64 // responses whose transaction already closed
 }
 
 // transaction tracks one in-flight L1 TLB miss. The forward leg and the
@@ -67,13 +75,17 @@ type transaction struct {
 	specActive bool   // speculation leg live
 	specPAddr  uint64 // speculated page-aligned physical address
 
-	// sbin_claude_avatar v2: the sector fetch is a real read through the
-	// data hierarchy (avatar-plan.md 5.1).
-	specReadPending bool   // ReadReq not sent yet (port backpressure)
-	specReadID      string // in-flight validation read
-	specIssueCycle  uint64 // cycle the read left, for the wait statistic
-	specCountdown   bool   // sector returned; decompress+compare running
-	specCycleLeft   int
+	// Pre-edit v2 fields (commented per project convention): the ASU used to
+	// issue its own 64B sector fetch and wait for it.
+	//   specReadPending bool
+	//   specReadID      string
+	//   specIssueCycle  uint64
+	//
+	// sbin_claude_avatar v3: CAVA's decompress-and-compare is all that is
+	// left to time - the sector fetch it rides on is the requester's own
+	// demand access (refs 5.3, 5.6).
+	specCountdown bool // decompress+compare running
+	specCycleLeft int
 
 	earlyPending bool    // validated; waiting for the top port
 	earlyPage    vm.Page // page to respond early with
@@ -95,22 +107,16 @@ type Comp struct {
 
 	topPort    sim.Port // faces the L1 TLB bottom ports
 	bottomPort sim.Port // faces the shared L2 TLB top port
-	// validationPort faces the L1ToL2 data network; it carries the real
-	// speculative sector fetches (avatar-plan.md 5.1). // sbin_claude_avatar
-	validationPort sim.Port
 
 	l2TLBPort sim.RemotePort // destination of forwarded translations
 	// l2TLBCancelPort is the L2 TLB's out-of-band Cancel ingress
 	// (avatar-plan.md 5.2). // sbin_claude_avatar
 	l2TLBCancelPort sim.RemotePort
 
-	// memMapper routes a physical address to its L2 data bank; memLow and
-	// memHigh bound the GPU DRAM range so a wild prediction never leaves
-	// the device (the mapper's fallback is the RDMA route).
-	// sbin_claude_avatar
-	memMapper mem.AddressToPortMapper
-	memLow    uint64
-	memHigh   uint64
+	// memLow and memHigh bound the GPU DRAM range so a wild prediction is
+	// never handed out as a translation. // sbin_claude_avatar
+	memLow  uint64
+	memHigh uint64
 
 	registry     *meta.Registry
 	pageTable    vm.PageTable
@@ -156,12 +162,6 @@ func (c *Comp) TopPort() sim.Port {
 // BottomPort returns the port facing the shared L2 TLB.
 func (c *Comp) BottomPort() sim.Port {
 	return c.bottomPort
-}
-
-// ValidationPort returns the port that carries the speculative sector
-// fetches into the L1ToL2 data network. // sbin_claude_avatar
-func (c *Comp) ValidationPort() sim.Port {
-	return c.validationPort
 }
 
 // Stats returns a copy of the accumulated counters.
