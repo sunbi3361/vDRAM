@@ -701,33 +701,24 @@ func (m *middleware) parseFromTop() bool {
 		return true
 	}
 
-	// Pre-edit code (commented per project convention):
-	// if len(m.walkingTranslations) >= m.maxRequestsInFlight {
-	// 	return false
-	// }
-	//
-	// sbin_claude_softwalker: in software-walk mode admission is gated on
-	// PW-warp slots instead of the hardware walker count. The request
-	// distributor assigns the walk to a core round-robin; refusal here is
-	// the queueing delay the paper attributes to walker contention.
-	swCore := -1
-	if m.swEnabled {
-		var ok bool
-		swCore, ok = m.swAssignCore()
-		if !ok {
-			m.swAdmissionBlockedTicks++
-			return false
-		}
-	}
 	// sbin_claude_latpc: a same-group request joins an in-flight walk before
-	// the walker-slot check - members need no slot, which is the point of
-	// batching (the paper's "reserved until the traversal completes").
+	// the admission check - members need neither a hardware walker slot nor
+	// a PW-warp slot, which is the point of batching (the paper's "reserved
+	// until the traversal completes").
 	if m.latpEnabled && m.tryJoinBatch(req) {
 		m.topPort.RetrieveIncoming()
 		return true
 	}
 
-	if len(m.walkingTranslations) >= m.maxRequestsInFlight {
+	// Pre-edit code (commented per project convention):
+	// if len(m.walkingTranslations) >= m.maxRequestsInFlight {
+	// 	return false
+	// }
+	//
+	// sbin_claude_softwalker: which resource gates admission depends on the
+	// walk mode, so the whole check moved into admitWalk.
+	swCore, admitted := m.admitWalk()
+	if !admitted {
 		return false
 	}
 
@@ -736,6 +727,36 @@ func (m *middleware) parseFromTop() bool {
 	m.startWalking(req, swCore)
 
 	return true
+}
+
+// admitWalk reserves whatever a new walk has to hold before it may start,
+// and reports the PW-warp slot the walk occupies (-1 when the mode is off).
+//
+// sbin_claude_softwalker: in software-walk mode the walk runs on a CU, so
+// admission is gated on PW-warp slots INSTEAD OF the hardware walker count -
+// bypassing maxRequestsInFlight is the entire point of the mode (64 CUs x 32
+// slots against 16 hardware walkers). Refusal is the queueing delay the paper
+// attributes to walker contention. The slot is committed here and the caller
+// must start the walk with it: every path between this call and startWalking
+// has to be free of early returns, or the slot leaks and the software
+// walkers silently shrink back to the hardware walker count.
+func (m *middleware) admitWalk() (swCore int, admitted bool) {
+	if m.swEnabled {
+		core, ok := m.swAssignCore()
+		if !ok {
+			m.swAdmissionBlockedTicks++
+
+			return -1, false
+		}
+
+		return core, true
+	}
+
+	if len(m.walkingTranslations) >= m.maxRequestsInFlight {
+		return -1, false
+	}
+
+	return -1, true
 }
 
 // swAssignCore picks the next core with a free PW-warp slot, round-robin

@@ -156,9 +156,13 @@ func newReporter(s *simulation.Simulation) *reporter {
 	r.collectUtopiaUnits(s)    // sbin_claude_utopia
 	r.collectAvatarUnits(s)    // sbin_claude_avatar
 	r.collectHPTGMMUs(s)       // sbin_claude_hpt
-	r.collectFBTUnits(s)       // sbin_claude_fbt
-	r.collectL1VTLBs(s)        // sbin_claude_latpc
-	r.collectLATPGMMUs(s)      // sbin_claude_latpc
+	// sbin_claude_softwalker: restored after the worktree-latpc merge dropped
+	// it - without this call swGMMUs/swL2TLBs stay empty and every sw_* and
+	// in_tlb_mshr_* metric silently disappears from the report.
+	r.collectSoftWalkerUnits(s)
+	r.collectFBTUnits(s)  // sbin_claude_fbt
+	r.collectL1VTLBs(s)   // sbin_claude_latpc
+	r.collectLATPGMMUs(s) // sbin_claude_latpc
 
 	return r
 }

@@ -219,3 +219,68 @@ func TestBuilderRejectsZeroCoreSoftwareWalk(t *testing.T) {
 		WithSoftwareWalk(SoftwareWalkConfig{NumCores: 0, SlotsPerCore: 32}).
 		Build("GMMUSWRejectTest")
 }
+
+// The merge of worktree-latpc turned the "else if" that bypasses the
+// hardware walker cap into a standalone check, which silently pinned the
+// software walkers back to maxRequestsInFlight and leaked a PW-warp slot on
+// every refusal. These pin the admission contract down.
+// sbin_claude_softwalker
+func TestAdmitWalkBypassesHardwareWalkerCap(t *testing.T) {
+	m := newSWTestMiddleware(2, 2)
+	m.maxRequestsInFlight = 2
+	m.walkingTranslations = make([]transaction, 2) // cap already reached
+
+	core, admitted := m.admitWalk()
+	if !admitted {
+		t.Fatal("software-walk admission refused at the hardware walker cap")
+	}
+	if core != 0 {
+		t.Fatalf("admitted on core %d, want 0", core)
+	}
+	if m.swCoreInFlight[0] != 1 {
+		t.Fatalf("core 0 in-flight = %d, want 1", m.swCoreInFlight[0])
+	}
+}
+
+func TestAdmitWalkHonorsHardwareWalkerCapWhenModeOff(t *testing.T) {
+	m := newSWTestMiddleware(2, 2)
+	m.swEnabled = false
+	m.maxRequestsInFlight = 2
+	m.walkingTranslations = make([]transaction, 2)
+
+	core, admitted := m.admitWalk()
+	if admitted {
+		t.Fatal("hardware-walk admission ignored maxRequestsInFlight")
+	}
+	if core != -1 {
+		t.Fatalf("refused admission returned core %d, want -1", core)
+	}
+
+	m.walkingTranslations = make([]transaction, 1)
+
+	if core, admitted = m.admitWalk(); !admitted || core != -1 {
+		t.Fatalf("below the cap: core %d admitted %v, want -1 true",
+			core, admitted)
+	}
+}
+
+func TestAdmitWalkLeaksNoSlotWhenRefused(t *testing.T) {
+	m := newSWTestMiddleware(2, 1)
+	m.maxRequestsInFlight = 1
+	m.swCoreInFlight[0] = 1 // every SoftPWB slot busy
+	m.swCoreInFlight[1] = 1
+
+	for i := 0; i < 4; i++ {
+		if core, admitted := m.admitWalk(); admitted {
+			t.Fatalf("admission %d granted core %d with no free slot",
+				i, core)
+		}
+	}
+
+	if m.swCoreInFlight[0] != 1 || m.swCoreInFlight[1] != 1 {
+		t.Fatalf("in-flight = %v, want [1 1]", m.swCoreInFlight)
+	}
+	if m.swAdmissionBlockedTicks != 4 {
+		t.Fatalf("blocked ticks = %d, want 4", m.swAdmissionBlockedTicks)
+	}
+}
