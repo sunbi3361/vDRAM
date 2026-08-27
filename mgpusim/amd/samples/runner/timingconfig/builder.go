@@ -50,6 +50,7 @@ type Builder struct {
 	uvmIdeal                bool
 	uvmFaultUS              float64
 	uvmAccessCounter        bool
+	uvmLazyRemotePTE        bool // sbin_claude_uvm
 	uvmACThresh             uint64
 	uvmTBNExpand            float64
 	uvmTBNMaxSize           uint64
@@ -154,6 +155,7 @@ func (b Builder) WithUVM(config UVMPlatformConfig) Builder {
 	b.uvmFaultUS = config.FaultLatencyUS
 	b.uvmAccessCounter = config.AccessCounterEnabled
 	b.uvmACThresh = config.AccessCounterThreshold
+	b.uvmLazyRemotePTE = config.LazyRemotePTE // sbin_claude_uvm
 	b.uvmTBNExpand = config.TBNExpandRatio
 	b.uvmTBNMaxSize = config.TBNMaxFetchSize
 	b.uvmNoPrefetch = config.PrefetchDisabled
@@ -546,6 +548,7 @@ type UVMPlatformConfig struct {
 	FaultLatencyUS         float64
 	AccessCounterEnabled   bool
 	AccessCounterThreshold uint64
+	LazyRemotePTE          bool // sbin_claude_uvm
 	TBNExpandRatio         float64
 	TBNMaxFetchSize        uint64
 	PrefetchDisabled       bool
@@ -676,6 +679,7 @@ func (b *Builder) buildGPUDriver(
 			FaultLatencyUS:         b.uvmFaultUS,
 			AccessCounterEnabled:   b.uvmAccessCounter, // sbin_codex
 			AccessCounterThreshold: b.uvmACThresh,
+			LazyRemotePTE:          b.uvmLazyRemotePTE, // sbin_claude_uvm
 			TBNExpandRatio:         b.uvmTBNExpand,
 			TBNMaxFetchSize:        b.uvmTBNMaxSize,
 			PrefetchDisabled:       b.uvmNoPrefetch,   // sbin_codex

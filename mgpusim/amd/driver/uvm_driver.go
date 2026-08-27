@@ -30,6 +30,14 @@ func (d *Driver) Handle(event sim.Event) error {
 		d.TickLater()
 
 		return nil
+	case *remoteMapCompleteEvent: // sbin_claude_uvm
+		if d.uvm != nil {
+			d.uvm.completeRemoteMap(event.region)
+		}
+
+		d.TickLater()
+
+		return nil
 	default:
 		return d.TickingComponent.Handle(event)
 	}

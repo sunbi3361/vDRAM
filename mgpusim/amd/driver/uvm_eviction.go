@@ -304,8 +304,9 @@ func (m *UVMManager) finalizeEviction(region *RegionState) {
 }
 
 // releaseEvictedPages returns the victim's frames and installs the mapping the
-// access-counter mode calls for: REMOTE when remote access is enabled,
-// INVALID otherwise.
+// access-counter mode calls for: REMOTE when remote access is enabled and
+// published eagerly, INVALID otherwise (which includes lazy mode, where the
+// next access republishes REMOTE through a fault). // sbin_claude_uvm
 func (m *UVMManager) releaseEvictedPages(region *RegionState) uint64 {
 	var evicted uint64
 
@@ -326,7 +327,17 @@ func (m *UVMManager) releaseEvictedPages(region *RegionState) uint64 {
 		managedPage.State = CPUResident
 		managedPage.RemoteMapped = false
 
-		if m.config.AccessCounterEnabled {
+		// Pre-edit code (commented per project convention):
+		// if m.config.AccessCounterEnabled {
+		// 	m.installRemotePTE(managedPage)
+		// } else {
+		// 	m.installInvalidPTE(managedPage)
+		// }
+		//
+		// sbin_claude_uvm: lazy mode republishes nothing on eviction either.
+		// The region returns to INVALID and the next access re-runs the same
+		// INVALID -> REMOTE fault it ran on the first touch.
+		if m.config.AccessCounterEnabled && !m.config.LazyRemotePTE {
 			m.installRemotePTE(managedPage)
 		} else {
 			m.installInvalidPTE(managedPage)

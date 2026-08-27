@@ -52,6 +52,12 @@ type UVMManager struct {
 	// sbin_codex: continuations waiting on an in-flight eviction.
 	evictionDone map[string]func()
 
+	// pendingRemoteMaps are the regions whose INVALID -> REMOTE install has
+	// been scheduled but has not published yet. It keeps one install per
+	// region in flight: a second fault on the same region rides the first
+	// install's replay instead of scheduling another. // sbin_claude_uvm
+	pendingRemoteMaps map[RegionKey]bool
+
 	accessCounterResetDestination sim.RemotePort                 // sbin_codex
 	pendingAccessCounterResets    []pendingAccessCounterReset    // sbin_codex
 	pendingAccessCounterResetKeys map[AccessCounterResetKey]bool // sbin_codex
@@ -123,6 +129,7 @@ func newUVMManager(d *Driver, config UVMConfig) *UVMManager {
 		controlOps:                    make(map[string]*pendingControlOp),
 		dmaToMigration:                make(map[string]string),
 		evictionDone:                  make(map[string]func()),
+		pendingRemoteMaps:             make(map[RegionKey]bool),             // sbin_claude_uvm
 		pendingAccessCounterResetKeys: make(map[AccessCounterResetKey]bool), // sbin_codex
 		lru:                           list.New(),
 		lruMap:                        make(map[RegionKey]*list.Element),

@@ -72,6 +72,15 @@ func defaultUVMConfig() UVMConfig {
 	}
 }
 
+// lazyRemotePTEConfig is defaultUVMConfig with the REMOTE mapping deferred to
+// the first access. // sbin_claude_uvm
+func lazyRemotePTEConfig() UVMConfig {
+	config := defaultUVMConfig()
+	config.LazyRemotePTE = true
+
+	return config
+}
+
 var _ = ginkgo.Describe("UVMManager", func() {
 	var (
 		driver    *Driver
@@ -130,6 +139,171 @@ var _ = ginkgo.Describe("UVMManager", func() {
 		gomega.Expect(found).To(gomega.BeTrue())
 		gomega.Expect(pte.RemoteAccessible).To(gomega.BeFalse())
 	})
+
+	// sbin_claude_uvm: -uvm-lazy-remote-pte defers the REMOTE mapping, so a
+	// cold page is INVALID even though access counting is on.
+	ginkgo.It("maps a cold page invalid when the remote PTE is lazy", func() {
+		localEngine := sim.NewSerialEngine()
+		localTable := vm.NewPageTable(12)
+		localDriver := buildUVMDriver(
+			localEngine, localTable, lazyRemotePTEConfig())
+		localCtx := localDriver.Init()
+
+		base := uint64(localDriver.AllocateManaged(localCtx, 128*1024))
+
+		pte, found := localTable.Find(localCtx.pid, base)
+		gomega.Expect(found).To(gomega.BeTrue())
+		gomega.Expect(pte.RemoteAccessible).To(gomega.BeFalse())
+		gomega.Expect(localDriver.uvm.stats.RemotePTEInstalls).
+			To(gomega.Equal(uint64(0)))
+	})
+
+	// sbin_claude_uvm: the first fault publishes the whole 64KB region as
+	// REMOTE and migrates nothing. Residency stays the access counter's call.
+	ginkgo.It("publishes a region remotely on the first fault", func() {
+		localEngine := sim.NewSerialEngine()
+		localTable := vm.NewPageTable(12)
+		localDriver := buildUVMDriver(
+			localEngine, localTable, lazyRemotePTEConfig())
+		localCtx := localDriver.Init()
+
+		// A 2MB-aligned block keeps the 64KB region fully backed, so all 16 of
+		// its pages are registered and the counts are exact.
+		regionBase := allocateFullVABlock(localDriver, localCtx)
+
+		localDriver.uvm.onPageFault(localCtx.pid, regionBase, 1, false)
+		localEngine.Run()
+
+		uvm := localDriver.uvm
+		gomega.Expect(uvm.stats.LazyRemoteMaps).To(gomega.Equal(uint64(1)))
+		gomega.Expect(uvm.stats.UniqueFaultServices).To(gomega.Equal(uint64(0)))
+		gomega.Expect(uvm.stats.CPUToGPUMigrations).To(gomega.Equal(uint64(0)))
+		gomega.Expect(uvm.stats.RemotePTEInstalls).
+			To(gomega.Equal(uint64(testRegionSize / 4096)))
+
+		// Every page of the region is now remotely accessible and still on the
+		// host: the fault changed the mapping, not the residency.
+		for offset := uint64(0); offset < testRegionSize; offset += 4096 {
+			pte, found := localTable.Find(localCtx.pid, regionBase+offset)
+			gomega.Expect(found).To(gomega.BeTrue())
+			gomega.Expect(pte.RemoteAccessible).To(gomega.BeTrue())
+			gomega.Expect(pte.DeviceID).To(gomega.Equal(uint64(0)))
+
+			managedPage := uvm.pages[PageKey{
+				PID: localCtx.pid, VAddr: regionBase + offset}]
+			gomega.Expect(managedPage.State).To(gomega.Equal(CPUResident))
+			gomega.Expect(managedPage.GPUFrameValid).To(gomega.BeFalse())
+		}
+	})
+
+	// sbin_claude_uvm: a remote write is never performed, so a region whose
+	// first touch is a write is migrated on demand rather than mapped REMOTE.
+	ginkgo.It("migrates on demand when the first touch is a write", func() {
+		localEngine := sim.NewSerialEngine()
+		localTable := vm.NewPageTable(12)
+		localDriver := buildUVMDriver(
+			localEngine, localTable, lazyRemotePTEConfig())
+		localCtx := localDriver.Init()
+
+		regionBase := allocateFullVABlock(localDriver, localCtx)
+
+		localDriver.uvm.onPageFault(localCtx.pid, regionBase, 1, true)
+		localEngine.Run()
+
+		uvm := localDriver.uvm
+		gomega.Expect(uvm.stats.LazyRemoteMaps).To(gomega.Equal(uint64(0)))
+		gomega.Expect(uvm.stats.RemotePTEInstalls).To(gomega.Equal(uint64(0)))
+		gomega.Expect(uvm.stats.UniqueFaultServices).To(gomega.Equal(uint64(1)))
+		gomega.Expect(uvm.stats.DemandMigrations).To(gomega.Equal(uint64(1)))
+
+		managedPage := uvm.pages[PageKey{PID: localCtx.pid, VAddr: regionBase}]
+		gomega.Expect(managedPage.State).To(gomega.Equal(GPUResident))
+		gomega.Expect(managedPage.RemoteMapped).To(gomega.BeFalse())
+
+		// INVALID -> GPU_LOCAL needs no TLB invalidation: no REMOTE
+		// translation was ever published, so none can be cached.
+		gomega.Expect(uvm.stats.TLBRangeInvalidations).
+			To(gomega.Equal(uint64(0)))
+	})
+
+	// sbin_claude_uvm: only the first fault of a region decides. A write
+	// arriving behind a pending install rides its replay instead of racing it
+	// with a migration.
+	ginkgo.It("lets a write ride a pending lazy remote map", func() {
+		localEngine := sim.NewSerialEngine()
+		localTable := vm.NewPageTable(12)
+		localDriver := buildUVMDriver(
+			localEngine, localTable, lazyRemotePTEConfig())
+		localCtx := localDriver.Init()
+
+		regionBase := allocateFullVABlock(localDriver, localCtx)
+
+		localDriver.uvm.onPageFault(localCtx.pid, regionBase, 1, false)
+		localDriver.uvm.onPageFault(localCtx.pid, regionBase+4096, 1, true)
+
+		uvm := localDriver.uvm
+		gomega.Expect(uvm.pendingRemoteMaps).To(gomega.HaveLen(1))
+		gomega.Expect(uvm.stats.CoalescedFaults).To(gomega.Equal(uint64(1)))
+		gomega.Expect(uvm.stats.UniqueFaultServices).To(gomega.Equal(uint64(0)))
+
+		localEngine.Run()
+
+		gomega.Expect(uvm.stats.LazyRemoteMaps).To(gomega.Equal(uint64(1)))
+		gomega.Expect(uvm.stats.DemandMigrations).To(gomega.Equal(uint64(0)))
+	})
+
+	// sbin_claude_uvm: one install per region. Further faults arriving before
+	// it publishes ride its replay instead of scheduling another.
+	ginkgo.It("coalesces faults onto a pending lazy remote map", func() {
+		localEngine := sim.NewSerialEngine()
+		localTable := vm.NewPageTable(12)
+		localDriver := buildUVMDriver(
+			localEngine, localTable, lazyRemotePTEConfig())
+		localCtx := localDriver.Init()
+
+		regionBase := allocateFullVABlock(localDriver, localCtx)
+
+		localDriver.uvm.onPageFault(localCtx.pid, regionBase, 1, false)
+		localDriver.uvm.onPageFault(localCtx.pid, regionBase+4096, 1, false)
+		localDriver.uvm.onPageFault(localCtx.pid, regionBase+8192, 1, true)
+		localEngine.Run()
+
+		uvm := localDriver.uvm
+		gomega.Expect(uvm.stats.RawPageFaults).To(gomega.Equal(uint64(3)))
+		gomega.Expect(uvm.stats.CoalescedFaults).To(gomega.Equal(uint64(2)))
+		gomega.Expect(uvm.stats.LazyRemoteMaps).To(gomega.Equal(uint64(1)))
+		gomega.Expect(uvm.pendingRemoteMaps).To(gomega.BeEmpty())
+	})
+
+	// sbin_claude_uvm: lazy mapping must not disturb the migration policy. The
+	// access counter still opens the service that moves the region.
+	ginkgo.It("still migrates on the access counter threshold when lazy",
+		func() {
+			localEngine := sim.NewSerialEngine()
+			localTable := vm.NewPageTable(12)
+			localDriver := buildUVMDriver(
+				localEngine, localTable, lazyRemotePTEConfig())
+			localCtx := localDriver.Init()
+
+			regionBase := allocateFullVABlock(localDriver, localCtx)
+
+			localDriver.uvm.onPageFault(localCtx.pid, regionBase, 1, false)
+			localEngine.Run()
+
+			localDriver.uvm.onAccessCounterNotify(localCtx.pid, regionBase, 1)
+			localEngine.Run()
+
+			uvm := localDriver.uvm
+			gomega.Expect(uvm.stats.AccessCounterServices).
+				To(gomega.Equal(uint64(1)))
+			gomega.Expect(uvm.stats.CPUToGPUMigrations).
+				To(gomega.BeNumerically(">", 0))
+
+			managedPage := uvm.pages[PageKey{
+				PID: localCtx.pid, VAddr: regionBase}]
+			gomega.Expect(managedPage.State).To(gomega.Equal(GPUResident))
+			gomega.Expect(managedPage.RemoteMapped).To(gomega.BeFalse())
+		})
 
 	// Spec 8.3 and 10.1: duplicate 4KB faults inside one 64KB region join the
 	// same transaction and are charged the fixed latency only once.

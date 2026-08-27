@@ -41,3 +41,23 @@ func newMigrationCompleteEvent(
 		migrationID: migrationID,
 	}
 }
+
+// remoteMapCompleteEvent fires after the fixed software fault-handling latency
+// and publishes the REMOTE mappings of one 64KB region. It is the lazy
+// counterpart of the install the allocator performs eagerly when
+// LazyRemotePTE is off, and it never moves a page. // sbin_claude_uvm
+type remoteMapCompleteEvent struct {
+	*sim.EventBase
+	region RegionKey
+}
+
+func newRemoteMapCompleteEvent(
+	at sim.VTimeInSec,
+	handler sim.Handler,
+	region RegionKey,
+) *remoteMapCompleteEvent {
+	return &remoteMapCompleteEvent{
+		EventBase: sim.NewEventBase(at, handler),
+		region:    region,
+	}
+}
