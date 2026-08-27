@@ -270,12 +270,17 @@ func (b Builder) configureInternalStates(c *Comp) {
 }
 
 func (b Builder) createPageWalkCache(name string, c *Comp) {
+	// Pre-edit code (commented per project convention): the page-walk cache
+	// was built without a lookup latency, so a hit cost zero cycles.
+	//
+	// sbin_claude: target spec - 128-entry page walk cache, 10 cycle lookup.
 	pageWalkCacheBuilder := pagewalkcache.MakeBuilder().
 		WithEngine(b.engine).
 		WithFreq(b.freq). // sbin_codex: keep cache and GMMU in the same clock domain.
 		WithLog2PageSize(b.log2PageSize).
 		WithNumLevels(pageTableLevels). // sbin_codex
 		WithNumBlocks(128).             // sbin_codex
+		WithLatency(10).                // sbin_claude
 		WithBitsPerLevel(9)
 
 	pageWalkCache := pageWalkCacheBuilder.Build(name + ".PageWalkCache")

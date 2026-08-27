@@ -76,14 +76,16 @@ func TestHandlePageWalkCacheResponseMissWalksAndFillsFromRoot(t *testing.T) {
 		t.Fatal("aggregate miss did not make progress")
 	}
 	trans := m.walkingTranslations[0]
+	// sbin_claude: the modeled page table is 4-level (target spec), so an
+	// aggregate miss restarts at level 3 and costs 4 x 10 cycles.
 	if trans.level != pageTableLevels-1 {
-		t.Fatalf("miss walk level = %d, want 4", trans.level)
+		t.Fatalf("miss walk level = %d, want 3", trans.level)
 	}
-	if trans.cycleLeft != 50 {
-		t.Fatalf("miss walk cycles = %d, want 50", trans.cycleLeft)
+	if trans.cycleLeft != 40 {
+		t.Fatalf("miss walk cycles = %d, want 40", trans.cycleLeft)
 	}
 	if trans.fillLevel != pageTableLevels-1 {
-		t.Fatalf("miss fill level = %d, want 4", trans.fillLevel)
+		t.Fatalf("miss fill level = %d, want 3", trans.fillLevel)
 	}
 }
 

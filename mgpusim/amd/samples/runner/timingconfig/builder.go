@@ -112,7 +112,7 @@ func MakeBuilder() Builder {
 		log2PageSize:       12,
 		useMagicMemoryCopy: false,
 		gpuType:            "r9nano",
-		switchLatency:      140, // default PCIe Gen4
+		switchLatency:      140, // sbin_claude: switch latency of the Gen5 x16 link
 		d2hCycles:          300,
 		h2dCycles:          500,
 	}
@@ -882,9 +882,17 @@ func (b *Builder) createConnection(
 	// connection := sim.NewDirectConnection(engine)
 	// connection := noc.NewFixedBandwidthConnection(32, engine, 1*sim.GHz)
 	// connection.SrcBufferCapacity = 40960000
+	// Pre-edit code (commented per project convention):
+	// pcieConnector := pcie.NewConnector().
+	// 	WithEngine(b.simulation.GetEngine()).
+	// 	WithVersion(4, 16).
+	// 	WithSwitchLatency(b.switchLatency)
+	//
+	// sbin_claude: target spec - PCIe Gen5 x16, which the connector's link
+	// bandwidth table resolves to 32Gb/s per lane x 16 lanes / 8 = 64GB/s.
 	pcieConnector := pcie.NewConnector().
 		WithEngine(b.simulation.GetEngine()).
-		WithVersion(4, 16).
+		WithVersion(5, 16).
 		WithSwitchLatency(b.switchLatency)
 
 	pcieConnector.CreateNetwork("PCIe")

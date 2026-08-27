@@ -720,6 +720,11 @@ func (b *Builder) buildL2Caches() {
 		WithWayAssociativity(16).
 		WithByteSize(byteSize).
 		WithNumMSHREntry(64).
+		// Pre-edit code (commented per project convention): the bank latency
+		// was left at the writeback builder's 10-cycle default.
+		//
+		// sbin_claude: target spec - 20 cycle L2 lookup.
+		WithBankLatency(20).
 		WithNumReqPerCycle(16)
 
 	for i := 0; i < b.numMemoryBank; i++ {
@@ -1030,7 +1035,10 @@ func (b *Builder) buildL2TLB() {
 		WithNumReqPerCycle(16).
 		// sbin_claude_fbt: a shared, second-level structure is not on the
 		// critical path of an L1 hit, so it is not latency-critical.
-		WithLatency(10).
+		// WithLatency(10).
+		//
+		// sbin_claude: target spec - 20 cycle L2 TLB lookup.
+		WithLatency(20).
 		// sbin_claude_vc: the memory topology decides whether the L2 TLB
 		// needs a second top channel for the memory-side translators.
 		WithNumTopChannels(b.memoryTopology.l2TLBTopChannels()).

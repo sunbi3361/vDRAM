@@ -585,12 +585,19 @@ func (b *Builder) buildL1VCaches() {
 	// sbin_claude_fbt: the per-CU L1 data cache is the first stage of the
 	// virtual cache hierarchy's translation filter, so its capacity decides
 	// how much translation traffic ever reaches the shared TLB.
-	l1vSize := 128 * mem.KB
+	// l1vSize := 128 * mem.KB
+	//
+	// sbin_claude: target spec - 64KB vector cache per CU.
+	l1vSize := 64 * mem.KB
 	if b.l1vCacheSize > 0 {
 		l1vSize = b.l1vCacheSize
 	}
 
-	l1vBankLatency := 20
+	// Pre-edit code (commented per project convention):
+	// l1vBankLatency := 20
+	//
+	// sbin_claude: target spec - 5 cycle L1 vector cache lookup.
+	l1vBankLatency := 5
 	if b.l1vBankLatency > 0 {
 		l1vBankLatency = b.l1vBankLatency
 	}

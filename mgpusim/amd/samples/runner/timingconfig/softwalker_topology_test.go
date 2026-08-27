@@ -52,9 +52,10 @@ var _ = Describe("SoftWalker platform", func() {
 
 		stats := sw.gmmu.SoftwareWalkStats()
 		Expect(stats.WalkCount).To(Equal(uint64(1)))
-		// A full 5-level PWC-miss walk with the default knobs: 2x10 comm +
-		// 20 setup + 5x8 per-level cycles.
-		Expect(stats.ExtraCyclesTotal).To(Equal(uint64(80)))
+		// sbin_claude: a full PWC-miss walk over the 4-level page table of
+		// the target spec, with the default knobs: 2x10 comm + 20 setup +
+		// 4x8 per-level cycles.
+		Expect(stats.ExtraCyclesTotal).To(Equal(uint64(72)))
 	})
 
 	It("keeps the baseline GMMU free of software-walk statistics", func() {

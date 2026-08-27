@@ -22,8 +22,14 @@ const ( // sbin_codex: states for the typed page-walk-cache latency model.
 	batchDraining
 )
 
-// sbin_codex: GMMU and its page-walk cache model a five-level page table.
-const pageTableLevels = 5
+// Pre-edit code (commented per project convention):
+// // sbin_codex: GMMU and its page-walk cache model a five-level page table.
+// const pageTableLevels = 5
+//
+// sbin_claude: target spec - 4-level radix page table. The GMMU and its
+// page-walk cache therefore charge four memory references for an uncached
+// walk instead of five.
+const pageTableLevels = 4
 
 const lowestPageWalkCacheLevel = 1 // sbin_codex: level zero is never cached.
 

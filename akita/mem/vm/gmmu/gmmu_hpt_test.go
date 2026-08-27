@@ -64,7 +64,8 @@ func TestStartHashedWalkChargesOneMemoryAccess(t *testing.T) {
 }
 
 func TestStartHashedWalkScalesWithAccessesPerWalk(t *testing.T) {
-	// Given a collision-chain configuration equivalent to a full radix walk.
+	// Given a five-access collision chain. // sbin_claude: no longer the
+	// length of a full radix walk, which is 4 levels under the target spec.
 	m := newHPTTestMiddleware(5)
 	m.walkingTranslations = []transaction{{
 		req:   &vm.TranslationReq{},

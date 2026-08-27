@@ -123,13 +123,13 @@ func TestSWReleaseCoreIsInertWhenModeOff(t *testing.T) {
 func TestWalkCyclesChargesSoftwareOverheads(t *testing.T) {
 	m := newSWTestMiddleware(1, 1)
 
-	// A full 5-level walk: 5x(100) memory + 2x10 comm + 20 setup + 5x8
-	// instruction cycles.
-	if got := m.walkCycles(pageTableLevels); got != 580 {
-		t.Fatalf("full software walk = %d cycles, want 580", got)
+	// sbin_claude: the modeled page table is 4-level (target spec), so a full
+	// walk is 4x(100) memory + 2x10 comm + 20 setup + 4x8 instruction cycles.
+	if got := m.walkCycles(pageTableLevels); got != 472 {
+		t.Fatalf("full software walk = %d cycles, want 472", got)
 	}
-	if m.swExtraCyclesTotal != 80 {
-		t.Fatalf("extra cycles = %d, want 80", m.swExtraCyclesTotal)
+	if m.swExtraCyclesTotal != 72 {
+		t.Fatalf("extra cycles = %d, want 72", m.swExtraCyclesTotal)
 	}
 
 	// A PWC hit that leaves one level still pays the fixed overheads.
@@ -144,8 +144,9 @@ func TestWalkCyclesMatchesBaselineWhenModeOff(t *testing.T) {
 		"GMMUSWBaseTest", sim.NewSerialEngine(), sim.GHz, nil)
 	m := &middleware{Comp: comp}
 
-	if got := m.walkCycles(pageTableLevels); got != 500 {
-		t.Fatalf("baseline walk = %d cycles, want 500", got)
+	// sbin_claude: 4-level page table (target spec).
+	if got := m.walkCycles(pageTableLevels); got != 400 {
+		t.Fatalf("baseline walk = %d cycles, want 400", got)
 	}
 	if m.swExtraCyclesTotal != 0 {
 		t.Fatalf("baseline charged %d extra cycles", m.swExtraCyclesTotal)
