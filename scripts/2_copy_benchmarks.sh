@@ -16,6 +16,7 @@ mkdir benchmarks/utopia # sbin_claude_utopia (ratio-sweep dirs are created by 3_
 mkdir benchmarks/avatar # sbin_claude_avatar (ratio-sweep dirs are created by 3_gen_runners.py)
 mkdir benchmarks/hpt # sbin_claude_hpt (access-sweep dirs are created by 3_gen_runners.py)
 mkdir benchmarks/softwalker # sbin_claude_softwalker (sweep dirs are created by 3_gen_runners.py)
+mkdir benchmarks/latpc
 
 mkdir benchmarks/logs
 

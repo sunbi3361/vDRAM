@@ -994,7 +994,7 @@ func (b *Builder) connectL2TLBToGMMU() {
 }
 
 func (b *Builder) buildL2TLB() {
-	numEntries := 512
+	numEntries := 1024
 	// Pre-edit code (commented per project convention):
 	// numWays := 64
 	//

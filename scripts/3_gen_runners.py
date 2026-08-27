@@ -7,6 +7,7 @@ configs = [
     'baseline',
     'ideal-l1tlb',
     'virtual-caching',
+    'virtual-caching-nofbt',
     'uvm',
     'uvm-ideal',
     # sbin_codex: 150% oversubscription. The UVM GPU capacity is derived from
@@ -30,7 +31,8 @@ configs = [
     # (-gpu=softwalker). 'softwalker' uses the runner defaults (32 slots/CU,
     # comm 10, setup 20, 8 cycles/level, In-TLB MSHR max 512). Ablation and
     # sweep entries go into softwalker_in_tlb_mshr_max below.
-    'softwalker',
+    'softwalker', 'latpc',
+    'latpc',
     ]
 
 # sbin_claude_utopia: RestSeg ratio per utopia sweep config, mirroring the
@@ -208,6 +210,9 @@ for config in configs:
             submit_file.write("-gpu=ideal-l1tlb ")
         elif config == 'virtual-caching':
             submit_file.write("-gpu=virtual-caching ")
+        elif config == 'virtual-caching-nofbt':
+            submit_file.write("-gpu=virtual-caching ")
+            submit_file.write("-gpu=virtual-caching")
         elif config == 'uvm':
             submit_file.write("-uvm ")
         elif config == 'uvm-ideal':
@@ -252,8 +257,8 @@ for config in configs:
                               + str(hpt_accesses_per_walk[config]) + " ")
         # sbin_claude_softwalker: softwalker configs. The plain config relies
         # on the runner defaults; sweep configs pin one knob explicitly.
-        elif config == 'softwalker':
-            submit_file.write("-gpu=softwalker ")
+        elif config in ('softwalker', 'latpc'):
+            submit_file.write("-gpu=" + config + " ")
         elif config in softwalker_in_tlb_mshr_max:
             submit_file.write("-gpu=softwalker ")
             submit_file.write("-sw-in-tlb-mshr-max="

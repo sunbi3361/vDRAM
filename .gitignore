@@ -5,3 +5,5 @@ scriptes
 .omo
 .codex
 .claude
+*.pdf
+__pycache__

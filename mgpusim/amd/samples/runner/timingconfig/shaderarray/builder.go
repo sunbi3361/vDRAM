@@ -543,7 +543,7 @@ func (b *Builder) buildL1VTLBs() {
 	// sbin_claude_latpc: the MSHR entry count becomes overridable
 	// (-l1tlb-mshr) and the LATPC configuration selects the LATC compressed
 	// MSHR. Defaults are unchanged: 64 classic entries.
-	l1vTLBMSHREntries := 64
+	l1vTLBMSHREntries := 16
 	if b.l1TLBMSHRSize > 0 {
 		l1vTLBMSHREntries = b.l1TLBMSHRSize
 	}
@@ -564,7 +564,7 @@ func (b *Builder) buildL1VTLBs() {
 		// caching exists to relieve.
 		WithNumSets(1).
 		WithNumWays(32).
-		WithNumReqPerCycle(32).
+		WithNumReqPerCycle(8).
 		WithLatency(1).
 		// WithTranslationProviderMapper(b.l1TLBAddressMapper) // sbin_codex: pre-edit chain ending.
 		WithTranslationProviderMapper(b.l1TLBAddressMapper).

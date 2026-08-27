@@ -50,6 +50,7 @@ configs = [
     # 'softwalker-itm-256',
     # 'softwalker-slots-8',
     # 'softwalker-slots-16',
+    'latpc',
     ]
 
 benchmarks=[
@@ -140,6 +141,13 @@ SOFTWALKER_GMMU_WHATS = (
 SOFTWALKER_L2TLB_WHATS = (
     "in_tlb_mshr_alloc_count", "in_tlb_mshr_refuse_cap_count",
     "in_tlb_mshr_refuse_set_count",
+)
+LATPC_GPU_WHATS = (
+    "l1vtlb_mshr_reservation_failure_count",
+    "latc_mshr_group_count", "latc_mshr_coalesced_miss_count",
+)
+LATPC_GMMU_WHATS = (
+    "latp_batch_count", "latp_batched_member_count",
 )
 
 TIMESTAMP_RE = re.compile(r"^\d{6}_\d{4}$")
@@ -242,6 +250,12 @@ def extract_metrics(sqlite_path):
         elif what in SOFTWALKER_L2TLB_WHATS and loc.endswith(".L2TLB"):
             out.setdefault(what, 0.0)
             out[what] += float(value)
+        elif what in LATPC_GPU_WHATS and re.fullmatch(r"GPU\[\d+\]", loc):
+            out.setdefault(what, 0.0)
+            out[what] += float(value)
+        elif what in LATPC_GMMU_WHATS and loc.endswith(".GMMU"):
+            out.setdefault(what, 0.0)
+            out[what] += float(value)
     return out
 
 
@@ -286,6 +300,8 @@ def main():
         # sbin_claude_softwalker: software-walk and In-TLB MSHR columns.
         *SOFTWALKER_GMMU_WHATS,
         *SOFTWALKER_L2TLB_WHATS,
+        *LATPC_GPU_WHATS,
+        *LATPC_GMMU_WHATS,
         "error",
     ]
 
