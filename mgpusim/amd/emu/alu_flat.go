@@ -74,6 +74,14 @@ func (u *ALUImpl) runFlat(state InstEmuState) {
 		u.runFlatLoadDWordX2(state)
 	case 23:
 		u.runFlatLoadDWordX4(state)
+	// sbin_claude: flat_store_byte/flat_store_short, ported from vdram_v2.
+	// Without them a kernel that signals the host through a byte store
+	// (pannotia's *stop = 1) has the write silently dropped and its
+	// convergence loop misbehaves.
+	case 24:
+		u.runFlatStoreByte(state)
+	case 26:
+		u.runFlatStoreShort(state)
 	case 28:
 		u.runFlatStoreDWord(state)
 	case 29:
@@ -254,6 +262,40 @@ func (u *ALUImpl) runFlatStoreDWordX4(state InstEmuState) {
 
 		addr := u.flatAddrWithScalar(state, i, hasSAddr, scalarBase)
 		data := state.ReadOperandBytes(inst.Data, i, 16)
+		u.storageAccessor.Write(pid, addr, data)
+	}
+}
+
+// sbin_claude: FLAT_STORE_BYTE / FLAT_STORE_SHORT, ported from vdram_v2.
+
+func (u *ALUImpl) runFlatStoreByte(state InstEmuState) {
+	inst := state.Inst()
+	pid := state.PID()
+	exec := state.EXEC()
+	hasSAddr, scalarBase := u.flatPrecomputeScalarBase(state)
+	for i := 0; i < 64; i++ {
+		if exec&(1<<uint(i)) == 0 {
+			continue
+		}
+
+		addr := u.flatAddrWithScalar(state, i, hasSAddr, scalarBase)
+		data := state.ReadOperandBytes(inst.Data, i, 1)
+		u.storageAccessor.Write(pid, addr, data)
+	}
+}
+
+func (u *ALUImpl) runFlatStoreShort(state InstEmuState) {
+	inst := state.Inst()
+	pid := state.PID()
+	exec := state.EXEC()
+	hasSAddr, scalarBase := u.flatPrecomputeScalarBase(state)
+	for i := 0; i < 64; i++ {
+		if exec&(1<<uint(i)) == 0 {
+			continue
+		}
+
+		addr := u.flatAddrWithScalar(state, i, hasSAddr, scalarBase)
+		data := state.ReadOperandBytes(inst.Data, i, 2)
 		u.storageAccessor.Write(pid, addr, data)
 	}
 }

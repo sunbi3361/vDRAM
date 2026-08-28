@@ -57,6 +57,9 @@ func (u *ALUImpl) runSOP2(state InstEmuState) {
 		u.runSBFMB32(state)
 	case 36:
 		u.runSMULI32(state)
+	// sbin_claude: S_BFE_U32, ported from vdram_v2's GCN3 ALU.
+	case 37:
+		u.runSBFEU32(state)
 	case 38:
 		u.runSBFEI32(state)
 	default:
@@ -407,6 +410,25 @@ func (u *ALUImpl) runSBFEI32(state InstEmuState) {
 	dst := (src0 >> offset) & ((1 << width) - 1)
 
 	state.WriteOperand(inst.Dst, 0, uint64(int32ToBits(dst)))
+
+	if dst != 0 {
+		state.SetSCC(1)
+	} else {
+		state.SetSCC(0)
+	}
+}
+
+// sbin_claude: S_BFE_U32, ported from vdram_v2.
+func (u *ALUImpl) runSBFEU32(state InstEmuState) {
+	inst := state.Inst()
+	src0 := uint32(state.ReadOperand(inst.Src0, 0))
+	src1 := uint32(state.ReadOperand(inst.Src1, 0))
+
+	offset := bitops.ExtractBitsFromU32(src1, 0, 4)
+	width := bitops.ExtractBitsFromU32(src1, 16, 22)
+	dst := (src0 >> offset) & ((1 << width) - 1)
+
+	state.WriteOperand(inst.Dst, 0, uint64(dst))
 
 	if dst != 0 {
 		state.SetSCC(1)

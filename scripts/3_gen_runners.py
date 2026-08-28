@@ -31,7 +31,7 @@ configs = [
     # (-gpu=softwalker). 'softwalker' uses the runner defaults (32 slots/CU,
     # comm 10, setup 20, 8 cycles/level, In-TLB MSHR max 512). Ablation and
     # sweep entries go into softwalker_in_tlb_mshr_max below.
-    'softwalker', 'latpc',
+    'softwalker',
     'latpc',
     ]
 
@@ -90,6 +90,18 @@ softwalker_slots_per_cu = {
     # 'softwalker-slots-16': 16,
 }
 configs += list(softwalker_slots_per_cu)  # sbin_claude_softwalker
+
+# sbin_claude_latpc: LATP tag ablation. The plain 'latpc' config now runs the
+# paper's PW Buffer tag (Base Address + Stride*Index, Fig. 15) on top of the
+# 128-entry page walk queue that is baseline GMMU hardware (Table 2).
+# 'latpc-gidtag' is the narrower Regularity-Detector-group-ID tag, which
+# cannot merge walks issued by different warp instructions.
+#
+# Each key becomes its own config directory/runner. Uncomment to run it.
+latpc_variants = {
+    # 'latpc-gidtag': {'addr_tag': False},
+    }
+configs += list(latpc_variants)  # sbin_claude_latpc
 
 # sbin_codex: oversubscription ratio per config (uvm-manager.md 20).
 #
@@ -151,29 +163,77 @@ def oversub_capacity(working_set_bytes, ratio):
 working_sets = load_working_sets()
 missing_working_set = set()
 
+# sbin_claude: integrated benchmark set (v4 originals + the suites
+# ported from ~/vdram_v2). Every entry has size arguments below.
 benchmarks=[
+    'altis_cfd',
     'atax',
+    'babelstream',
     'bfs',
     'bicg',
+    'cache_latency',
     'fastwalshtransform',
     'fft',
     'fir',
     'floydwarshall',
+    'graphbig_betweennesscentr',
+    'graphbig_bfs',
+    'graphbig_connectedcomp',
+    'graphbig_degreecentr',
+    'graphbig_gc',
+    'graphbig_kcore',
+    'graphbig_sssp',
+    'graphbig_trianglecount',
+    'gups',
     'kmeans',
     'matrixmultiplication',
     'matrixtranspose',
     'nbody',
+    'npb_ep',
     'nw',
     'pagerank',
+    'pannotia_color',
+    'pannotia_mis',
+    'pannotia_sssp',
+    'parboil_cutcp',
+    'parboil_sgemm',
+    'polybench_2dconv',
+    'polybench_3dconv',
+    'polybench_3mm',
+    'polybench_correlation',
+    'polybench_doitgen',
+    'polybench_fdtd2d',
+    'polybench_gemm',
+    'polybench_gemver',
+    'polybench_gesummv',
+    'polybench_jacobi1d',
+    'polybench_jacobi2d',
+    'polybench_lu',
+    'polybench_mvt',
+    'polybench_syr2k',
+    'reduction',
     'relu',
+    'rodinia_backprop',
+    'rodinia_gaussian',
+    'rodinia_hotspot',
+    'rodinia_hotspot3d',
+    'rodinia_lavamd',
+    'rodinia_lud',
+    'rodinia_pathfinder',
+    'rodinia_srad',
     'simpleconvolution',
     'spmv',
     'stencil2d',
+    'tango_blackscholes',
     'vectoradd',
 ]
 
 
 script_path = os.path.dirname(os.path.realpath(__file__)) + "/benchmarks/"
+# sbin_claude: graphbig inputs now live in this workspace
+# (scripts/graphbig_input) instead of the hard-coded ~/vdram path.
+GRAPHBIG_DATASET = (os.path.dirname(os.path.realpath(__file__))
+                    + "/graphbig_input/roadNet_CA")
 slurm_node = 0
 
 for config in configs:
@@ -241,7 +301,11 @@ for config in configs:
         # runner defaults; sweep configs pin the compress ratio explicitly.
         elif config == 'avatar':
             submit_file.write("-gpu=avatar ")
-            submit_file.write("-avatar-frag=false ")
+            submit_file.write("-avatar-frag=true ")
+            submit_file.write("-avatar-mod-entries=8 ")
+            submit_file.write("-avatar-compress-ratio=0.675 ")
+            submit_file.write("-avatar-validation-latency=7 ")
+            submit_file.write("-avatar-compress-ratio=0.675 ")
         elif config in avatar_compress_ratios:
             submit_file.write("-gpu=avatar ")
             submit_file.write("-avatar-frag=false ")
@@ -259,6 +323,12 @@ for config in configs:
         # on the runner defaults; sweep configs pin one knob explicitly.
         elif config in ('softwalker', 'latpc'):
             submit_file.write("-gpu=" + config + " ")
+        # sbin_claude_latpc: LATP tag ablation configs.
+        elif config in latpc_variants:
+            variant = latpc_variants[config]
+            submit_file.write("-gpu=latpc ")
+            submit_file.write("-latpc-addr-tag="
+                              + str(variant['addr_tag']).lower() + " ")
         elif config in softwalker_in_tlb_mshr_max:
             submit_file.write("-gpu=softwalker ")
             submit_file.write("-sw-in-tlb-mshr-max="
@@ -312,13 +382,13 @@ for config in configs:
         if benchmark == 'altis_cfd':
             submit_file.write("-size=524288 ")
         if benchmark == 'atax':
-            submit_file.write("-x=2048 -y=2048 ")
+            submit_file.write("-x=2048 -y=2080 ")
         if benchmark == 'babelstream':
             submit_file.write("-size=4194304 ")
         if benchmark == 'bfs':
             submit_file.write("-node=1048576 -degree=8 ")
         if benchmark == 'bicg':
-            submit_file.write("-x=2048 -y=2048 ")
+            submit_file.write("-x=2048 -y=2080 ")
         if benchmark == 'fastwalshtransform':
             submit_file.write("-length=16777216 ")
         if benchmark == 'fft':
@@ -412,21 +482,21 @@ for config in configs:
         if benchmark == 'reduction':
             submit_file.write("-size=4194304 ")
         if benchmark == 'graphbig_betweennesscentr':
-            submit_file.write("-dataset=/home/sbin/vdram/scripts/graphbig_input/roadNet_CA -num-roots=8 ")
+            submit_file.write("-dataset=" + GRAPHBIG_DATASET + " -num-roots=8 ")
         if benchmark == 'graphbig_bfs':
-            submit_file.write("-dataset=/home/sbin/vdram/scripts/graphbig_input/roadNet_CA ")
+            submit_file.write("-dataset=" + GRAPHBIG_DATASET + " ")
         if benchmark == 'graphbig_connectedcomp':
-            submit_file.write("-dataset=/home/sbin/vdram/scripts/graphbig_input/roadNet_CA ")
+            submit_file.write("-dataset=" + GRAPHBIG_DATASET + " ")
         if benchmark == 'graphbig_degreecentr':
-            submit_file.write("-dataset=/home/sbin/vdram/scripts/graphbig_input/roadNet_CA ")
+            submit_file.write("-dataset=" + GRAPHBIG_DATASET + " ")
         if benchmark == 'graphbig_gc':
-            submit_file.write("-dataset=/home/sbin/vdram/scripts/graphbig_input/roadNet_CA -max-iterations=64 ")
+            submit_file.write("-dataset=" + GRAPHBIG_DATASET + " -max-iterations=64 ")
         if benchmark == 'graphbig_kcore':
-            submit_file.write("-dataset=/home/sbin/vdram/scripts/graphbig_input/roadNet_CA -kcore=3 ")
+            submit_file.write("-dataset=" + GRAPHBIG_DATASET + " -kcore=3 ")
         if benchmark == 'graphbig_sssp':
-            submit_file.write("-dataset=/home/sbin/vdram/scripts/graphbig_input/roadNet_CA ")
+            submit_file.write("-dataset=" + GRAPHBIG_DATASET + " ")
         if benchmark == 'graphbig_trianglecount':
-            submit_file.write("-dataset=/home/sbin/vdram/scripts/graphbig_input/roadNet_CA ")
+            submit_file.write("-dataset=" + GRAPHBIG_DATASET + " ")
         if benchmark == 'nw':
             submit_file.write("-length=4096")
 

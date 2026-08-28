@@ -78,8 +78,15 @@ func (u *ALUImpl) runVOP3A(state InstEmuState) {
 		u.runVCmpGeU32VOP3a(state)
 	case 233: // 0xE9
 		u.runVCmpLtU64VOP3a(state)
+	// sbin_claude: opcodes 238/261/264 ported from vdram_v2's GCN3 ALU.
+	case 238: // 0xEE v_fabs_f32 (VOP3a form, dst = |src0|)
+		u.runVFABSF32VOP3a(state)
 	case 256:
 		u.runVCNDMASKB32VOP3a(state)
+	case 261: // VOP3-encoded v_subrev_f32 (dst = src1 - src0)
+		u.runVSUBREVF32(state)
+	case 264: // 0x108 v_mul_u32_u24 (VOP3a form)
+		u.runVMULU32U24(state)
 	case 258:
 		u.runVSUBF32VOP3a(state)
 	case 449:
@@ -970,4 +977,18 @@ func (u *ALUImpl) isDIVFIXUPF64Overflow(
 ) bool {
 	return int64(exponentSrc2-exponentSrc1) < -1075 ||
 		exponentSrc1 == 2047
+}
+
+// sbin_claude: v_fabs_f32 in VOP3a form, ported from vdram_v2.
+func (u *ALUImpl) runVFABSF32VOP3a(state InstEmuState) {
+	inst := state.Inst()
+	exec := state.EXEC()
+	for i := 0; i < 64; i++ {
+		if exec&(1<<uint(i)) == 0 {
+			continue
+		}
+		src0 := math.Float32frombits(uint32(applyF32Modifier(state.ReadOperand(inst.Src0, i), 0, inst)))
+		dst := float32(math.Abs(float64(src0)))
+		state.WriteOperand(inst.Dst, i, uint64(math.Float32bits(dst)))
+	}
 }

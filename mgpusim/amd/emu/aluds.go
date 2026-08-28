@@ -23,6 +23,11 @@ func (u *ALUImpl) runDS(state InstEmuState) {
 		u.runDSREADB64(state)
 	case 119:
 		u.runDSREAD2B64(state)
+	// sbin_claude: ds_write_b128 / ds_read_b128, ported from vdram_v2.
+	case 223:
+		u.runDSWRITEB128(state)
+	case 255:
+		u.runDSREADB128(state)
 	default:
 		log.Panicf("Opcode %d for DS format is not implemented", inst.Opcode)
 	}
@@ -170,6 +175,41 @@ func (u *ALUImpl) runDSREAD2B64(state InstEmuState) {
 
 		copy(buf[0:8], lds[addr0:addr0+8])
 		copy(buf[8:16], lds[addr1:addr1+8])
+		state.WriteOperandBytes(inst.Dst, i, buf[:])
+	}
+}
+
+// sbin_claude: DS_WRITE_B128 / DS_READ_B128, ported from vdram_v2.
+
+func (u *ALUImpl) runDSWRITEB128(state InstEmuState) {
+	inst := state.Inst()
+	exec := state.EXEC()
+	lds := u.LDS()
+
+	for i := 0; i < 64; i++ {
+		if exec&(1<<uint(i)) == 0 {
+			continue
+		}
+
+		addr := uint32(state.ReadOperand(inst.Addr, i)) + inst.Offset0
+		data := state.ReadOperandBytes(inst.Data, i, 16)
+		copy(lds[addr:addr+16], data)
+	}
+}
+
+func (u *ALUImpl) runDSREADB128(state InstEmuState) {
+	inst := state.Inst()
+	exec := state.EXEC()
+	lds := u.LDS()
+
+	var buf [16]byte
+	for i := 0; i < 64; i++ {
+		if exec&(1<<uint(i)) == 0 {
+			continue
+		}
+
+		addr := uint32(state.ReadOperand(inst.Addr, i)) + inst.Offset0
+		copy(buf[:], lds[addr:addr+16])
 		state.WriteOperandBytes(inst.Dst, i, buf[:])
 	}
 }

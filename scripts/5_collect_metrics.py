@@ -54,24 +54,68 @@ configs = [
     'latpc',
     ]
 
+# sbin_claude: integrated benchmark set, kept in sync with
+# 3_gen_runners.py.
 benchmarks=[
+    'altis_cfd',
     'atax',
+    'babelstream',
     'bfs',
     'bicg',
+    'cache_latency',
     'fastwalshtransform',
     'fft',
     'fir',
     'floydwarshall',
+    'graphbig_betweennesscentr',
+    'graphbig_bfs',
+    'graphbig_connectedcomp',
+    'graphbig_degreecentr',
+    'graphbig_gc',
+    'graphbig_kcore',
+    'graphbig_sssp',
+    'graphbig_trianglecount',
+    'gups',
     'kmeans',
     'matrixmultiplication',
     'matrixtranspose',
     'nbody',
+    'npb_ep',
     'nw',
     'pagerank',
+    'pannotia_color',
+    'pannotia_mis',
+    'pannotia_sssp',
+    'parboil_cutcp',
+    'parboil_sgemm',
+    'polybench_2dconv',
+    'polybench_3dconv',
+    'polybench_3mm',
+    'polybench_correlation',
+    'polybench_doitgen',
+    'polybench_fdtd2d',
+    'polybench_gemm',
+    'polybench_gemver',
+    'polybench_gesummv',
+    'polybench_jacobi1d',
+    'polybench_jacobi2d',
+    'polybench_lu',
+    'polybench_mvt',
+    'polybench_syr2k',
+    'reduction',
     'relu',
+    'rodinia_backprop',
+    'rodinia_gaussian',
+    'rodinia_hotspot',
+    'rodinia_hotspot3d',
+    'rodinia_lavamd',
+    'rodinia_lud',
+    'rodinia_pathfinder',
+    'rodinia_srad',
     'simpleconvolution',
     'spmv',
     'stencil2d',
+    'tango_blackscholes',
     'vectoradd',
 ]
 
@@ -147,10 +191,22 @@ SOFTWALKER_L2TLB_WHATS = (
 )
 LATPC_GPU_WHATS = (
     "l1vtlb_mshr_reservation_failure_count",
+    # sbin_claude_latpc: the shared L2 TLB MSHR is the structure LATC's
+    # L1-side relief runs into next, so its stalls have to be collected too.
+    "l2tlb_mshr_reservation_failure_count",
     "latc_mshr_group_count", "latc_mshr_coalesced_miss_count",
+    # sbin_claude_latpc: Regularity Detector output (Fig. 8's premise).
+    "rd_inst_count", "rd_multi_vpn_inst_count",
+    "rd_unique_vpn_count", "rd_prefetch_vpn_count",
 )
 LATPC_GMMU_WHATS = (
     "latp_batch_count", "latp_batched_member_count",
+    # sbin_claude_latpc: prefetch requests that reached the walker with no
+    # lead to join and had to take a walker slot of their own.
+    "latp_lone_prefetch_walk_count",
+    # sbin_claude_latpc: page walk queue / address tag diagnostics.
+    "pw_queue_head_block_tick_count", "latp_lookahead_join_count",
+    "latp_cross_group_join_count",
 )
 
 TIMESTAMP_RE = re.compile(r"^\d{6}_\d{4}$")

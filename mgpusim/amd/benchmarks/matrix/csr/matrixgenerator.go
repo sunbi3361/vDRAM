@@ -9,6 +9,7 @@ type MatrixGenerator struct {
 	values                   []float32
 	positionOccupied         map[uint32]bool
 	xCoordIndex, yCoordIndex map[uint32][]uint32
+	rng                      *rand.Rand // sbin_claude
 }
 
 // MakeMatrixGenerator returns a matrixGenerator
@@ -16,6 +17,11 @@ func MakeMatrixGenerator(numNode, numConnection uint32) MatrixGenerator {
 	return MatrixGenerator{
 		numNode:       numNode,
 		numConnection: numConnection,
+		// sbin_claude: use a local random source so the generated matrix is
+		// reproducible. The global generator is seeded randomly at startup
+		// (rand.Seed is a no-op since Go 1.24), which made the matrix -- and
+		// therefore every measurement taken on it -- differ on every run.
+		rng: rand.New(rand.NewSource(1)),
 	}
 }
 
@@ -111,7 +117,7 @@ func (g MatrixGenerator) sumColumn(i uint32) float32 {
 
 func (g *MatrixGenerator) generateOneConnection() {
 	x, y := g.generateUnoccupiedPosition()
-	v := rand.Float32()
+	v := g.rng.Float32() // sbin_claude
 	g.xCoords = append(g.xCoords, x)
 	g.yCoords = append(g.yCoords, y)
 	g.values = append(g.values, v)
@@ -128,8 +134,16 @@ func (g *MatrixGenerator) generateOneConnection() {
 
 func (g MatrixGenerator) generateUnoccupiedPosition() (x, y uint32) {
 	for {
-		x = uint32(rand.Int()) % g.numNode
-		y = uint32(rand.Int()) % g.numNode
+		x = uint32(g.rng.Int()) % g.numNode // sbin_claude
+		y = uint32(g.rng.Int()) % g.numNode // sbin_claude
+		// sbin_claude: skip self-loops (x == y). A self-loop makes the
+		// convergence checks in the pannotia benchmarks deadlock: an
+		// unprocessed node's own value is included in its neighbor-minimum,
+		// so it can never become a candidate and the stop flag stays 1
+		// forever.
+		if x == y && g.numNode > 1 {
+			continue
+		}
 		if !g.isPositionOccupied(x, y) {
 			g.markPositionOccupied(x, y)
 			return
