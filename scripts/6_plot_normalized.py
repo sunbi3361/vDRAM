@@ -38,7 +38,7 @@ configs = [
     # 'uvm',
     # 'uvm-ideal',
     # 'uvm-oversub-150',
-    'virtual-caching',
+    # 'virtual-caching',
     'virtual-caching-nofbt',
     'utopia',  # sbin_claude_utopia
     'avatar',  # sbin_claude_avatar
