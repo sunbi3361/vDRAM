@@ -92,6 +92,10 @@ type Runner struct {
 	// also applies to the r9nano and hpt types (0 keeps the default 64).
 	LATPCL4RowHitLatency int
 	L1TLBMSHREntries     int
+	// LATPCAddressTag tags PW Buffer entries with the paper's address
+	// arithmetic (Fig. 15) rather than the Regularity Detector group ID.
+	// On by default. // sbin_claude_latpc
+	LATPCAddressTag bool
 
 	GPUIDs     []int
 	benchmarks []benchmarks.Benchmark
@@ -275,6 +279,7 @@ func (r *Runner) withLATPCConfig(
 	return b.WithLATPC(timingconfig.LATPCPlatformConfig{
 		L4RowHitLatency:  r.LATPCL4RowHitLatency,
 		L1TLBMSHREntries: r.L1TLBMSHREntries,
+		AddressTag:       r.LATPCAddressTag, // sbin_claude_latpc
 	})
 }
 

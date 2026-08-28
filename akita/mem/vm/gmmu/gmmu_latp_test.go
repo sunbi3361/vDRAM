@@ -53,6 +53,8 @@ func newLATPTestMiddleware() (*middleware, *fakeLATPPort) {
 		maxRequestsInFlight: 2,
 		latpEnabled:         true,
 		latpL4RowHitLatency: 2,
+		pwQueueSize:         128, // sbin_claude_latpc: baseline PW queue.
+		log2PageSize:        12,
 		pageTable:           vm.NewPageTable(12),
 	}
 	comp.TickingComponent = *sim.NewTickingComponent(
@@ -257,9 +259,16 @@ func TestParseFromTopJoinsEvenWhenWalkersAreFull(t *testing.T) {
 		t.Fatalf("member count = %d, want 1", got)
 	}
 
-	// A demand of a new group stays blocked at the cap, as before.
+	// A demand of a new group stays blocked at the cap, as before. Pulling
+	// it off the port into the page walk queue is progress; starting a walk
+	// for it is not allowed, which is what the walker count shows.
 	port.incoming = []sim.Msg{groupReq(0x80000, "k", 0, 0)}
-	if m.parseFromTop() {
-		t.Fatal("a new-group demand was admitted past the walker-slot cap")
+	m.parseFromTop()
+	if got := len(m.walkingTranslations); got != 2 {
+		t.Fatalf("walker slots = %d, want a new-group demand to stay blocked",
+			got)
+	}
+	if m.pwQueueHeadBlockTicks == 0 {
+		t.Fatal("the blocked demand was not counted as a head block")
 	}
 }

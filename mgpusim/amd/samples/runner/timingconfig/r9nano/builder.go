@@ -369,6 +369,11 @@ type LATPCSettings struct {
 	// L4RowHitLatency is the cycles one batched member's L4 PTE load costs
 	// (a DRAM row-buffer hit). The GMMU default is 20.
 	L4RowHitLatency int
+	// AddressTag selects the paper's PW Buffer tag (Base Address + Stride +
+	// Index, Figure 15) over the Regularity Detector group ID, so walks
+	// issued by different warp instructions can share an entry. On by
+	// default; the group ID tag is the ablation. // sbin_claude_latpc
+	AddressTag bool
 }
 
 // WithLATPCSettings selects the LATPC translation path for this GPU.
@@ -958,6 +963,10 @@ func (b *Builder) buildGMMU() {
 			gmmuBuilder = gmmuBuilder.
 				WithLATPL4RowHitLatency(b.latpcSettings.L4RowHitLatency)
 		}
+		// sbin_claude_latpc: the PW Buffer tag mode. The page walk queue is
+		// not a LATPC knob - it is baseline GMMU hardware (Table 2).
+		gmmuBuilder = gmmuBuilder.
+			WithLATPAddressTag(b.latpcSettings.AddressTag)
 	}
 
 	if b.uvmServiceProvider != "" { // sbin_codex

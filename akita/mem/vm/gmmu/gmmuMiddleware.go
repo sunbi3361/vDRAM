@@ -625,6 +625,15 @@ func (m *middleware) drainBatchMember(walkingIndex int) bool {
 // triple (non-zero stride) join - a demand starts its own walk, as in the
 // paper's PW Buffer. // sbin_claude_latpc
 func (m *middleware) tryJoinBatch(req *vm.TranslationReq) bool {
+	// sbin_claude_latpc: the address tag (Fig. 15) admits a demand too - its
+	// Index is zero, so it matches an entry whose Base Address is its own
+	// VPN, which is how a group started by a lone prefetch picks up its
+	// demand later. The GroupID tag has no such case: a demand carries no
+	// stride, so it can only ever start its own walk.
+	if m.latpAddrTag {
+		return m.tryJoinBatchByAddress(req)
+	}
+
 	if req.GroupID == "" || req.GroupStride == 0 {
 		return false
 	}
@@ -638,19 +647,95 @@ func (m *middleware) tryJoinBatch(req *vm.TranslationReq) bool {
 			continue
 		}
 
-		lead.members = append(lead.members, req)
-		if len(lead.members) == 1 {
-			m.latpBatches++
-		}
-
-		tracing.TraceReqReceive(req, m.Comp)
-		tracing.AddTaskStep(
-			tracing.MsgIDAtReceiver(req, m.Comp), m.Comp, "latp-join")
+		m.attachBatchMember(lead, req)
 
 		return true
 	}
 
 	return false
+}
+
+// tryJoinBatchByAddress is the paper's PW Buffer tag (MICRO'25 Fig. 15):
+// an entry is <Base Address, Stride, 32-bit Valid Mask> and a request joins
+// when Base + Stride*Index resolves to its own VPN and the entry's mask bit
+// for that index is still free. The tag holds no warp instruction identity,
+// so requests issued by different warp instructions share an entry whenever
+// their group arithmetic coincides. // sbin_claude_latpc
+func (m *middleware) tryJoinBatchByAddress(req *vm.TranslationReq) bool {
+	base := m.latpGroupBase(req)
+	index := latpGroupIndex(req)
+
+	for i := range m.walkingTranslations {
+		lead := &m.walkingTranslations[i]
+		if lead.state == transactionFinished {
+			continue
+		}
+		if lead.req.PID != req.PID || lead.groupBase != base {
+			continue
+		}
+		// The entry adopts its stride from the first strided member, as
+		// LATC's entries do (Algorithm 1's "E.Stride = 0" arm).
+		leadStride := lead.req.GroupStride
+		if leadStride != 0 && req.GroupStride != 0 &&
+			leadStride != req.GroupStride {
+			continue
+		}
+		if lead.memberMask&(1<<uint(index)) != 0 {
+			continue
+		}
+
+		lead.memberMask |= 1 << uint(index)
+		if lead.req.GroupID != req.GroupID {
+			m.latpCrossGroupJoins++
+		}
+
+		m.attachBatchMember(lead, req)
+
+		return true
+	}
+
+	return false
+}
+
+// attachBatchMember records req as a coalesced member of lead. // sbin_claude_latpc
+func (m *middleware) attachBatchMember(
+	lead *transaction,
+	req *vm.TranslationReq,
+) {
+	lead.members = append(lead.members, req)
+	if len(lead.members) == 1 {
+		m.latpBatches++
+	}
+
+	tracing.TraceReqReceive(req, m.Comp)
+	tracing.AddTaskStep(
+		tracing.MsgIDAtReceiver(req, m.Comp), m.Comp, "latp-join")
+}
+
+// latpGroupIndex is the request's index within its group, clamped to the
+// Valid Mask width. A demand, and anything without a usable triple, sits at
+// index 0. // sbin_claude_latpc
+func latpGroupIndex(req *vm.TranslationReq) int {
+	if req.GroupStride == 0 ||
+		req.GroupIndex < 0 || req.GroupIndex >= latpValidMaskWidth {
+		return 0
+	}
+
+	return req.GroupIndex
+}
+
+// latpGroupBase is the entry's Base Address in VA form: the VPN the group's
+// demand carries, i.e. VAddr - Stride*Index pages. // sbin_claude_latpc
+func (m *middleware) latpGroupBase(req *vm.TranslationReq) uint64 {
+	index := latpGroupIndex(req)
+	if index == 0 {
+		return req.VAddr
+	}
+
+	pageSize := int64(1) << m.log2PageSize
+
+	return uint64(int64(req.VAddr) -
+		req.GroupStride*int64(index)*pageSize)
 }
 
 // Pre-edit code (commented per project convention). Admission used to be
@@ -678,53 +763,130 @@ func (m *middleware) tryJoinBatch(req *vm.TranslationReq) bool {
 //		return true
 //	}
 //
+// sbin_claude_latpc: admission runs through the page walk queue (MICRO'25
+// Table 2 and Figure 10). The GMMU drains its top port into the queue, lets
+// LATP's PW Buffer tag check search the whole queue for a request that can
+// coalesce into an in-flight walk, and only then starts a new walk from the
+// head. Coalescing is the only thing allowed to look past the head, because
+// it is the only thing a PW Buffer entry can answer without holding a
+// walker; admission itself stays in order, so a configuration without LATP
+// behaves exactly as it did when the GMMU read straight off the port.
+//
 // sbin_claude_avatar: a canceled request is dropped at the queue head even
 // when every walker slot is busy - it needs no slot, and leaving it would
 // clog the queue behind it. The drop happens before TraceReqReceive, so
 // canceled walks never enter the gmmu_translation_count/inflight metrics.
 func (m *middleware) parseFromTop() bool {
-	item := m.topPort.PeekIncoming()
-	if item == nil {
+	madeProgress := m.refillPWQueue()
+
+	if m.latpEnabled && m.joinFromPWQueue() {
+		return true
+	}
+
+	return m.admitFromPWQueue() || madeProgress
+}
+
+// refillPWQueue moves waiting translation requests from the top port into
+// the page walk queue. // sbin_claude_latpc
+func (m *middleware) refillPWQueue() bool {
+	madeProgress := false
+
+	for len(m.pwQueue) < m.pwQueueSize {
+		item := m.topPort.PeekIncoming()
+		if item == nil {
+			break
+		}
+
+		req, ok := item.(*vm.TranslationReq)
+		if !ok {
+			log.Panicf("GMMU cannot handle request of type %s",
+				reflect.TypeOf(item))
+		}
+
+		m.topPort.RetrieveIncoming()
+
+		madeProgress = true
+
+		m.pwQueue = append(m.pwQueue, req)
+	}
+
+	return madeProgress
+}
+
+// joinFromPWQueue coalesces one queued request into an in-flight walk. The
+// scan is the associative PW Buffer tag check of the paper's Figure 15; a
+// hit costs no walker slot, so it is tried before admission.
+// sbin_claude_latpc
+func (m *middleware) joinFromPWQueue() bool {
+	for i, req := range m.pwQueue {
+		if m.dropIfCanceled(req) {
+			m.removeFromPWQueue(i)
+
+			return true
+		}
+
+		if !m.tryJoinBatch(req) {
+			continue
+		}
+
+		if i > 0 {
+			m.latpLookaheadJoins++
+		}
+
+		m.removeFromPWQueue(i)
+
+		return true
+	}
+
+	return false
+}
+
+// admitFromPWQueue starts a walk for the request at the head of the queue.
+// Admission stays in order: only coalescing looks ahead, because that is
+// what the PW Buffer tag can answer without holding a walker.
+// sbin_claude_latpc
+func (m *middleware) admitFromPWQueue() bool {
+	if len(m.pwQueue) == 0 {
 		return false
 	}
 
-	req, ok := item.(*vm.TranslationReq)
-	if !ok {
-		log.Panicf("GMMU cannot handle request of type %s",
-			reflect.TypeOf(item))
-	}
+	req := m.pwQueue[0]
 
-	if _, canceled := m.canceledReqs[req.ID]; canceled {
-		delete(m.canceledReqs, req.ID)
-		m.topPort.RetrieveIncoming()
+	if m.dropIfCanceled(req) {
+		m.removeFromPWQueue(0)
 
 		return true
 	}
 
-	// sbin_claude_latpc: a same-group request joins an in-flight walk before
-	// the admission check - members need neither a hardware walker slot nor
-	// a PW-warp slot, which is the point of batching (the paper's "reserved
-	// until the traversal completes").
-	if m.latpEnabled && m.tryJoinBatch(req) {
-		m.topPort.RetrieveIncoming()
-		return true
-	}
-
-	// Pre-edit code (commented per project convention):
-	// if len(m.walkingTranslations) >= m.maxRequestsInFlight {
-	// 	return false
-	// }
-	//
-	// sbin_claude_softwalker: which resource gates admission depends on the
-	// walk mode, so the whole check moved into admitWalk.
 	swCore, admitted := m.admitWalk()
 	if !admitted {
+		m.pwQueueHeadBlockTicks++
+
 		return false
 	}
 
-	m.topPort.RetrieveIncoming()
+	m.removeFromPWQueue(0)
 	tracing.TraceReqReceive(req, m.Comp)
 	m.startWalking(req, swCore)
+
+	return true
+}
+
+// removeFromPWQueue deletes the i-th queued request, preserving order.
+// sbin_claude_latpc
+func (m *middleware) removeFromPWQueue(i int) {
+	m.pwQueue = append(m.pwQueue[:i], m.pwQueue[i+1:]...)
+}
+
+// dropIfCanceled reports whether the requester abandoned this translation
+// (Avatar EAF answered it early), consuming the cancel record when it did.
+// sbin_claude_latpc
+func (m *middleware) dropIfCanceled(req *vm.TranslationReq) bool {
+	if _, canceled := m.canceledReqs[req.ID]; !canceled {
+		return false
+	}
+
+	delete(m.canceledReqs, req.ID)
 
 	return true
 }
@@ -808,6 +970,19 @@ func (m *middleware) startWalking(req *vm.TranslationReq, swCore int) {
 		state:     newTransaction,
 		swCore:    swCore, // sbin_claude_softwalker
 	}
+
+	// sbin_claude_latpc: a prefetch triple that gets here failed to join any
+	// in-flight walk and pays for a walker slot of its own.
+	if m.latpEnabled && req.GroupStride != 0 {
+		m.latpLonePrefetchWalks++
+	}
+
+	// sbin_claude_latpc: the entry's Base Address and Valid Mask, so later
+	// requests of the same group can be tagged against it (Fig. 15). Kept
+	// unconditionally - it costs one shift and keeps the two tag modes from
+	// diverging in anything but the match rule.
+	trans.groupBase = m.latpGroupBase(req)
+	trans.memberMask = 1 << uint(latpGroupIndex(req))
 
 	m.walkingTranslations = append(m.walkingTranslations, trans)
 }

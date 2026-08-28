@@ -33,6 +33,11 @@ const pageTableLevels = 4
 
 const lowestPageWalkCacheLevel = 1 // sbin_codex: level zero is never cached.
 
+// latpValidMaskWidth is the paper's 32-bit Valid Mask width - the largest
+// number of translations one PW Buffer entry can track (MICRO'25 §5.4,
+// Fig. 15). // sbin_claude_latpc
+const latpValidMaskWidth = 32
+
 // sbin_codex: control states are local to GMMU rather than borrowed from TLB.
 type controlState int
 
@@ -68,6 +73,17 @@ type transaction struct {
 	// L1-L3 traversal is shared with the lead, and each member's L4 PTE is
 	// answered during batchDraining at the row-hit latency. // sbin_claude_latpc
 	members []*vm.TranslationReq
+	// memberMask is the paper's 32-bit Valid Mask (Fig. 15): bit i marks
+	// that the VPN at base + Stride*i is already tracked by this entry, so
+	// address-tag matching cannot admit the same index twice and a group
+	// cannot exceed the mask width. Only maintained in address-tag mode; the
+	// GroupID tag bounds a group at the Regularity Detector instead.
+	// sbin_claude_latpc
+	memberMask uint32
+	// groupBase is the entry's Base Address in VA form: the demand VPN of
+	// the group this walk leads. Only meaningful in address-tag mode.
+	// sbin_claude_latpc
+	groupBase uint64
 	// drainCycleLeft counts down the L4 row-buffer-hit latency of the member
 	// currently being answered. // sbin_claude_latpc
 	drainCycleLeft uint64
@@ -137,7 +153,17 @@ type Comp struct {
 	pageTable           vm.PageTable
 	latency             int
 	maxRequestsInFlight int
-	log2PageSize        uint64
+
+	// sbin_claude_latpc: the page walk queue in front of the walkers (paper
+	// Table 2: 128 entries; Figure 10's "PW Queue"). Requests wait here
+	// rather than in the top port, which is what lets LATP's PW Buffer tag
+	// check see a coalescable request that is not at the head of the line.
+	// Admission into a walker stays in order, so a configuration without
+	// LATP behaves exactly as it did when the GMMU read straight off the
+	// port.
+	pwQueueSize  int
+	pwQueue      []*vm.TranslationReq
+	log2PageSize uint64
 
 	// sbin_claude_hpt: FS-HPT (PACT'24) walk mode. hash(VPN) indexes a
 	// fixed-size hashed table directly, so a walk costs hptAccessesPerWalk
@@ -171,6 +197,33 @@ type Comp struct {
 	latpL4RowHitLatency int
 	latpBatches         uint64
 	latpBatchedMembers  uint64
+	// sbin_claude_latpc: prefetch-triple requests that reached the walker
+	// WITHOUT finding a lead to join, i.e. group members that arrived alone
+	// and had to take a walker slot of their own. Together with
+	// latpBatchedMembers it splits every prefetch arrival into "batched" and
+	// "arrived too late / alone", which is what says whether LATP's low
+	// batch rate is a matching problem or a workload property.
+	latpLonePrefetchWalks uint64
+	// sbin_claude_latpc: cycles in which the GMMU had a request waiting at
+	// the head of its top port that could not join any in-flight walk and
+	// found no free walker, so nothing behind it was examined either. This
+	// is the cost of having no page walk queue (paper Table 2: 128 entries)
+	// - a coalescable request stuck behind a blocked head cannot reach the
+	// PW Buffer tag check before its lead retires.
+	pwQueueHeadBlockTicks uint64
+	// latpLookaheadJoins counts joins found behind the head of the page walk
+	// queue - the merges an admission that only inspected the head would
+	// have lost.
+	latpLookaheadJoins uint64
+	// sbin_claude_latpc: when set, the PW Buffer is tagged the way the paper
+	// tags it (Fig. 15) - Base Address + Stride + Index arithmetic over the
+	// walk's group base - instead of by the Regularity Detector's per-warp-
+	// instruction group ID. The address tag carries no instruction identity,
+	// so requests from different warp instructions can share an entry.
+	latpAddrTag bool
+	// latpCrossGroupJoins counts address-tag joins whose GroupID differs
+	// from the lead's, i.e. merges the GroupID tag cannot express.
+	latpCrossGroupJoins uint64
 
 	walkingTranslations []transaction
 }
@@ -278,6 +331,19 @@ type LATPStats struct {
 	// members, i.e. without a walker slot or a page-walk-cache lookup of
 	// their own.
 	BatchedMembers uint64
+	// LonePrefetchWalks is the number of prefetch-triple requests that found
+	// no lead to join and started their own walk. // sbin_claude_latpc
+	LonePrefetchWalks uint64
+	// HeadBlockTicks is the number of cycles the page walk queue's head was
+	// blocked on walker availability. // sbin_claude_latpc
+	HeadBlockTicks uint64
+	// LookaheadJoins is the number of joins found behind the head of the
+	// page walk queue - the merges head-only admission loses.
+	// sbin_claude_latpc
+	LookaheadJoins uint64
+	// CrossGroupJoins is the number of address-tag joins onto a lead with a
+	// different Regularity Detector group ID. // sbin_claude_latpc
+	CrossGroupJoins uint64
 }
 
 // LATPBatchingEnabled reports whether this GMMU coalesces same-group walks.
@@ -290,7 +356,11 @@ func (c *Comp) LATPBatchingEnabled() bool {
 // batching is disabled. // sbin_claude_latpc
 func (c *Comp) LATPStats() LATPStats {
 	return LATPStats{
-		Batches:        c.latpBatches,
-		BatchedMembers: c.latpBatchedMembers,
+		Batches:           c.latpBatches,
+		BatchedMembers:    c.latpBatchedMembers,
+		LonePrefetchWalks: c.latpLonePrefetchWalks,
+		HeadBlockTicks:    c.pwQueueHeadBlockTicks,
+		LookaheadJoins:    c.latpLookaheadJoins,
+		CrossGroupJoins:   c.latpCrossGroupJoins,
 	}
 }

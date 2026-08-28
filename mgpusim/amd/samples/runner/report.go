@@ -133,6 +133,11 @@ type reporter struct {
 	// the MSHR reservation-failure counter (all configurations) and the LATC
 	// compression counters (-gpu=latpc). // sbin_claude_latpc
 	l1vTLBs map[int][]*tlb.Comp
+
+	// sbin_claude_latpc: the shared L2 TLB of every GPU. Its MSHR is the
+	// structure LATC's L1-side relief runs into next, so its reservation
+	// failures have to be visible alongside the L1V TLB's.
+	l2TLBs map[int]*tlb.Comp
 	// latpcCUs are every CU running the LATPC Regularity Detector, keyed by
 	// GPU index. They own the rd_* metrics. // sbin_claude_latpc
 	latpcCUs map[int][]*cu.ComputeUnit
@@ -165,6 +170,7 @@ func newReporter(s *simulation.Simulation) *reporter {
 	r.collectSoftWalkerUnits(s)
 	r.collectFBTUnits(s)  // sbin_claude_fbt
 	r.collectL1VTLBs(s)   // sbin_claude_latpc
+	r.collectL2TLBs(s)    // sbin_claude_latpc
 	r.collectLATPCCUs(s)  // sbin_claude_latpc
 	r.collectLATPGMMUs(s) // sbin_claude_latpc
 
@@ -251,6 +257,29 @@ func (r *reporter) collectL1VTLBs(s *simulation.Simulation) {
 		if !found {
 			return
 		}
+	}
+}
+
+// collectL2TLBs finds every GPU's shared L2 TLB. The name re-check guards
+// against GetComponentByName's index-0 fallback, like collectL1VTLBs.
+// sbin_claude_latpc
+func (r *reporter) collectL2TLBs(s *simulation.Simulation) {
+	r.l2TLBs = make(map[int]*tlb.Comp)
+
+	for gpu := 1; ; gpu++ {
+		name := fmt.Sprintf("GPU[%d].L2TLB", gpu)
+
+		c := s.GetComponentByName(name)
+		if c == nil || c.Name() != name {
+			return
+		}
+
+		comp, ok := c.(*tlb.Comp)
+		if !ok {
+			return
+		}
+
+		r.l2TLBs[gpu] = comp
 	}
 }
 
@@ -872,6 +901,19 @@ func (r *reporter) reportLATC() {
 			Unit:     "",
 		})
 
+		// sbin_claude_latpc: the shared L2 TLB's MSHR caps how many
+		// translations can be outstanding toward the GMMU at all, so its
+		// reservation failures say whether LATC's L1-side relief just moved
+		// the stall one level down.
+		if l2 := r.l2TLBs[gpu]; l2 != nil {
+			r.dataRecorder.InsertData(tableName, metric{
+				Location: location,
+				What:     "l2tlb_mshr_reservation_failure_count",
+				Value:    float64(l2.ReservationFailureCount()),
+				Unit:     "",
+			})
+		}
+
 		if !compressed {
 			continue
 		}
@@ -905,7 +947,11 @@ func (r *reporter) reportLATP() {
 			val  float64
 		}{
 			{"latp_batch_count", float64(stats.Batches)},
+			{"latp_lone_prefetch_walk_count", float64(stats.LonePrefetchWalks)},
 			{"latp_batched_member_count", float64(stats.BatchedMembers)},
+			{"pw_queue_head_block_tick_count", float64(stats.HeadBlockTicks)},
+			{"latp_lookahead_join_count", float64(stats.LookaheadJoins)},
+			{"latp_cross_group_join_count", float64(stats.CrossGroupJoins)},
 		}
 		for _, row := range rows {
 			r.dataRecorder.InsertData(tableName, metric{

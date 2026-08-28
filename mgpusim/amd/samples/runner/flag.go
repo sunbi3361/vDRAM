@@ -54,6 +54,13 @@ var gpuTypeFlag = flag.String("gpu", "r9nano",
 var latpcL4RowHitLatencyFlag = flag.Int("latpc-l4-row-hit-latency", 20,
 	"Cycles one LATP batch member's L4 PTE load costs in the GMMU (a DRAM "+
 		"row-buffer hit). Only meaningful with -gpu=latpc.")
+var latpcAddrTagFlag = flag.Bool("latpc-addr-tag", true,
+	"Tag PW Buffer entries the way the paper does (Figure 15: Base Address "+
+		"+ Stride*Index with a 32-bit valid mask). Pass "+
+		"-latpc-addr-tag=false for the ablation that tags entries by the "+
+		"Regularity Detector's per-warp-instruction group ID instead, which "+
+		"cannot merge walks issued by different warp instructions. Only "+
+		"meaningful with -gpu=latpc.")
 var l1TLBMSHRFlag = flag.Int("l1tlb-mshr", 0,
 	"Per-CU L1V TLB MSHR entry count; 0 keeps the configuration default "+
 		"(64). Honored by the r9nano, hpt, and latpc GPU types, so the "+
@@ -408,6 +415,7 @@ func (r *Runner) parseSoftWalkerFlags() {
 func (r *Runner) parseLATPCFlags() {
 	r.LATPCL4RowHitLatency = *latpcL4RowHitLatencyFlag
 	r.L1TLBMSHREntries = *l1TLBMSHRFlag
+	r.LATPCAddressTag = *latpcAddrTagFlag
 }
 
 // validateAvatarFlags rejects invalid Avatar flag combinations (v1 scope).

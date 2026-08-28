@@ -207,6 +207,9 @@ type LATPCPlatformConfig struct {
 	// L1TLBMSHREntries overrides the per-CU L1V TLB MSHR entry count for
 	// r9nano-based configurations. 0 keeps the default (64).
 	L1TLBMSHREntries int
+	// AddressTag selects the paper's PW Buffer tag (Figure 15) instead of
+	// the Regularity Detector group ID. On by default. // sbin_claude_latpc
+	AddressTag bool
 }
 
 // latpcEnabled reports whether the platform builds the LATPC GPU type.
@@ -835,6 +838,7 @@ func (b *Builder) makeLATPCGPUBuilder(
 		WithLATPCSettings(r9nano.LATPCSettings{
 			Enabled:         true,
 			L4RowHitLatency: b.latpcCfg.L4RowHitLatency,
+			AddressTag:      b.latpcCfg.AddressTag, // sbin_claude_latpc
 		}).
 		WithL1TLBMSHREntries(b.latpcCfg.L1TLBMSHREntries).
 		WithSimulation(b.simulation).

@@ -43,11 +43,11 @@ type CDNA3Kernel1Args struct {
 	NX  int32      // offset 24
 	NY  int32      // offset 28
 	// Implicit args expected by CDNA3 runtime
-	Pad1             [12]byte   // offset 32-43 (padding)
-	HiddenGroupSizeX uint16     // offset 44 (0x2c)
-	HiddenGroupSizeY uint16     // offset 46
-	HiddenGroupSizeZ uint16     // offset 48
-	Pad2             [238]byte  // offset 50-287 (rest of implicit args)
+	Pad1             [12]byte  // offset 32-43 (padding)
+	HiddenGroupSizeX uint16    // offset 44 (0x2c)
+	HiddenGroupSizeY uint16    // offset 46
+	HiddenGroupSizeZ uint16    // offset 48
+	Pad2             [238]byte // offset 50-287 (rest of implicit args)
 }
 
 // CDNA3Kernel2Args defines kernel arguments for CDNA3 architecture (GFX942)
@@ -58,11 +58,11 @@ type CDNA3Kernel2Args struct {
 	NX  int32      // offset 24
 	NY  int32      // offset 28
 	// Implicit args expected by CDNA3 runtime
-	Pad1             [12]byte   // offset 32-43 (padding)
-	HiddenGroupSizeX uint16     // offset 44 (0x2c)
-	HiddenGroupSizeY uint16     // offset 46
-	HiddenGroupSizeZ uint16     // offset 48
-	Pad2             [238]byte  // offset 50-287 (rest of implicit args)
+	Pad1             [12]byte  // offset 32-43 (padding)
+	HiddenGroupSizeX uint16    // offset 44 (0x2c)
+	HiddenGroupSizeY uint16    // offset 46
+	HiddenGroupSizeZ uint16    // offset 48
+	Pad2             [238]byte // offset 50-287 (rest of implicit args)
 }
 
 // Benchmark defines a benchmark
@@ -205,7 +205,7 @@ func (b *Benchmark) launchKernel1(localSize [3]uint16, globalSize [3]uint32) {
 		}
 		b.driver.LaunchKernel(b.context, b.kernel1,
 			globalSize, localSize, &kernel1Arg)
-	} else{
+	} else {
 		kernel1Arg := Kernel1Args{
 			A:   b.dA,
 			X:   b.dX,
@@ -249,13 +249,13 @@ func (b *Benchmark) exec() {
 	b.driver.MemCopyH2D(b.context, b.dA, b.a)
 	b.driver.MemCopyH2D(b.context, b.dX, b.x)
 
-	localSize := [3]uint16{256, 1, 1}
-	globalSizeX := uint32(((b.NX-1)/256 + 1) * 256)
+	localSize := [3]uint16{128, 1, 1}
+	globalSizeX := uint32(((b.NX-1)/128 + 1) * 128)
 	globalSize := [3]uint32{globalSizeX, 1, 1}
 
 	b.launchKernel1(localSize, globalSize)
 
-	globalSizeX = uint32(((b.NY-1)/256 + 1) * 256)
+	globalSizeX = uint32(((b.NY-1)/128 + 1) * 128)
 	globalSize = [3]uint32{globalSizeX, 1, 1}
 
 	b.launchKernel2(localSize, globalSize)

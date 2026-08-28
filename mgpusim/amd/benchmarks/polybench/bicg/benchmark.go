@@ -298,13 +298,13 @@ func (b *Benchmark) exec() {
 	b.driver.MemCopyH2D(b.context, b.dR, b.r)
 	b.driver.MemCopyH2D(b.context, b.dP, b.p)
 
-	localSize := [3]uint16{256, 1, 1}
-	globalSizeX := uint32(((b.NX-1)/256 + 1) * 256)
+	localSize := [3]uint16{128, 1, 1}
+	globalSizeX := uint32(((b.NX-1)/128 + 1) * 128)
 	globalSize := [3]uint32{globalSizeX, 1, 1}
 
 	b.launchKernel1(localSize, globalSize, globalSizeX)
 
-	globalSizeX = uint32(((b.NY-1)/256 + 1) * 256)
+	globalSizeX = uint32(((b.NY-1)/128 + 1) * 128)
 	globalSize = [3]uint32{globalSizeX, 1, 1}
 
 	b.launchKernel2(localSize, globalSize, globalSizeX)

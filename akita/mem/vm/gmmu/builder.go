@@ -43,6 +43,13 @@ type Builder struct {
 	// at the L4 row-buffer-hit latency each after the lead completes.
 	latpEnabled         bool
 	latpL4RowHitLatency int
+	// sbin_claude_latpc: depth of the queue that holds translation requests
+	// waiting for a walker (paper Table 2: 128).
+	pwQueueSize int
+	// sbin_claude_latpc: false tags PW Buffer entries by the Regularity
+	// Detector group ID; true uses the paper's Base Address + Stride*Index
+	// arithmetic (Fig. 15).
+	latpAddrTag bool
 }
 
 // MakeBuilder creates a new builder
@@ -56,6 +63,16 @@ func MakeBuilder() Builder {
 		// sbin_claude_latpc: a row-buffer hit is a CAS-only access, ~1/5 of
 		// the 100-cycle modeled memory reference (refs/latpc-plan.md 1.4).
 		latpL4RowHitLatency: 20,
+		// sbin_claude_latpc: the queue that holds translation requests
+		// waiting for a walker. MICRO'25 Table 2 sizes it at 128 entries,
+		// and it is baseline hardware, not a LATPC addition - LATPC only
+		// searches it.
+		pwQueueSize: 128,
+		// sbin_claude_latpc: tag PW Buffer entries the way MICRO'25 Fig. 15
+		// does (Base Address + Stride*Index over a 32-bit valid mask). The
+		// Regularity Detector group ID is the strictly narrower tag and is
+		// kept only as an ablation.
+		latpAddrTag: true,
 	}
 }
 
@@ -175,6 +192,29 @@ func (b Builder) WithLATPL4RowHitLatency(cycles int) Builder {
 	return b
 }
 
+// WithPageWalkQueue sets the depth of the queue that holds translation
+// requests waiting for a page table walker (MICRO'25 Table 2 and Figure 10:
+// 128 entries). Admission into a walker is in order, so the depth changes
+// nothing on its own; the queue is what LATP's PW Buffer tag check searches,
+// so a request that can coalesce does not have to reach the head of the line
+// before the walk it would have joined retires. // sbin_claude_latpc
+func (b Builder) WithPageWalkQueue(entries int) Builder {
+	b.pwQueueSize = entries
+	return b
+}
+
+// WithLATPAddressTag selects the paper's PW Buffer tag (Figure 15):
+// Base Address + Stride*Index, with a 32-bit Valid Mask, carrying no warp
+// instruction identity, so walks issued by different warp instructions can
+// share an entry and a group's demand can claim the base slot of an entry a
+// lone prefetch opened. On by default; tagging by the Regularity Detector's
+// group ID instead is the ablation. Only meaningful with
+// WithLATPBatching(true). // sbin_claude_latpc
+func (b Builder) WithLATPAddressTag(enabled bool) Builder {
+	b.latpAddrTag = enabled
+	return b
+}
+
 // func (b Builder) WithAccessCounterThreshold(thresh uint64) Builder { // sbin_codex
 // 	b.accessCounterThresh = thresh
 // 	return b
@@ -195,6 +235,11 @@ func (b Builder) Build(name string) *Comp {
 	// sbin_claude_latpc: a member's L4 access must cost at least one cycle.
 	if b.latpEnabled && b.latpL4RowHitLatency < 1 {
 		panic("GMMU LATP L4 row-hit latency must be at least 1")
+	}
+
+	// sbin_claude_latpc: a page walk queue has to be able to hold the head.
+	if b.pwQueueSize < 1 {
+		panic("GMMU page walk queue must hold at least one request")
 	}
 
 	gmmu := new(Comp)
@@ -261,6 +306,8 @@ func (b Builder) configureInternalStates(c *Comp) {
 	}
 	c.latpEnabled = b.latpEnabled                 // sbin_claude_latpc
 	c.latpL4RowHitLatency = b.latpL4RowHitLatency // sbin_claude_latpc
+	c.pwQueueSize = b.pwQueueSize                 // sbin_claude_latpc
+	c.latpAddrTag = b.latpAddrTag                 // sbin_claude_latpc
 	c.canceledReqs = make(map[string]struct{})    // sbin_claude_avatar
 	c.addressToPortMapper = b.addressToPortMapper // sbin_gmmu
 	c.UVMServiceProvider = b.uvmServiceProvider   // sbin_codex
