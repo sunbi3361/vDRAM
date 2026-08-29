@@ -20,6 +20,18 @@ const (
 	wgSize   = 256
 )
 
+// Model selects the traversal kernel. // sbin_claude
+const (
+	// ModelFrontier is the GraphBIG topology-driven frontier model
+	// (gpu_BFS/bfs_topo_frontier.cu, Harish HiPC 2007): one vertex per
+	// thread, two kernels per level, no atomics.
+	ModelFrontier = "frontier"
+	// ModelWarpCentric is the previous kernel, kept so earlier results stay
+	// reproducible. One warp cooperatively walks one adjacency list, which
+	// coalesces every edge read and leaves the page-walk unit idle.
+	ModelWarpCentric = "warp-centric"
+)
+
 // ArgsBFS keeps to 4 ptrs + scalar pad + hidden = 56B to stay under the
 // SMEM dwordx16 threshold. All per-launch scalars live in `state[]`.
 type ArgsBFS struct {
@@ -29,6 +41,29 @@ type ArgsBFS struct {
 	State               driver.Ptr
 	Pad0                uint32
 	Pad1                uint32
+	HiddenGlobalOffsetX int64
+	HiddenGlobalOffsetY int64
+	HiddenGlobalOffsetZ int64
+}
+
+// ArgsBFSExpand matches bfs_frontier_expand_kernel. // sbin_claude
+type ArgsBFSExpand struct {
+	Vplist              driver.Ptr
+	Offsets             driver.Ptr
+	Edges               driver.Ptr
+	Frontier            driver.Ptr
+	Updating            driver.Ptr
+	State               driver.Ptr
+	HiddenGlobalOffsetX int64
+	HiddenGlobalOffsetY int64
+	HiddenGlobalOffsetZ int64
+}
+
+// ArgsBFSCompact matches bfs_frontier_compact_kernel. // sbin_claude
+type ArgsBFSCompact struct {
+	Frontier            driver.Ptr
+	Updating            driver.Ptr
+	State               driver.Ptr
 	HiddenGlobalOffsetX int64
 	HiddenGlobalOffsetY int64
 	HiddenGlobalOffsetZ int64
@@ -47,16 +82,24 @@ type Benchmark struct {
 	MaxDepth    uint32
 	VerifyOnCPU bool
 
-	kernel *insts.KernelCodeObject
+	// Model picks the traversal kernel; defaults to ModelFrontier. // sbin_claude
+	Model string
+
+	kernel        *insts.KernelCodeObject
+	kernelExpand  *insts.KernelCodeObject // sbin_claude
+	kernelCompact *insts.KernelCodeObject // sbin_claude
 
 	graph     common.CSRGraph
 	hVplist   []uint32
+	hFrontier []uint32 // sbin_claude
 	cpuVplist []uint32
 
-	dOffsets driver.Ptr
-	dEdges   driver.Ptr
-	dVplist  driver.Ptr
-	dState   driver.Ptr
+	dOffsets  driver.Ptr
+	dEdges    driver.Ptr
+	dVplist   driver.Ptr
+	dState    driver.Ptr
+	dFrontier driver.Ptr // sbin_claude
+	dUpdating driver.Ptr // sbin_claude
 
 	Arch             arch.Type
 	useUnifiedMemory bool
@@ -70,10 +113,16 @@ func NewBenchmark(driver *driver.Driver) *Benchmark {
 	b := &Benchmark{
 		driver: driver, context: driver.Init(),
 		NumNodes: 1024, Degree: 8, VerifyOnCPU: true,
+		Model: ModelFrontier, // sbin_claude
 	}
 	b.queue = driver.CreateCommandQueue(b.context)
 	if len(hsacoBytes) > 0 {
 		b.kernel = insts.LoadKernelCodeObjectFromBytes(hsacoBytes, "bfs_data_warp_centric_kernel")
+		// sbin_claude: both models live in the same hsaco.
+		b.kernelExpand = insts.LoadKernelCodeObjectFromBytes(
+			hsacoBytes, "bfs_frontier_expand_kernel")
+		b.kernelCompact = insts.LoadKernelCodeObjectFromBytes(
+			hsacoBytes, "bfs_frontier_compact_kernel")
 	}
 	return b
 }
@@ -113,6 +162,10 @@ func (b *Benchmark) initGraph() {
 		b.Root = 0
 	}
 	b.hVplist[b.Root] = 0
+
+	// sbin_claude: the frontier model starts with the root on the frontier.
+	b.hFrontier = make([]uint32, b.NumNodes)
+	b.hFrontier[b.Root] = 1
 }
 
 func (b *Benchmark) alloc(size uint64) driver.Ptr {
@@ -134,9 +187,84 @@ func (b *Benchmark) initMem() {
 	b.driver.MemCopyH2D(b.context, b.dOffsets, b.graph.Offsets) // sbin_claude
 	b.driver.MemCopyH2D(b.context, b.dEdges, b.graph.Edges)     // sbin_claude
 	b.driver.MemCopyH2D(b.context, b.dVplist, b.hVplist)        // sbin_claude
+
+	// sbin_claude: frontier[] and updating[] are one uint per vertex (see the
+	// deviation note in native/bfs_topo_frontier.cl). The expand kernel probes
+	// updating[dst] at scattered dst, which is a large part of the page-walk
+	// pressure this model is meant to create.
+	if b.Model != ModelWarpCentric {
+		b.dFrontier = b.alloc(uint64(n * 4))
+		b.dUpdating = b.alloc(uint64(n * 4))
+		b.driver.MemCopyH2D(b.context, b.dFrontier, b.hFrontier)
+		b.driver.MemCopyH2D(b.context, b.dUpdating, make([]uint32, n))
+	}
 }
 
+// sbin_claude: dispatch on the selected traversal model.
 func (b *Benchmark) execGPU() {
+	if b.Model == ModelWarpCentric {
+		b.execGPUWarpCentric()
+		return
+	}
+	b.execGPUFrontier()
+}
+
+// execGPUFrontier runs the GraphBIG topology-driven frontier model
+// (gpu_BFS/bfs_topo_frontier.cu). Each level is two launches: expand walks the
+// adjacency lists of the current frontier one vertex per thread, and compact
+// swaps updating[] into frontier[] and reports whether anything moved.
+// No atomics: every writer of a given vertex at a given level writes the same
+// value, so the races are benign. // sbin_claude
+func (b *Benchmark) execGPUFrontier() {
+	maxDepth := b.MaxDepth
+	if maxDepth == 0 {
+		maxDepth = uint32(b.NumNodes)
+	}
+
+	threads := uint32(b.NumNodes)
+	threads = ((threads + wgSize - 1) / wgSize) * wgSize
+	if threads < wgSize {
+		threads = wgSize
+	}
+	global := [3]uint32{threads, 1, 1}
+	local := [3]uint16{wgSize, 1, 1}
+
+	for level := uint32(0); level < maxDepth; level++ {
+		state := []uint32{0, level, uint32(b.NumNodes)}
+		b.driver.MemCopyH2D(b.context, b.dState, state)
+
+		expandArgs := ArgsBFSExpand{
+			Vplist:   b.dVplist,
+			Offsets:  b.dOffsets,
+			Edges:    b.dEdges,
+			Frontier: b.dFrontier,
+			Updating: b.dUpdating,
+			State:    b.dState,
+		}
+		b.driver.EnqueueLaunchKernel(
+			b.queue, b.kernelExpand, global, local, &expandArgs)
+		b.driver.DrainCommandQueue(b.queue)
+
+		compactArgs := ArgsBFSCompact{
+			Frontier: b.dFrontier,
+			Updating: b.dUpdating,
+			State:    b.dState,
+		}
+		b.driver.EnqueueLaunchKernel(
+			b.queue, b.kernelCompact, global, local, &compactArgs)
+		b.driver.DrainCommandQueue(b.queue)
+
+		b.driver.MemCopyD2H(b.context, state, b.dState)
+		if state[0] == 0 {
+			break
+		}
+	}
+	b.driver.MemCopyD2H(b.context, b.hVplist, b.dVplist)
+}
+
+// Pre-edit code (commented per AGENTS.md convention): execGPU used to be the
+// warp-centric driver below, with no model dispatch. // sbin_claude
+func (b *Benchmark) execGPUWarpCentric() {
 	maxDepth := b.MaxDepth
 	if maxDepth == 0 {
 		maxDepth = uint32(b.NumNodes)
@@ -216,6 +344,7 @@ func (b *Benchmark) Verify() {
 			mismatch++
 		}
 	}
-	fmt.Printf("GraphBIG BFS (topo-warp-centric, atomics simulated): %d/%d match reference\n",
-		b.NumNodes-mismatch, b.NumNodes)
+	// sbin_claude: report which traversal model produced the result.
+	fmt.Printf("GraphBIG BFS (%s, no atomics): %d/%d match reference\n",
+		b.Model, b.NumNodes-mismatch, b.NumNodes)
 }

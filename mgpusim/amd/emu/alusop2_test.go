@@ -397,6 +397,46 @@ var _ = Describe("ALU", func() {
 		Expect(state.SCC()).To(Equal(byte(1)))
 	})
 
+	// sbin_claude: s_orn2_b64 (opcode 21) computes S0 | ~S1 and sets SCC from
+	// the 64-bit result.
+	It("should run S_ORN2_B64", func() {
+		state.inst = insts.NewInst()
+		state.inst.FormatType = insts.SOP2
+		state.inst.Opcode = 21
+		state.inst.Src0 = insts.NewSRegOperand(0, 0, 2)
+		state.inst.Src1 = insts.NewSRegOperand(0, 2, 2)
+		state.inst.Dst = insts.NewSRegOperand(0, 4, 2)
+
+		state.WriteReg(insts.SReg(0), 2, 0, insts.Uint64ToBytes(0x00ff))
+		state.WriteReg(insts.SReg(2), 2, 0, insts.Uint64ToBytes(0xff00))
+
+		alu.Run(state)
+
+		dst := state.ReadOperand(state.inst.Dst, 0)
+		Expect(dst).To(Equal(^uint64(0xff00) | uint64(0x00ff)))
+		Expect(state.SCC()).To(Equal(byte(1)))
+	})
+
+	// sbin_claude: the only input that zeroes S0 | ~S1, and so SCC.
+	It("should run S_ORN2_B64 and clear SCC when the result is zero", func() {
+		state.inst = insts.NewInst()
+		state.inst.FormatType = insts.SOP2
+		state.inst.Opcode = 21
+		state.inst.Src0 = insts.NewSRegOperand(0, 0, 2)
+		state.inst.Src1 = insts.NewSRegOperand(0, 2, 2)
+		state.inst.Dst = insts.NewSRegOperand(0, 4, 2)
+
+		state.WriteReg(insts.SReg(0), 2, 0, insts.Uint64ToBytes(0))
+		state.WriteReg(insts.SReg(2), 2, 0,
+			insts.Uint64ToBytes(0xffffffffffffffff))
+
+		alu.Run(state)
+
+		dst := state.ReadOperand(state.inst.Dst, 0)
+		Expect(dst).To(Equal(uint64(0)))
+		Expect(state.SCC()).To(Equal(byte(0)))
+	})
+
 	It("should run S_OR_B64", func() {
 		state.inst = insts.NewInst()
 		state.inst.FormatType = insts.SOP2

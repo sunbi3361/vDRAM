@@ -232,8 +232,26 @@ benchmarks=[
 script_path = os.path.dirname(os.path.realpath(__file__)) + "/benchmarks/"
 # sbin_claude: graphbig inputs now live in this workspace
 # (scripts/graphbig_input) instead of the hard-coded ~/vdram path.
+#
+# sbin_claude: switched from roadNet_CA to an R-MAT (Graph500) graph.
+# roadNet_CA is a planar road network -- mean degree 2.8 and geographically
+# ordered vertex ids -- so adjacency traversal is nearly sequential and the
+# GPU page-walk unit stays idle. Measured on graphbig_gc: 3.8 walks/us and
+# ideal-l1tlb gain 1.01x. The same kernel on rmat_d16 reaches 137.7 walks/us
+# (the 16-in-flight GMMU ceiling) and 4.45x. Regenerate with:
+#   python3 gen_rmat.py 20 16777216 graphbig_input/rmat_d16 1
+# Pre-edit value (commented per AGENTS.md convention):
+# GRAPHBIG_DATASET = (os.path.dirname(os.path.realpath(__file__))
+#                     + "/graphbig_input/roadNet_CA")
 GRAPHBIG_DATASET = (os.path.dirname(os.path.realpath(__file__))
-                    + "/graphbig_input/roadNet_CA")
+                    + "/graphbig_input/rmat_d16")  # sbin_claude
+
+# sbin_claude: highest-out-degree vertex of rmat_d16 (out-degree 69,465;
+# 10.3M out-edges reachable within two hops), so BFS/SSSP traversals actually
+# expand instead of terminating on an isolated root. R-MAT concentrates edges
+# in the (0,0) quadrant, so vertex 0 is the hub for any seed; gen_rmat.py
+# prints the measured hub if the graph is regenerated with other parameters.
+GRAPHBIG_ROOT = 0  # sbin_claude
 slurm_node = 0
 
 for config in configs:
@@ -256,7 +274,7 @@ for config in configs:
         # submit_file.write("nohup ./" + benchmark + " ")
         submit_file.write("./" + benchmark + " ")
         submit_file.write("-timing ")
-        submit_file.write("-parallel ")
+        # submit_file.write("-parallel ")
         submit_file.write("-arch=gcn3 ")
         submit_file.write("-report-all ")
         # submit_file.write("-verify ")
@@ -269,8 +287,6 @@ for config in configs:
         elif config == 'ideal-l1tlb':
             submit_file.write("-gpu=ideal-l1tlb ")
         elif config == 'virtual-caching':
-            submit_file.write("-gpu=virtual-caching ")
-        elif config == 'virtual-caching-nofbt':
             submit_file.write("-gpu=virtual-caching ")
             submit_file.write("-fbt-entries=0 ")
         elif config == 'uvm':
@@ -305,7 +321,6 @@ for config in configs:
             submit_file.write("-avatar-mod-entries=8 ")
             submit_file.write("-avatar-compress-ratio=0.675 ")
             submit_file.write("-avatar-validation-latency=7 ")
-            submit_file.write("-avatar-compress-ratio=0.675 ")
         elif config in avatar_compress_ratios:
             submit_file.write("-gpu=avatar ")
             submit_file.write("-avatar-frag=false ")
@@ -344,6 +359,8 @@ for config in configs:
         # limit super long benchmarks
         if benchmark == 'fastwalshtransform':
             submit_file.write("-max-inst=50000000 ") # 50M
+        elif benchmark == 'altis_cfd':
+            submit_file.write("-max-inst=1000000 ") # 1M
         elif benchmark == 'atax':
             submit_file.write("-max-inst=10000000 ") # 10M
         elif benchmark == 'bicg':
@@ -352,33 +369,82 @@ for config in configs:
             submit_file.write("-max-inst=100000000 ") # 100M
         elif benchmark == 'floydwarshall':
             submit_file.write("-max-inst=10000000 ") # 10M
+        # sbin_claude: rebudgeted for the rmat_d16 dataset. Simulation rate
+        # collapses once the graph actually stresses the page-walk unit --
+        # graphbig_gc drops from ~90 Minst/h on roadNet_CA to 9.5 Minst/h --
+        # so the old caps would have produced 8-21 hour jobs. Each cap below
+        # is the measured baseline rate x 2.75 h. Rates (Minst/h) measured on
+        # compasslab, -max-inst=5000000, rmat_d16:
+        #   trianglecount 41.9 | gc 9.5 | degreecentr 4.7 | sssp 11.4
+        #   kcore 22.0 | betweennesscentr 41.5 | connectedcomp 4.9 | bfs 84.3
+        # bfs was re-measured at 34.7 Minst/h after the traversal model changed
+        # to "frontier"; see its own note below. // sbin_claude
         elif benchmark == 'graphbig_betweennesscentr':
-            submit_file.write("-max-inst=10000000 ") # 10M
+            submit_file.write("-max-inst=10000000 ") # 10M (budget 114M)
         elif benchmark == 'graphbig_bfs':
-            submit_file.write("-max-inst=200000000 ") # 200M
+            # Pre-edit code (commented per AGENTS.md convention):
+            # submit_file.write("-max-inst=200000000 ") # 200M (budget 232M)
+            #
+            # sbin_claude: PROVISIONAL. The frontier model diverges heavily on a
+            # power-law graph -- a wavefront runs for the largest degree it
+            # contains -- so simulation slows from 84.3 to 34.7 Minst/h and the
+            # old 200M cap would need 5.8 h. 95M is 34.7 x 2.75 h, but that rate
+            # was measured over the first 5M instructions, which only covers
+            # level 0 (the root alone); the rate during the wide level 1->2
+            # expansion was not measured, and will be lower. Re-measure and
+            # adjust after the first full run.
+            submit_file.write("-max-inst=100000000 ") # 100M -- sbin_claude
         elif benchmark == 'graphbig_connectedcomp':
-            submit_file.write("-max-inst=50000000 ") # 50M
+            # Pre-edit code (commented per AGENTS.md convention):
+            # submit_file.write("-max-inst=50000000 ") # 50M
+            submit_file.write("-max-inst=12000000 ") # 12M -- sbin_claude
+        elif benchmark == 'graphbig_degreecentr':
+            # sbin_claude: was falling through to the 100M default (21 h).
+            submit_file.write("-max-inst=12000000 ") # 12M -- sbin_claude
         elif benchmark == 'graphbig_gc':
-            submit_file.write("-max-inst=200000000 ") # 200M
+            # Pre-edit code (commented per AGENTS.md convention):
+            # submit_file.write("-max-inst=200000000 ") # 200M
+            submit_file.write("-max-inst=25000000 ") # 25M -- sbin_claude
         elif benchmark == 'graphbig_kcore':
-            submit_file.write("-max-inst=50000000 ") # 50M
+            submit_file.write("-max-inst=50000000 ") # 50M (budget 60M)
+        elif benchmark == 'graphbig_sssp':
+            # sbin_claude: was falling through to the 100M default (8.8 h).
+            submit_file.write("-max-inst=30000000 ") # 30M -- sbin_claude
         elif benchmark == 'graphbig_trianglecount':
-            submit_file.write("-max-inst=10000000 ") # 10M
+            submit_file.write("-max-inst=10000000 ") # 10M (budget 115M)
         elif benchmark == 'gups':
             submit_file.write("-max-inst=10000000 ") # 10M
         elif benchmark == 'rodinia_backprop':
             submit_file.write("-max-inst=30000000 ") # 30M
+        elif benchmark == 'rodinia_gaussian':
+            submit_file.write("-max-inst=50000000 ") # 50M
         # elif benchmark == 'nbody':
         #     submit_file.write("-max-inst=10000000 ") # 10M
         elif benchmark == 'pagerank':
             submit_file.write("-max-inst=10000000 ") # 10M
+        elif benchmark == 'pannotia_color':
+            submit_file.write("-max-inst=1000000 ") # 10M
+        elif benchmark == 'pannotia_mis':
+            submit_file.write("-max-inst=5000000 ") # 5M
+        elif benchmark == 'pannotia_sssp':
+            submit_file.write("-max-inst=1000000 ") # 10M
+        elif benchmark == 'polybench_3mm':
+            submit_file.write("-max-inst=50000000 ") # 50M
+
         else:
             submit_file.write("-max-inst=100000000 ") # 100M
         submit_file.write("\\\n\t")
 
-        # set benchmark specific parameters (scaled so the working set
-        # exceeds the L2 TLB capacity (4096 entries x 4 KB = 16 MB) at 4 KB
-        # pages; target footprint ~24-64 MB per benchmark)
+        # set benchmark specific parameters (target footprint ~24-64 MB per
+        # benchmark).
+        # sbin_claude: the reach figure above was wrong. r9nano's shared L2
+        # TLB is 1024 entries (64 sets x 16 ways, timingconfig/r9nano/
+        # builder.go:1010), so its reach is 4 MB, not 16 MB. Note also that
+        # exceeding that reach is NOT what produces an ideal-l1tlb gain:
+        # measured across 54 benchmarks, log(gain) correlates with L2 TLB
+        # MPKI at r=+0.81 but with working-set size at only r=+0.08. What
+        # matters is whether page-walk demand exceeds the GMMU's 16
+        # concurrent walks (~137.9 walks/us).
         if benchmark == 'altis_cfd':
             submit_file.write("-size=524288 ")
         if benchmark == 'atax':
@@ -446,11 +512,11 @@ for config in configs:
         if benchmark == 'rodinia_lavamd':
             submit_file.write("-num-boxes=8 -particles-per-box=8192 ")
         if benchmark == 'rodinia_lud':
-            submit_file.write("-size=3072 ")
+            submit_file.write("-size=6144 ")
         if benchmark == 'rodinia_pathfinder':
             submit_file.write("-rows=3072 -cols=6144 ")
         if benchmark == 'rodinia_srad':
-            submit_file.write("-size=3072 -iterations=3 ")
+            submit_file.write("-size=1536 -iterations=1 ")
         if benchmark == 'simpleconvolution':
             submit_file.write("-width=2048 -height=2048 -mask-size=7")
         if benchmark == 'spmv':
@@ -484,7 +550,23 @@ for config in configs:
         if benchmark == 'graphbig_betweennesscentr':
             submit_file.write("-dataset=" + GRAPHBIG_DATASET + " -num-roots=8 ")
         if benchmark == 'graphbig_bfs':
-            submit_file.write("-dataset=" + GRAPHBIG_DATASET + " ")
+            # Pre-edit code (commented per AGENTS.md convention):
+            # submit_file.write("-dataset=" + GRAPHBIG_DATASET + " ")
+            #
+            # sbin_claude: -model picks the traversal kernel. "frontier" is the
+            # GraphBIG topology-driven frontier model
+            # (gpu_bench/gpu_BFS/bfs_topo_frontier.cu, Harish HiPC 2007): one
+            # vertex per thread, two kernels per level, no atomics. It replaces
+            # the warp-centric kernel, where one warp cooperatively walked a
+            # single adjacency list -- every edge read coalesced, each level
+            # degenerated into a sequential scan, and ideal-l1tlb measured
+            # 0.95x with 0.17 L2 TLB MPKI. "warp-centric" still selects the old
+            # kernel if the previous numbers need reproducing. frontier is also
+            # the benchmark's default, but it is passed explicitly so the
+            # generated runner records which model produced a result.
+            submit_file.write("-dataset=" + GRAPHBIG_DATASET  # sbin_claude
+                              + " -root=" + str(GRAPHBIG_ROOT)
+                              + " -model=frontier ")
         if benchmark == 'graphbig_connectedcomp':
             submit_file.write("-dataset=" + GRAPHBIG_DATASET + " ")
         if benchmark == 'graphbig_degreecentr':
@@ -494,7 +576,10 @@ for config in configs:
         if benchmark == 'graphbig_kcore':
             submit_file.write("-dataset=" + GRAPHBIG_DATASET + " -kcore=3 ")
         if benchmark == 'graphbig_sssp':
-            submit_file.write("-dataset=" + GRAPHBIG_DATASET + " ")
+            # Pre-edit code (commented per AGENTS.md convention):
+            # submit_file.write("-dataset=" + GRAPHBIG_DATASET + " ")
+            submit_file.write("-dataset=" + GRAPHBIG_DATASET  # sbin_claude
+                              + " -root=" + str(GRAPHBIG_ROOT) + " ")
         if benchmark == 'graphbig_trianglecount':
             submit_file.write("-dataset=" + GRAPHBIG_DATASET + " ")
         if benchmark == 'nw':

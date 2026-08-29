@@ -43,6 +43,14 @@ func (u *ALUImpl) runSOP2(state InstEmuState) {
 		u.runSXORB64(state)
 	case 19:
 		u.runSANDN2B64(state)
+	// sbin_claude: s_orn2_b64. clang emits this for the EXEC-mask merge at the
+	// tail of a divergent loop whose trip count varies per lane -- exactly the
+	// shape of a thread-centric graph traversal, where each lane walks its own
+	// adjacency list. Without it the GraphBIG BFS frontier kernel panics on
+	// "Opcode 21 for SOP2 format is not implemented". Mirrors runSANDN2B64
+	// (opcode 19), which was already here.
+	case 21:
+		u.runSORN2B64(state)
 	case 28:
 		u.runSLSHLB32(state)
 	case 29:
@@ -295,6 +303,22 @@ func (u *ALUImpl) runSANDN2B64(state InstEmuState) {
 	src1 := state.ReadOperand(inst.Src1, 0)
 
 	dst := src0 &^ src1
+	state.WriteOperand(inst.Dst, 0, dst)
+	if dst != 0 {
+		state.SetSCC(1)
+	} else {
+		state.SetSCC(0)
+	}
+}
+
+// runSORN2B64 computes src0 | ~src1 over 64 bits and sets SCC from the
+// result, matching the GCN3 ISA definition of s_orn2_b64. // sbin_claude
+func (u *ALUImpl) runSORN2B64(state InstEmuState) {
+	inst := state.Inst()
+	src0 := state.ReadOperand(inst.Src0, 0)
+	src1 := state.ReadOperand(inst.Src1, 0)
+
+	dst := src0 | ^src1
 	state.WriteOperand(inst.Dst, 0, dst)
 	if dst != 0 {
 		state.SetSCC(1)
