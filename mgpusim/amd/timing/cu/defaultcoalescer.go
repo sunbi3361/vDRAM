@@ -22,7 +22,33 @@ func (c defaultCoalescer) generateMemTransactions(
 		reqs := c.generateWriteReqs(wf)
 		transactions = c.generateWriteTransactions(wf, reqs)
 	}
+
+	// sbin_claude_avatar: stamp the producing instruction's PC on every
+	// request so Avatar's PC-indexed MOD can be probed and trained down at
+	// the ASU (refs/avatar.md 5.2, 5.3). Done as a post-pass, mirroring
+	// latpcCoalescer.annotate, so the per-lane coalescing helpers stay
+	// unchanged; latpcCoalescer wraps this coalescer and inherits it.
+	c.stampInstPC(wf, transactions)
+
 	return transactions
+}
+
+// stampInstPC records the PC of the memory instruction that produced these
+// requests. // sbin_claude_avatar
+func (c defaultCoalescer) stampInstPC(
+	wf *wavefront.Wavefront,
+	transactions []VectorMemAccessInfo,
+) {
+	pc := wf.Inst().PC
+
+	for _, t := range transactions {
+		if t.Read != nil {
+			t.Read.InstPC = pc
+			continue
+		}
+
+		t.Write.InstPC = pc
+	}
 }
 
 func (c defaultCoalescer) mustBeAFlatLoadOrStore(

@@ -3,15 +3,34 @@ package asu
 
 import (
 	"github.com/sarchlab/akita/v4/mem/vm"
-	"github.com/sarchlab/mgpusim/v4/amd/timing/avatar/meta"
+	// sbin_claude_avatar: the meta import is gone with the 2MB-region key.
+	// "github.com/sarchlab/mgpusim/v4/amd/timing/avatar/meta"
 )
 
-// modKey identifies one 2MB virtual region of one process. The paper's MOD
-// is PC-indexed; the translation path carries no PC, so the table is indexed
-// by the contiguity region the PC proxy stands for (avatar-plan.md 1.2).
+// modKey identifies one memory instruction of one process.
+//
+// Pre-edit code (commented per project convention): the table used to be
+// indexed by the 2MB contiguity region, because vm.TranslationReq carried no
+// PC (avatar-plan.md 1.2).
+//
+//	type modKey struct {
+//		pid     vm.PID
+//		vRegion uint64
+//	}
+//
+// sbin_claude_avatar: that proxy keyed the MOD on the same 2MB granularity
+// the fragmentation allocator places memory at (meta.Log2RegionSize is
+// shared by both), so V2POffset was constant across every entry's whole
+// reach and the table could not mispredict by construction - the confidence
+// counter of refs/avatar.md 5.2 could never fire. The PC now rides the
+// access down from the CU, so the key is the paper's: "A new PC creates a
+// new MOD entry" (refs/avatar.md 5.2), probed "using the memory instruction
+// PC" (5.3). One streaming load walks many regions, so its stored offset is
+// now genuinely wrong at every region boundary, which is exactly the
+// pressure the confidence counter exists to absorb.
 type modKey struct {
-	pid     vm.PID
-	vRegion uint64
+	pid vm.PID
+	pc  uint64
 }
 
 // modEntry is one Mapping Offset Detection record (refs/avatar.md 5.2).
@@ -47,8 +66,19 @@ func newModTable(numEntries, threshold int) *modTable {
 	return t
 }
 
-func modKeyOf(pid vm.PID, vAddr uint64) modKey {
-	return modKey{pid: pid, vRegion: vAddr >> meta.Log2RegionSize}
+// Pre-edit code (commented per project convention):
+//
+//	func modKeyOf(pid vm.PID, vAddr uint64) modKey {
+//		return modKey{pid: pid, vRegion: vAddr >> meta.Log2RegionSize}
+//	}
+//
+// sbin_claude_avatar: keyed by the instruction PC instead. A zero PC means
+// the producer had none to offer (instruction/scalar fetch, page-walk
+// traffic); those all collapse onto one entry, which is harmless because
+// they are a rounding error of the L1 TLB miss stream and the caller counts
+// them separately.
+func modKeyOf(pid vm.PID, pc uint64) modKey {
+	return modKey{pid: pid, pc: pc}
 }
 
 func (t *modTable) find(key modKey) int {
@@ -76,8 +106,13 @@ func (t *modTable) visit(idx int) {
 
 // predict returns the stored V2POffset when the entry is confident enough
 // to speculate (refs/avatar.md 5.3: confidence threshold 2).
-func (t *modTable) predict(pid vm.PID, vAddr uint64) (offset int64, ok bool) {
-	idx := t.find(modKeyOf(pid, vAddr))
+//
+// Pre-edit signature (commented per project convention):
+// func (t *modTable) predict(pid vm.PID, vAddr uint64) (offset int64, ok bool)
+//
+// sbin_claude_avatar: probed by PC, not by the address being translated.
+func (t *modTable) predict(pid vm.PID, pc uint64) (offset int64, ok bool) {
+	idx := t.find(modKeyOf(pid, pc))
 	if idx < 0 {
 		return 0, false
 	}
@@ -94,8 +129,13 @@ func (t *modTable) predict(pid vm.PID, vAddr uint64) (offset int64, ok bool) {
 // train updates the MOD with a completed real translation (refs/avatar.md
 // 5.2): +1 on a matching offset, -2 on a mismatch; the stored offset is
 // replaced only when the confidence reaches zero.
-func (t *modTable) train(pid vm.PID, vAddr uint64, offset int64) {
-	key := modKeyOf(pid, vAddr)
+//
+// Pre-edit signature (commented per project convention):
+// func (t *modTable) train(pid vm.PID, vAddr uint64, offset int64)
+//
+// sbin_claude_avatar: trained per PC, not per address region.
+func (t *modTable) train(pid vm.PID, pc uint64, offset int64) {
+	key := modKeyOf(pid, pc)
 	idx := t.find(key)
 
 	if idx < 0 {

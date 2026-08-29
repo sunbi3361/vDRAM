@@ -165,6 +165,33 @@ var _ = Describe("Address Translator", func() {
 				Expect(transReqReturn.GroupIndex).To(Equal(2))
 			})
 
+		// sbin_claude_avatar: Avatar's MOD is PC-indexed (refs/avatar.md
+		// 5.2), so the producing instruction's PC has to survive the hop
+		// from the access request onto the TranslationReq. Losing it here
+		// costs Avatar every speculation without any other visible symptom.
+		It("should carry the instruction PC onto the translation request",
+			func() {
+				var transReqReturn *vm.TranslationReq
+
+				req.InstPC = 0xdead000
+
+				translationPortMapper.EXPECT().
+					Find(uint64(0x100)).
+					Return(translationPort.AsRemote())
+				topPort.EXPECT().PeekIncoming().Return(req)
+				topPort.EXPECT().RetrieveIncoming()
+				translationPort.EXPECT().Send(gomock.Any()).
+					DoAndReturn(func(r *vm.TranslationReq) *sim.SendError {
+						transReqReturn = r
+						return nil
+					})
+
+				needTick := tMiddleware.translate()
+
+				Expect(needTick).To(BeTrue())
+				Expect(transReqReturn.InstPC).To(Equal(uint64(0xdead000)))
+			})
+
 		It("forwards PID zero physical instruction traffic when configured", func() {
 			physicalReq := mem.ReadReqBuilder{}.
 				WithAddress(0x100005040).

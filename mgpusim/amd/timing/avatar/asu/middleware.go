@@ -371,8 +371,22 @@ func (m *middleware) trainMOD(trans *transaction, page vm.Page) {
 		return
 	}
 
+	// sbin_claude_avatar v4: a miss with no PC has no MOD entry to train;
+	// letting it through would collapse every PC-less producer onto one
+	// entry and thrash its offset for no benefit, since predict refuses to
+	// speculate on a zero PC anyway.
+	if trans.req.InstPC == 0 {
+		return
+	}
+
 	offset := int64(page.PAddr) - int64(page.VAddr)
-	m.modOf(trans.req.Src).train(trans.req.PID, trans.req.VAddr, offset)
+	// Pre-edit code (commented per project convention): the MOD was trained
+	// by the translated address, which selected the 2MB-region entry.
+	// m.modOf(trans.req.Src).train(trans.req.PID, trans.req.VAddr, offset)
+	//
+	// sbin_claude_avatar: trained by the PC of the instruction that needed
+	// the translation (refs/avatar.md 5.2).
+	m.modOf(trans.req.Src).train(trans.req.PID, trans.req.InstPC, offset)
 }
 
 // parseFromTop admits L1 TLB misses, up to numReqPerCycle per tick.
@@ -425,7 +439,23 @@ func (m *middleware) parseOneFromTop() bool {
 	// sbin_claude_avatar v2: the speculative access is a real sector fetch;
 	// a prediction outside the GPU DRAM range is dropped before it can leak
 	// onto the remote-access route.
-	offset, confident := m.modOf(req.Src).predict(req.PID, req.VAddr)
+	//
+	// sbin_claude_avatar v4: the MOD is probed by the requesting
+	// instruction's PC (refs/avatar.md 5.3), not by the address. A request
+	// that reached the L1 TLB without a PC - instruction and scalar fetch,
+	// page-walk traffic - has nothing to index the MOD with, so it takes
+	// the conventional path unspeculated instead of aliasing onto the PC-0
+	// entry of an unrelated instruction.
+	var offset int64
+
+	confident := false
+
+	if req.InstPC == 0 {
+		m.stats.SpecNoPC++
+	} else {
+		offset, confident = m.modOf(req.Src).predict(req.PID, req.InstPC)
+	}
+
 	if confident {
 		specPAddr := uint64(int64(req.VAddr) + offset)
 		if specPAddr < m.memLow || specPAddr >= m.memHigh {

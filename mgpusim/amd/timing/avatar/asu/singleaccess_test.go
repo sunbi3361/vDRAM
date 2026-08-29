@@ -36,17 +36,22 @@ func TestSpeculationWaitsOnlyForDecompressAndCompare(t *testing.T) {
 
 	pid, vAddr := vm.PID(1), uint64(0x2000)
 	offset := int64(testFrameBase) - int64(vAddr)
+	// sbin_claude_avatar v4: the MOD is keyed by the instruction PC, so the
+	// two training translations have to come from the same instruction.
+	pc := uint64(0x1200)
 
 	// Two matching translations take the MOD to the confidence threshold.
 	mod := m.modOf("L1TLB")
-	mod.train(pid, vAddr, offset)
-	mod.train(pid, vAddr+0x1000, offset)
+	mod.train(pid, pc, offset)
+	mod.train(pid, pc, offset)
 
 	req := vm.TranslationReqBuilder{}.
-		WithSrc("L1TLB").WithVAddr(vAddr).WithPID(pid).Build()
+		WithSrc("L1TLB").WithVAddr(vAddr).WithPID(pid).
+		WithInstPC(pc). // sbin_claude_avatar v4
+		Build()
 	trans := transaction{req: req}
 
-	predicted, confident := mod.predict(pid, vAddr)
+	predicted, confident := mod.predict(pid, pc)
 	if !confident {
 		t.Fatal("two matching translations must reach the threshold")
 	}

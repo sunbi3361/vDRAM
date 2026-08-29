@@ -173,6 +173,9 @@ AVATAR_WHATS = (
     "avatar_forward_suppressed_count", "avatar_orphan_rsp_count",
     "avatar_frame_install_count", "avatar_frame_invalidate_count",
     "avatar_region_bound_count", "avatar_region_free_count",
+    # sbin_claude_avatar v4: the MOD is PC-indexed now, so misses that reach
+    # the ASU without a PC cannot be speculated on. Should stay near zero.
+    "avatar_spec_no_pc_count",
 )
 # sbin_claude_hpt: hashed-page-table walk counters emitted per GMMU by the
 # runner's reportHPT (report.go). Present only in -gpu=hpt runs.

@@ -144,6 +144,11 @@ func (u *ScalarUnit) executeSMEMLoad(byteSize int) bool {
 			WithAddress(curr).
 			WithPID(u.toExec.PID()).
 			WithByteSize(bytesLeftInCacheline).
+			// sbin_claude_avatar: refs/avatar.md 12 asks the CU LD/ST
+			// pipeline to preserve the PC, and the scalar path reaches the
+			// same ASU the vector path does. Stamping it here leaves
+			// instruction fetch as the only PC-less producer.
+			WithInstPC(rawInst.PC).
 			Build()
 		if bytesLeft > 0 {
 			req.CanWaitForCoalesce = true

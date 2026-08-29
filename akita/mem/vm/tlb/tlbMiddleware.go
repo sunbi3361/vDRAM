@@ -709,6 +709,13 @@ func (m *tlbMiddleware) fetchBottom(
 		// sbin_claude_latpc: propagate the LATPC group triple so the L2 TLB
 		// and the GMMU can batch same-group walks.
 		WithGroup(req.GroupID, req.GroupStride, req.GroupIndex).
+		// sbin_claude_avatar: the ASU sits below this TLB, so the PC that
+		// Avatar's MOD is indexed by only reaches it on the miss this call
+		// forwards. req is the request that opened the MSHR entry, which is
+		// the miss the paper's MOD probe is attached to (refs/avatar.md 5.3
+		// probes on an L1 TLB miss); later requests coalesced onto the same
+		// entry never reach the ASU and so never probe or train.
+		WithInstPC(req.InstPC).
 		Build()
 
 	err := m.bottomPort.Send(fetchBottom)

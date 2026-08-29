@@ -60,6 +60,12 @@ type Stats struct {
 	WalkCancelsSent    uint64 // EAF cancels sent to the L2 TLB
 	ForwardsSuppressed uint64 // EAF beat the forward; no walk ever existed
 	OrphanRsps         uint64 // responses whose transaction already closed
+
+	// sbin_claude_avatar v4: the MOD is PC-indexed, so a miss that arrived
+	// without a PC cannot be speculated on at all. Counting them keeps the
+	// PC plumbing honest: a large SpecNoPC means the PC is being dropped
+	// somewhere between the CU and the ASU, not that the workload is odd.
+	SpecNoPC uint64 // L1 miss carried no instruction PC
 }
 
 // transaction tracks one in-flight L1 TLB miss. The forward leg and the

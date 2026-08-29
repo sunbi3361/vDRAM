@@ -143,6 +143,7 @@ func (m *middleware) translate() bool {
 		WithDeviceID(m.deviceID).
 		WithIsWrite(isWrite).
 		WithGroupHint(translationHintOf(req)). // sbin_claude_latpc
+		WithInstPC(instPCOf(req)).             // sbin_claude_avatar
 		Build()
 
 	err := m.translationPort.Send(transReq)
@@ -182,6 +183,21 @@ func translationHintOf(req mem.AccessReq) *vm.TranslationGroupHint {
 	}
 }
 
+// instPCOf extracts the producing instruction's PC from an access request,
+// for Avatar's PC-indexed MOD. Producers that carry no PC (instruction and
+// scalar fetch, page-walk traffic) yield zero, and the built TranslationReq
+// keeps a zero InstPC. // sbin_claude_avatar
+func instPCOf(req mem.AccessReq) uint64 {
+	switch r := req.(type) {
+	case *mem.ReadReq:
+		return r.InstPC
+	case *mem.WriteReq:
+		return r.InstPC
+	default:
+		return 0
+	}
+}
+
 // retranslate re-issues the translation of a request that must not use its
 // previous mapping. // sbin_codex
 func (m *middleware) retranslate(req mem.AccessReq) bool {
@@ -194,6 +210,7 @@ func (m *middleware) retranslate(req mem.AccessReq) bool {
 		WithDeviceID(m.deviceID).
 		WithIsWrite(isWrite).
 		WithGroupHint(translationHintOf(req)). // sbin_claude_latpc
+		WithInstPC(instPCOf(req)).             // sbin_claude_avatar
 		Build()
 
 	if err := m.translationPort.Send(transReq); err != nil {

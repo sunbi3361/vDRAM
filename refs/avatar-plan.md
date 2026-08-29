@@ -358,3 +358,110 @@ port and retries.
   no Validation plug; WithMemoryRange.
 - mgpusim/amd/samples/runner/report.go, scripts/5_collect_metrics.py: the
   three fetch counters removed.
+
+---
+
+## 7. v4 Correction (2026-08-30): the MOD is PC-indexed
+
+### 7.1 What was wrong
+
+`refs/avatar.md` 5.2 is explicit - "CAST uses a **PC-indexed** Mapping Offset
+Detection table", "`InstructionPC / V2POffset / ConfidenceCounter / Valid /
+ReplacementState`", "A new PC creates a new MOD entry" - and 5.3 probes it
+"using the memory instruction PC". Section 12's hardware table lists
+`CU LD/ST pipeline | Preserve PC and speculative request state`, so carrying
+the PC down to the speculation unit is itself a requirement, not an optional
+convenience.
+
+v1-v3 keyed the MOD by `vAddr >> meta.Log2RegionSize` instead, on the
+grounds that `vm.TranslationReq` carried no PC (plan 1.2). That was worse
+than a documented approximation. `meta.Log2RegionSize` is the *same*
+constant the fragmentation allocator places physical memory at, so a MOD
+entry's reach and the granularity that decides V2POffset were identical by
+construction: the stored offset was correct across the whole entry, the
+`confidence -= 2` branch and the offset-replacement branch were unreachable,
+and `avatar_cava_mismatch_count` was structurally pinned at 0. The
+confidence counter the paper specifies could never do its job, and
+`-avatar-frag` could not move MOD accuracy at all.
+
+### 7.2 What v4 does
+
+The PC now rides the access from the CU to the ASU, following the route
+LATPC's `TranslationHint` already proved:
+
+```
+scheduler.go        inst.PC = wf.PC() at decode (insts.Inst.PC was only ever
+                    filled by the disassembler's print path, so every timing
+                    instruction carried PC 0)
+defaultcoalescer.go stampInstPC post-pass -> mem.ReadReq/WriteReq.InstPC
+                    (latpcCoalescer wraps this coalescer and inherits it)
+rob.go              duplicateReadReq/duplicateWriteReq carry InstPC
+addresstranslator   instPCOf(req) -> vm.TranslationReq.InstPC
+tlbMiddleware       fetchBottom carries req.InstPC, so the miss that opened
+                    the MSHR entry is the one that probes and trains - the
+                    coalesced followers never reach the ASU, matching 5.3's
+                    "on an L1 TLB miss"
+asu/mod.go          modKey{pid, pc}; predict/train take a PC
+```
+
+A miss that arrives with no PC (instruction and scalar fetch, page-walk
+traffic) is not speculated on and does not train, so it cannot alias onto an
+unrelated instruction's entry. `Stats.SpecNoPC` counts them; it is the
+canary for the plumbing silently breaking, since a dropped PC would leave
+the ASU running but never speculating.
+
+### 7.3 Effect
+
+Two measurements, both atax on one GPU, WG 128.
+
+**The MOD now mispredicts, and the confidence counter responds.** With
+`-x=2048 -y=2080` (a stride that does not alias onto one L2 slice - see the
+stride note below) and `-avatar-frag=true`:
+
+| counter | region key | PC key |
+| --- | --- | --- |
+| speculations | 4,429,397 | 4,414,769 |
+| cava_pass | 3,561,894 | 3,168,737 |
+| **cava_no_metadata (mis-speculation)** | **0** | **383,215** |
+| early completions | 3,561,894 | 3,168,737 |
+| GMMU walks | 1,357 | 3,839 |
+| kernel_time | 855.74us | 900.24us (+5.2%) |
+
+8.7% of speculations are now wrong, early completions drop 11%, walks
+triple, and avatar costs 5.2% more time. That is the price of fragmentation
+the region key was structurally unable to charge: `-avatar-frag` finally
+moves MOD accuracy. Against the same baseline (22,478us) avatar goes from
+26.3x to 25.0x, next to ideal-l1tlb's 29.2x.
+
+`cava_mismatch` stays 0 while `cava_no_metadata` carries all of it: a wrong
+V2POffset lands on an *unallocated* frame far more often than on a frame
+holding some other page, and `meta.Registry.Validate` reports that as
+`VerdictNoMetadata`. Both verdicts refuse the speculation and fall back to
+the conventional translation, which is what 5.6 Case B requires.
+
+**Without fragmentation the two keys agree**, as they must - the bump
+allocator makes PPN-VPN globally constant, so no key can be wrong. Same
+size, `-avatar-frag=false`: 855.89us vs 854.90us, -0.12%, with speculations
+within 0.03% and mismatch/no-metadata both 0.
+
+A caution for anyone re-measuring on a power-of-two matrix: at
+`-x=2048 -y=2048` the same frag=false comparison reads +7.2% (2451.7us vs
+2629.0us) even though the avatar counters are within 0.03% and GMMU walks
+*fall* 28%. All of it is L2 read-miss (+65k). That size makes every
+concurrently-active row alias onto one L2 slice and 32 sets, so a 0.03%
+scheduling perturbation amplifies into a 7% runtime swing. Measure MOD
+changes on a non-power-of-two stride.
+
+### 7.4 Files
+
+- akita/mem/mem/protocol.go: ReadReq/WriteReq gain InstPC (+ WithInstPC).
+- akita/mem/vm/protocol.go: TranslationReq gains InstPC (+ WithInstPC).
+- akita/mem/vm/addresstranslator/addresstranslator.go: instPCOf.
+- akita/mem/vm/tlb/tlbMiddleware.go: fetchBottom carries InstPC.
+- mgpusim/amd/timing/cu/scheduler.go: inst.PC stamped at decode.
+- mgpusim/amd/timing/cu/defaultcoalescer.go: stampInstPC.
+- mgpusim/amd/timing/rob/rob.go: InstPC carried through the duplicates.
+- mgpusim/amd/timing/avatar/asu/{mod.go,middleware.go,asu.go}: PC key,
+  PC-less misses excluded, Stats.SpecNoPC.
+- mgpusim/amd/samples/runner/report.go, scripts/5_collect_metrics.py:
+  avatar_spec_no_pc_count.

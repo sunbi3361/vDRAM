@@ -16,6 +16,13 @@ import (
 	avatarmeta "github.com/sarchlab/mgpusim/v4/amd/timing/avatar/meta"
 )
 
+// avatarTestInstPC stands in for the PC of the one streaming load these
+// specs model. The MOD is PC-indexed (refs/avatar.md 5.2), so the training
+// misses and the burst they train for have to name the same instruction -
+// the way one static load's 64 lanes do in a real CU.
+// sbin_claude_avatar v4
+const avatarTestInstPC = 0x1000
+
 // avatarBurstAgent stands in for the L1 TLB bottom ports and can keep many
 // translations in flight at once. Speculation only wins the race when the
 // GMMU walkers are saturated - exactly the regime the real benchmarks run
@@ -137,6 +144,7 @@ var _ = Describe("Avatar speculation topology", func() {
 			WithVAddr(vAddr).
 			WithPID(ctx.PID()).
 			WithDeviceID(1).
+			WithInstPC(avatarTestInstPC). // sbin_claude_avatar v4
 			Build()
 		agent.received = nil
 		agent.pending = req
@@ -208,6 +216,7 @@ var _ = Describe("Avatar speculation topology", func() {
 					WithVAddr(vAddr).
 					WithPID(ctx.PID()).
 					WithDeviceID(1).
+					WithInstPC(avatarTestInstPC). // sbin_claude_avatar v4
 					Build()
 				burst.pending = append(burst.pending, req)
 				reqIDs = append(reqIDs, req.ID)
@@ -276,6 +285,7 @@ var _ = Describe("Avatar with incompressible memory", func() {
 					WithVAddr(vAddr).
 					WithPID(ctx.PID()).
 					WithDeviceID(1).
+					WithInstPC(avatarTestInstPC). // sbin_claude_avatar v4
 					Build()
 				burst.pending = append(burst.pending, req)
 				reqIDs = append(reqIDs, req.ID)

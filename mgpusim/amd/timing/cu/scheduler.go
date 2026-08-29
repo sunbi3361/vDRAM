@@ -124,6 +124,15 @@ func (s *SchedulerImpl) DecodeNextInst() bool {
 			inst, err := s.cu.Decoder.Decode(
 				wf.InstBuffer[wf.PC()-wf.InstBufferStartPC:])
 			if err == nil {
+				// sbin_claude_avatar: only the disassembler's print path
+				// used to fill insts.Inst.PC, so in timing simulation every
+				// decoded instruction carried PC 0. Avatar's MOD is
+				// PC-indexed (refs/avatar.md 5.2) and refs/avatar.md 12
+				// requires the CU LD/ST pipeline to preserve the PC, so
+				// stamp it here, where wf.PC() still addresses the
+				// instruction being decoded (it advances only later, in
+				// ComputeUnit.UpdatePCAndSetReady).
+				inst.PC = wf.PC()
 				wf.InstToIssue = wavefront.NewInst(inst)
 				// s.cu.logInstTask(now, wf, wf.InstToIssue, false)
 				madeProgress = true

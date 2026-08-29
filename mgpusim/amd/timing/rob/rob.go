@@ -292,6 +292,7 @@ func (b *ReorderBuffer) duplicateReadReq(req *mem.ReadReq) *mem.ReadReq {
 		WithPID(req.PID).
 		WithDst(b.BottomUnit).
 		WithTranslationHint(req.TranslationHint). // sbin_claude_latpc
+		WithInstPC(req.InstPC).                   // sbin_claude_avatar
 		Build()
 }
 
@@ -313,6 +314,7 @@ func (b *ReorderBuffer) duplicateWriteReq(req *mem.WriteReq) *mem.WriteReq {
 		WithDirtyMask(req.DirtyMask).
 		WithDst(b.BottomUnit).
 		WithTranslationHint(req.TranslationHint). // sbin_claude_latpc
+		WithInstPC(req.InstPC).                   // sbin_claude_avatar
 		Build()
 }
 

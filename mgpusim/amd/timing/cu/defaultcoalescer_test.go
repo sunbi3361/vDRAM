@@ -57,7 +57,7 @@ var _ = Describe("Default Coalescer", func() {
 		for i := 0; i < 64; i++ {
 			addrReg := insts.VReg(2)
 			regAccessor.setRegValue(addrReg, 2, i, wf.VRegOffset,
-				insts.Uint64ToBytes(uint64(0x1000+i*4))[:8])
+				insts.Uint64ToBytes(uint64(0x1000 + i*4))[:8])
 		}
 
 		memTransactions := c.generateMemTransactions(wf)
@@ -81,7 +81,7 @@ var _ = Describe("Default Coalescer", func() {
 		for i := 0; i < 64; i++ {
 			addrReg := insts.VReg(4)
 			regAccessor.setRegValue(addrReg, 2, i, wf.VRegOffset,
-				insts.Uint64ToBytes(uint64(0x1004+i*4))[:8])
+				insts.Uint64ToBytes(uint64(0x1004 + i*4))[:8])
 		}
 
 		memTransactions := c.generateMemTransactions(wf)
@@ -106,7 +106,7 @@ var _ = Describe("Default Coalescer", func() {
 		for i := 0; i < 64; i++ {
 			addrReg := insts.VReg(2)
 			regAccessor.setRegValue(addrReg, 2, i, wf.VRegOffset,
-				insts.Uint64ToBytes(uint64(0x1000+i*4))[:8])
+				insts.Uint64ToBytes(uint64(0x1000 + i*4))[:8])
 
 			dataReg := insts.VReg(4)
 			regAccessor.setRegValue(dataReg, 1, i, wf.VRegOffset,
@@ -116,5 +116,63 @@ var _ = Describe("Default Coalescer", func() {
 		memTransactions := c.generateMemTransactions(wf)
 
 		Expect(memTransactions).To(HaveLen(4))
+	})
+
+	// sbin_claude_avatar: Avatar's MOD is PC-indexed (refs/avatar.md 5.2),
+	// and this stamp is the only place the PC enters the memory path. If it
+	// silently stops happening the ASU still runs - it just never
+	// speculates - so the property needs its own test.
+	It("should stamp the instruction PC on every read request", func() {
+		inst := insts.NewInst()
+		inst.FormatType = insts.FLAT
+		inst.Opcode = 20 // flat_load_dword
+		inst.Dst = insts.NewVRegOperand(0, 0, 1)
+		inst.Addr = insts.NewVRegOperand(2, 2, 2)
+		inst.PC = 0xdead000
+		wf.SetDynamicInst(wavefront.NewInst(inst))
+		wf.SetEXEC(0xffffffffffffffff)
+
+		for i := 0; i < 64; i++ {
+			addrReg := insts.VReg(2)
+			regAccessor.setRegValue(addrReg, 2, i, wf.VRegOffset,
+				insts.Uint64ToBytes(uint64(0x1000 + i*4))[:8])
+		}
+
+		memTransactions := c.generateMemTransactions(wf)
+
+		Expect(memTransactions).NotTo(BeEmpty())
+		for _, t := range memTransactions {
+			Expect(t.Read).NotTo(BeNil())
+			Expect(t.Read.InstPC).To(Equal(uint64(0xdead000)))
+		}
+	})
+
+	It("should stamp the instruction PC on every write request", func() {
+		inst := insts.NewInst()
+		inst.FormatType = insts.FLAT
+		inst.Opcode = 28 // flat_store_dword
+		inst.Addr = insts.NewVRegOperand(2, 2, 2)
+		inst.Data = insts.NewVRegOperand(4, 4, 1)
+		inst.PC = 0xbeef000
+		wf.SetDynamicInst(wavefront.NewInst(inst))
+		wf.SetEXEC(0xffffffffffffffff)
+
+		for i := 0; i < 64; i++ {
+			addrReg := insts.VReg(2)
+			regAccessor.setRegValue(addrReg, 2, i, wf.VRegOffset,
+				insts.Uint64ToBytes(uint64(0x1000 + i*4))[:8])
+
+			dataReg := insts.VReg(4)
+			regAccessor.setRegValue(dataReg, 1, i, wf.VRegOffset,
+				insts.Uint32ToBytes(1))
+		}
+
+		memTransactions := c.generateMemTransactions(wf)
+
+		Expect(memTransactions).NotTo(BeEmpty())
+		for _, t := range memTransactions {
+			Expect(t.Write).NotTo(BeNil())
+			Expect(t.Write.InstPC).To(Equal(uint64(0xbeef000)))
+		}
 	})
 })

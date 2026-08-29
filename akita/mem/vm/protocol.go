@@ -40,6 +40,15 @@ type TranslationReq struct {
 	GroupID     string
 	GroupStride int64
 	GroupIndex  int
+
+	// InstPC is the PC of the memory instruction whose access needs this
+	// translation. Avatar's MOD table is PC-indexed (refs/avatar.md 5.2:
+	// "A new PC creates a new MOD entry"; 5.3: "probe MOD using the memory
+	// instruction PC"), so the PC has to survive the whole way from the CU
+	// LD/ST pipeline down to the speculation unit. Zero means the producer
+	// has no PC to offer (instruction/scalar fetch, prefetch, page-walk
+	// traffic). // sbin_claude_avatar
+	InstPC uint64
 }
 
 // Meta returns the meta data associated with the message.
@@ -78,6 +87,7 @@ type TranslationReqBuilder struct {
 	groupID     string
 	groupStride int64
 	groupIndex  int
+	instPC      uint64 // sbin_claude_avatar
 }
 
 // WithSrc sets the source of the request to build.
@@ -138,6 +148,14 @@ func (b TranslationReqBuilder) WithGroupHint(
 	return b
 }
 
+// WithInstPC sets the PC of the memory instruction behind this translation,
+// for Avatar's PC-indexed MOD (refs/avatar.md 5.2). Zero is a no-op.
+// sbin_claude_avatar
+func (b TranslationReqBuilder) WithInstPC(pc uint64) TranslationReqBuilder {
+	b.instPC = pc
+	return b
+}
+
 // WithGroup sets the LATPC group triple field-by-field, for propagating the
 // triple of an existing TranslationReq downstream. // sbin_claude_latpc
 func (b TranslationReqBuilder) WithGroup(
@@ -166,6 +184,7 @@ func (b TranslationReqBuilder) Build() *TranslationReq {
 	r.GroupID = b.groupID
 	r.GroupStride = b.groupStride
 	r.GroupIndex = b.groupIndex
+	r.InstPC = b.instPC // sbin_claude_avatar
 	r.TrafficClass = reflect.TypeOf(TranslationReq{}).String()
 
 	return r

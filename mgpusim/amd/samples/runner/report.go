@@ -1030,6 +1030,8 @@ func (r *reporter) reportAvatar() {
 			{"avatar_forward_suppressed_count",
 				float64(stats.ForwardsSuppressed)},
 			{"avatar_orphan_rsp_count", float64(stats.OrphanRsps)},
+			// sbin_claude_avatar v4: PC-indexed MOD.
+			{"avatar_spec_no_pc_count", float64(stats.SpecNoPC)},
 			// {"avatar_stale_validation_rsp_count",
 			// 	float64(stats.StaleValidationRsps)}, // sbin_claude_avatar v3
 		}

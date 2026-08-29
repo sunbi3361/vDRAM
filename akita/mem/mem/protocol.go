@@ -51,6 +51,13 @@ type ReadReq struct {
 	// the translation this access needs; nil for every non-LATPC producer.
 	// sbin_claude_latpc
 	TranslationHint *vm.TranslationGroupHint
+	// InstPC is the program counter of the memory instruction that produced
+	// this access. Avatar's MOD table is PC-indexed (refs/avatar.md 5.2,
+	// 5.3), and refs/avatar.md 12 lists "preserve PC" as a CU LD/ST pipeline
+	// requirement, so the PC has to ride the access down to the translation
+	// path. Zero means "no PC available" (scalar/instruction fetch paths and
+	// every non-CU producer). // sbin_claude_avatar
+	InstPC uint64
 }
 
 // Meta returns the message meta.
@@ -103,6 +110,7 @@ type ReadReqBuilder struct {
 	info             interface{}
 	remoteDemandInfo *RemoteDemandInfo        // sbin_codex
 	translationHint  *vm.TranslationGroupHint // sbin_claude_latpc
+	instPC           uint64                   // sbin_claude_avatar
 }
 
 // WithSrc sets the source of the request to build.
@@ -144,6 +152,13 @@ func (b ReadReqBuilder) WithTranslationHint(
 	return b
 }
 
+// WithInstPC attaches the PC of the memory instruction that produced this
+// access, for Avatar's PC-indexed MOD. Zero is a no-op. // sbin_claude_avatar
+func (b ReadReqBuilder) WithInstPC(pc uint64) ReadReqBuilder {
+	b.instPC = pc
+	return b
+}
+
 // WithAddress sets the address of the request to build.
 func (b ReadReqBuilder) WithAddress(address uint64) ReadReqBuilder {
 	b.address = address
@@ -175,6 +190,7 @@ func (b ReadReqBuilder) Build() *ReadReq {
 	r.Info = b.info
 	r.RemoteDemandInfo = b.remoteDemandInfo // sbin_codex
 	r.TranslationHint = b.translationHint   // sbin_claude_latpc
+	r.InstPC = b.instPC                     // sbin_claude_avatar
 	r.AccessByteSize = b.byteSize
 	r.CanWaitForCoalesce = b.canWaitForCoalesce
 	r.TrafficClass = reflect.TypeOf(ReadReq{}).String()
@@ -198,6 +214,9 @@ type WriteReq struct {
 	// the translation this access needs; nil for every non-LATPC producer.
 	// sbin_claude_latpc
 	TranslationHint *vm.TranslationGroupHint
+	// InstPC is the PC of the memory instruction that produced this access;
+	// see ReadReq.InstPC. Zero means "no PC available". // sbin_claude_avatar
+	InstPC uint64
 }
 
 // Meta returns the meta data attached to a request.
@@ -247,6 +266,7 @@ type WriteReqBuilder struct {
 	info               interface{}
 	remoteDemandInfo   *RemoteDemandInfo        // sbin_codex
 	translationHint    *vm.TranslationGroupHint // sbin_claude_latpc
+	instPC             uint64                   // sbin_claude_avatar
 	address            uint64
 	data               []byte
 	dirtyMask          []bool
@@ -292,6 +312,13 @@ func (b WriteReqBuilder) WithTranslationHint(
 	return b
 }
 
+// WithInstPC attaches the PC of the memory instruction that produced this
+// access, for Avatar's PC-indexed MOD. Zero is a no-op. // sbin_claude_avatar
+func (b WriteReqBuilder) WithInstPC(pc uint64) WriteReqBuilder {
+	b.instPC = pc
+	return b
+}
+
 // WithAddress sets the address of the request to build.
 func (b WriteReqBuilder) WithAddress(address uint64) WriteReqBuilder {
 	b.address = address
@@ -327,6 +354,7 @@ func (b WriteReqBuilder) Build() *WriteReq {
 	r.Info = b.info
 	r.RemoteDemandInfo = b.remoteDemandInfo // sbin_codex
 	r.TranslationHint = b.translationHint   // sbin_claude_latpc
+	r.InstPC = b.instPC                     // sbin_claude_avatar
 	r.Address = b.address
 	r.Data = b.data
 	r.TrafficBytes = len(r.Data) + accessReqByteOverhead
